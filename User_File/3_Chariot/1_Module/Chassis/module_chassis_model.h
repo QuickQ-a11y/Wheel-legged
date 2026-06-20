@@ -1,0 +1,141 @@
+#ifndef MODULE_CHASSIS_MODEL_H
+#define MODULE_CHASSIS_MODEL_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "app_config.h"
+#include "algorithm_pid.h"
+
+#include <stdint.h>
+
+#define MODULE_CHASSIS_MODEL_PI 3.14159265358979323846f
+#define MODULE_CHASSIS_MODEL_HALF_PI 1.57079632679489661923f
+#define MODULE_CHASSIS_CONTROL_STATE_COUNT 10U
+#define MODULE_CHASSIS_CONTROL_OUTPUT_COUNT 4U
+
+typedef enum
+{
+    MODULE_CHASSIS_LEG_LEFT = 0,
+    MODULE_CHASSIS_LEG_RIGHT,
+    MODULE_CHASSIS_LEG_COUNT,
+} module_chassis_leg_side_t;
+
+typedef enum
+{
+    MODULE_CHASSIS_LEG_JOINT_FRONT = 0,
+    MODULE_CHASSIS_LEG_JOINT_BACK,
+    MODULE_CHASSIS_LEG_JOINT_COUNT,
+} module_chassis_leg_joint_t;
+
+typedef enum
+{
+    MODULE_CHASSIS_STATE_FORWARD_POSITION = 0,
+    MODULE_CHASSIS_STATE_FORWARD_VELOCITY,
+    MODULE_CHASSIS_STATE_YAW,
+    MODULE_CHASSIS_STATE_YAW_RATE,
+    MODULE_CHASSIS_STATE_LEFT_LEG_ANGLE,
+    MODULE_CHASSIS_STATE_LEFT_LEG_ANGLE_RATE,
+    MODULE_CHASSIS_STATE_RIGHT_LEG_ANGLE,
+    MODULE_CHASSIS_STATE_RIGHT_LEG_ANGLE_RATE,
+    MODULE_CHASSIS_STATE_BODY_PITCH,
+    MODULE_CHASSIS_STATE_BODY_PITCH_RATE,
+} module_chassis_control_state_index_t;
+
+typedef enum
+{
+    MODULE_CHASSIS_CONTROL_LEFT_WHEEL_TORQUE = 0,
+    MODULE_CHASSIS_CONTROL_RIGHT_WHEEL_TORQUE,
+    MODULE_CHASSIS_CONTROL_LEFT_LEG_TORQUE,
+    MODULE_CHASSIS_CONTROL_RIGHT_LEG_TORQUE,
+} module_chassis_control_output_index_t;
+
+typedef struct
+{
+    float link1LengthM;          /* 五连杆主动杆 1 长度，单位 m。 */
+    float link2LengthM;          /* 五连杆从动杆 2 长度，单位 m。 */
+    float link3LengthM;          /* 五连杆从动杆 3 长度，单位 m。 */
+    float link4LengthM;          /* 五连杆主动杆 4 长度，单位 m。 */
+    float frameJointDistanceM;   /* 左右固定铰点间距，单位 m。 */
+    float minLegLengthM;         /* 几何计算允许的最小虚拟腿长，单位 m。 */
+} module_chassis_leg_geometry_config_t;
+
+typedef struct
+{
+    uint8_t motorIndex;          /* 对应 module_chassis_input_t.dmMotors 的下标。 */
+    float angleOffsetRad;        /* 电机反馈角到几何角的零位偏置，单位 rad。 */
+    float angleScale;            /* 电机反馈角到几何角的方向系数。 */
+    float torqueScale;           /* 几何关节力矩到电机命令力矩的方向系数。 */
+} module_chassis_joint_map_t;
+
+typedef struct
+{
+    module_chassis_leg_geometry_config_t geometry;
+    module_chassis_joint_map_t joints[MODULE_CHASSIS_LEG_JOINT_COUNT];
+    float targetLegLengthM;      /* 当前固定腿长目标，单位 m。 */
+} module_chassis_leg_config_t;
+
+typedef struct
+{
+    uint8_t bodyPitchRateGyroIndex;  /* 机体俯仰角速度使用的 gyroRadps 下标。 */
+    uint8_t rollRateGyroIndex;       /* 横滚角速度使用的 gyroRadps 下标。 */
+    uint8_t yawRateGyroIndex;        /* 偏航角速度使用的 gyroRadps 下标。 */
+    float bodyPitchAngleScale;
+    float bodyPitchRateScale;
+    float rollAngleScale;
+    float rollRateScale;
+    float yawAngleScale;
+    float yawRateScale;
+} module_chassis_imu_map_config_t;
+
+typedef struct
+{
+    float radiusM;                /* 轮半径，单位 m。 */
+    float halfTrackM;             /* 轮距一半，单位 m，用于后续转向模型。 */
+    float leftVelocityScale;      /* 左轮 ESC rpm 到轮角速度后的方向系数。 */
+    float rightVelocityScale;     /* 右轮 ESC rpm 到轮角速度后的方向系数。 */
+    float torqueLimitNm;          /* 轮端力矩限幅，单位 N*m；小于等于 0 表示不允许输出。 */
+    float torqueToCurrentRaw;     /* 轮端力矩到 DJI 原始电流命令的换算系数。 */
+    int16_t currentLimitRaw;      /* DJI 原始电流命令限幅。 */
+} module_chassis_wheel_config_t;
+
+typedef struct
+{
+    uint8_t jointTorqueOutputEnabled;    /* 非零 DM 力矩输出调试开关。 */
+    uint8_t wheelCurrentOutputEnabled;   /* 非零 DJI 电流输出调试开关。 */
+    float jointTorqueLimitNm;            /* DM 髋关节力矩限幅，单位 N*m。 */
+} module_chassis_output_config_t;
+
+typedef struct
+{
+    module_chassis_leg_config_t legs[MODULE_CHASSIS_LEG_COUNT];
+    module_chassis_imu_map_config_t imu;
+    module_chassis_wheel_config_t wheel;
+    algorithm_pid_config_t legLengthPid;
+    algorithm_pid_config_t rollPid;
+    module_chassis_output_config_t output;
+    float legVerticalAngleOffsetRad;     /* 虚拟腿竖直参考角，单位 rad。 */
+    float targetRollRad;                 /* 目标横滚角，单位 rad。 */
+    float baseSupportForceN;             /* 基础虚拟支撑力，单位 N。 */
+    float leftSupportForceFeedforwardN;  /* 左腿支撑力前馈，单位 N。 */
+    float rightSupportForceFeedforwardN; /* 右腿支撑力前馈，单位 N。 */
+    float defaultDtSec;
+    float minDtSec;
+    float maxDtSec;
+    float targetState[MODULE_CHASSIS_CONTROL_STATE_COUNT];
+    float motionGain[MODULE_CHASSIS_CONTROL_OUTPUT_COUNT][MODULE_CHASSIS_CONTROL_STATE_COUNT];
+} module_chassis_model_config_t;
+
+/**
+ * @brief 获取当前轮腿机器人模型的默认控制参数。
+ *
+ * 机械结构只按当前五连杆轮腿实现，后续改尺寸时应集中修改该配置。
+ */
+const module_chassis_model_config_t *Module_Chassis_Model_GetDefaultConfig(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
