@@ -56,11 +56,7 @@ typedef struct
 
 typedef struct
 {
-    float positionRad;           /* DM MIT 位置目标，当前安全框架固定为 0。 */
-    float velocityRadps;         /* DM MIT 速度目标，当前安全框架固定为 0。 */
-    float kp;                    /* DM MIT 位置增益，安全输出为 0。 */
-    float kd;                    /* DM MIT 速度增益，安全输出为 0。 */
-    float torqueNm;              /* DM MIT 前馈力矩，安全输出为 0。 */
+    float torqueNm;              /* DM MIT 力矩通道命令，安全输出为 0，单位 N*m。 */
 } module_chassis_dm_command_t;
 
 typedef struct

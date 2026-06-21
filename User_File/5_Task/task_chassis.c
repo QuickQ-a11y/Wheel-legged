@@ -133,10 +133,6 @@ static void Chassis_Task_ApplyOutput(const module_chassis_output_t *chassisOutpu
     for (index = 0U; index < MOTOR_DM_COUNT; index++)
     {
         motor_dm_command_t command = {
-            .positionRad = chassisOutput->dmCommands[index].positionRad,
-            .velocityRadps = chassisOutput->dmCommands[index].velocityRadps,
-            .kp = chassisOutput->dmCommands[index].kp,
-            .kd = chassisOutput->dmCommands[index].kd,
             .torqueNm = chassisOutput->dmCommands[index].torqueNm,
         };
 

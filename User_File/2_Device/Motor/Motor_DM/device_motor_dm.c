@@ -9,10 +9,6 @@
 #define MOTOR_DM_POSITION_MAX_RAD 12.5f
 #define MOTOR_DM_VELOCITY_MIN_RADPS (-45.0f)
 #define MOTOR_DM_VELOCITY_MAX_RADPS 45.0f
-#define MOTOR_DM_KP_MIN 0.0f
-#define MOTOR_DM_KP_MAX 500.0f
-#define MOTOR_DM_KD_MIN 0.0f
-#define MOTOR_DM_KD_MAX 5.0f
 #define MOTOR_DM_TORQUE_MIN_NM (-40.0f)
 #define MOTOR_DM_TORQUE_MAX_NM 40.0f
 
@@ -20,7 +16,7 @@ typedef struct
 {
     motor_dm_config_t config;    /* 固定硬件映射。 */
     motor_dm_state_t state;      /* 最近一次反馈状态。 */
-    motor_dm_command_t command;  /* 待发送 MIT 命令。 */
+    motor_dm_command_t command;  /* 待发送 MIT 力矩命令。 */
 } motor_dm_object_t;
 
 static motor_dm_object_t dmMotors[MOTOR_DM_COUNT];
@@ -288,31 +284,16 @@ void Motor_DM_UpdateTxFrames(void)
         }
 
         /*
-         * DM MIT 控制帧位宽：
-         * position 16 bit，velocity/kp/kd/torque 各 12 bit。
+         * 关节电机采用 SPR 工程的 MIT 力矩发送方式：
+         * 前 6 字节直接置 0，最后 2 字节放 12 bit 力矩编码。
+         * 这表示当前固件只使用 DM MIT 的力矩通道，不在发送帧中下发位置、速度、KP、KD。
          */
-        uint16_t positionRaw = Motor_DM_FloatToUint(command.positionRad * direction,
-                                                    MOTOR_DM_POSITION_MIN_RAD,
-                                                    MOTOR_DM_POSITION_MAX_RAD,
-                                                    16U);
-        uint16_t velocityRaw = Motor_DM_FloatToUint(command.velocityRadps * direction,
-                                                    MOTOR_DM_VELOCITY_MIN_RADPS,
-                                                    MOTOR_DM_VELOCITY_MAX_RADPS,
-                                                    12U);
-        uint16_t kpRaw = Motor_DM_FloatToUint(command.kp, MOTOR_DM_KP_MIN, MOTOR_DM_KP_MAX, 12U);
-        uint16_t kdRaw = Motor_DM_FloatToUint(command.kd, MOTOR_DM_KD_MIN, MOTOR_DM_KD_MAX, 12U);
         uint16_t torqueRaw = Motor_DM_FloatToUint(command.torqueNm * direction,
                                                   MOTOR_DM_TORQUE_MIN_NM,
                                                   MOTOR_DM_TORQUE_MAX_NM,
                                                   12U);
 
-        data[0] = (uint8_t)(positionRaw >> 8U);
-        data[1] = (uint8_t)positionRaw;
-        data[2] = (uint8_t)(velocityRaw >> 4U);
-        data[3] = (uint8_t)(((velocityRaw & 0x0FU) << 4U) | (kpRaw >> 8U));
-        data[4] = (uint8_t)kpRaw;
-        data[5] = (uint8_t)(kdRaw >> 4U);
-        data[6] = (uint8_t)(((kdRaw & 0x0FU) << 4U) | (torqueRaw >> 8U));
+        data[6] = (uint8_t)(torqueRaw >> 8U);
         data[7] = (uint8_t)torqueRaw;
 
         (void)CAN_Task_UpdateTxFrame(handle, motor->config.txId, data, APP_CONFIG_DM_FRAME_LENGTH);

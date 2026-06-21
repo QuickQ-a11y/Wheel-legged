@@ -16,6 +16,12 @@ static uint8_t Module_Chassis_Leg_IsValidDenominator(float value)
     return (fabsf(value) > MODULE_CHASSIS_LEG_EPSILON) ? 1U : 0U;
 }
 
+/**
+ * @brief 根据前后主动杆角度计算五连杆几何状态。
+ *
+ * B、D 是两根主动杆末端点，C 是两根从动杆的交点。
+ * 求解失败说明当前关节角不满足五连杆闭链几何，控制器应进入安全输出。
+ */
 static app_status_t Module_Chassis_Leg_CalculateForwardGeometry(
     const module_chassis_leg_geometry_config_t *geometry,
     float phi1Rad,
@@ -40,6 +46,7 @@ static app_status_t Module_Chassis_Leg_CalculateForwardGeometry(
         return APP_STATUS_INVALID_PARAM;
     }
 
+    /* 先由两个主动杆角度确定 B、D 点，坐标原点取左右固定铰点中点。 */
     pointB->x = (-geometry->frameJointDistanceM * 0.5f) +
                 (geometry->link1LengthM * cosf(phi1Rad));
     pointB->y = geometry->link1LengthM * sinf(phi1Rad);
@@ -55,6 +62,10 @@ static app_status_t Module_Chassis_Leg_CalculateForwardGeometry(
         return APP_STATUS_ERROR;
     }
 
+    /*
+     * C 点由以 B、D 为圆心的两圆相交得到。
+     * sqrtArgument 小于 0 表示两圆无交点；接近 0 时按切点处理。
+     */
     equationA = 2.0f * geometry->link2LengthM * pointBDx;
     equationB = 2.0f * geometry->link2LengthM * pointBDy;
     equationC = (geometry->link2LengthM * geometry->link2LengthM) +
@@ -72,6 +83,7 @@ static app_status_t Module_Chassis_Leg_CalculateForwardGeometry(
     }
 
     sqrtValue = sqrtf(sqrtArgument);
+    /* 当前机构只选用与 Webots/实机装配一致的交点分支，不在运行时切换构型。 */
     state->phi2Rad = 2.0f * atan2f(equationB + sqrtValue,
                                    equationA + equationC);
     pointC->x = (-geometry->frameJointDistanceM * 0.5f) +
@@ -80,6 +92,7 @@ static app_status_t Module_Chassis_Leg_CalculateForwardGeometry(
     pointC->y = (geometry->link1LengthM * sinf(phi1Rad)) +
                 (geometry->link2LengthM * sinf(state->phi2Rad));
 
+    /* C 点确定后可得到后从动杆角度、虚拟腿长和虚拟腿几何角。 */
     state->phi3Rad = atan2f(pointC->y - pointD->y,
                             pointC->x - pointD->x);
     state->legLengthM = sqrtf((pointC->x * pointC->x) + (pointC->y * pointC->y));
@@ -94,6 +107,11 @@ static app_status_t Module_Chassis_Leg_CalculateForwardGeometry(
     return APP_STATUS_OK;
 }
 
+/**
+ * @brief 根据关节角速度计算虚拟腿长速度和虚拟腿摆角速度。
+ *
+ * 速度计算使用闭链约束的一阶导数，先解出从动杆角速度，再得到 C 点速度。
+ */
 static app_status_t Module_Chassis_Leg_CalculateVelocity(
     const module_chassis_leg_geometry_config_t *geometry,
     const module_chassis_leg_state_t *state,
@@ -126,6 +144,7 @@ static app_status_t Module_Chassis_Leg_CalculateVelocity(
     (void)pointB;
     (void)pointD;
 
+    /* 主动杆末端速度由当前角度和主动杆角速度直接得到。 */
     pointBVelocity.x = -geometry->link1LengthM * sinf(state->phi1Rad) *
                        phi1VelocityRadps;
     pointBVelocity.y = geometry->link1LengthM * cosf(state->phi1Rad) *
@@ -135,6 +154,10 @@ static app_status_t Module_Chassis_Leg_CalculateVelocity(
     pointDVelocity.y = geometry->link4LengthM * cosf(state->phi4Rad) *
                        phi4VelocityRadps;
 
+    /*
+     * 对 B-C-D 闭链约束求导，形成 2x2 线性方程。
+     * determinant 接近 0 表示当前姿态接近奇异位，速度解不可靠。
+     */
     matrix11 = -geometry->link2LengthM * sinf(state->phi2Rad);
     matrix21 = geometry->link2LengthM * cosf(state->phi2Rad);
     matrix12 = geometry->link3LengthM * sinf(state->phi3Rad);
@@ -149,6 +172,7 @@ static app_status_t Module_Chassis_Leg_CalculateVelocity(
     rhsY = pointDVelocity.y - pointBVelocity.y;
     phi2VelocityRadps = ((rhsX * matrix22) - (matrix12 * rhsY)) / determinant;
 
+    /* C 点速度用于投影出腿长速度和腿摆角速度。 */
     pointCVelocity.x = pointBVelocity.x +
                        (matrix11 * phi2VelocityRadps);
     pointCVelocity.y = pointBVelocity.y +
@@ -165,7 +189,8 @@ static app_status_t Module_Chassis_Leg_CalculateVelocity(
     }
 
     /*
-     * 控制状态使用的是“竖直参考角 - phi0”，因此腿摆速度为 -d(phi0)/dt。
+     * 控制状态使用的是 theta = 竖直参考角 - phi0 + pitch。
+     * 因此腿摆速度为 -d(phi0)/dt，正值表示 theta 增大。
      */
     outputState->legSwingVelocityRadps =
         -(((pointC->x * pointCVelocity.y) - (pointC->y * pointCVelocity.x)) /
@@ -193,6 +218,7 @@ app_status_t Module_Chassis_Leg_CalculateState(const module_chassis_leg_config_t
         return APP_STATUS_INVALID_PARAM;
     }
 
+    /* 电机反馈角先按模型配置转换成五连杆几何角，方向和零位都不在控制器里修正。 */
     memset(state, 0, sizeof(*state));
     state->phi1Rad = config->joints[MODULE_CHASSIS_LEG_JOINT_FRONT].angleOffsetRad +
                      (config->joints[MODULE_CHASSIS_LEG_JOINT_FRONT].angleScale *
@@ -213,6 +239,7 @@ app_status_t Module_Chassis_Leg_CalculateState(const module_chassis_leg_config_t
         return status;
     }
 
+    /* 角速度同样只在几何层做方向映射，保证状态量单位统一为 rad/s。 */
     phi1VelocityRadps =
         config->joints[MODULE_CHASSIS_LEG_JOINT_FRONT].angleScale *
         frontVelocityRadps;
@@ -245,6 +272,10 @@ app_status_t Module_Chassis_Leg_MapVirtualForce(const module_chassis_leg_config_
         return APP_STATUS_INVALID_PARAM;
     }
 
+    /*
+     * denominator 来自五连杆雅可比矩阵。
+     * 接近 0 表示力到关节力矩的映射奇异，继续输出会放大力矩命令。
+     */
     denominator = sinf(state->phi2Rad - state->phi3Rad);
     if ((Module_Chassis_Leg_IsValidDenominator(denominator) == 0U) ||
         (Module_Chassis_Leg_IsValidDenominator(state->legLengthM) == 0U))
@@ -252,6 +283,11 @@ app_status_t Module_Chassis_Leg_MapVirtualForce(const module_chassis_leg_config_
         return APP_STATUS_ERROR;
     }
 
+    /*
+     * swingTorqueNm 是虚拟腿摆广义力矩，正方向为使 theta 增大。
+     * Webots 符号测试确认 theta 增大时虚拟腿向机身后方摆动。
+     */
+    /* 前髋关节力矩由虚拟支撑力分量和虚拟腿摆力矩分量叠加得到。 */
     frontTorqueByGeometry =
         (-config->geometry.link1LengthM *
          sinf(state->phi0Rad - state->phi3Rad) *
@@ -263,6 +299,7 @@ app_status_t Module_Chassis_Leg_MapVirtualForce(const module_chassis_leg_config_
          (state->legLengthM * denominator) *
          swingTorqueNm);
 
+    /* 后髋关节使用同一套 VMC 映射，最终正负号仍由 torqueScale 处理安装方向。 */
     backTorqueByGeometry =
         (-config->geometry.link4LengthM *
          sinf(state->phi0Rad - state->phi2Rad) *

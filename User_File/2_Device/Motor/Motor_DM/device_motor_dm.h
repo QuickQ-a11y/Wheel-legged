@@ -42,11 +42,7 @@ typedef struct
 
 typedef struct
 {
-    float positionRad;           /* MIT 位置目标，单位 rad。 */
-    float velocityRadps;         /* MIT 速度目标，单位 rad/s。 */
-    float kp;                    /* MIT 位置增益。 */
-    float kd;                    /* MIT 速度增益。 */
-    float torqueNm;              /* MIT 前馈力矩，单位 N*m。 */
+    float torqueNm;              /* MIT 力矩通道命令，单位 N*m。 */
 } motor_dm_command_t;
 
 /**

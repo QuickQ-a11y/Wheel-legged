@@ -47,7 +47,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     User_File/1_Middleware/1_Driver/FDCAN/driver_fdcan.c
     User_File/1_Middleware/1_Driver/SPI/driver_spi.c
-    User_File/1_Middleware/2_Algorithm/algorithm_pid.c
+    User_File/1_Middleware/2_Algorithm/PID.c
     User_File/2_Device/IMU/BMI088/device_bmi088.c
     User_File/2_Device/Motor/Motor_DM/device_motor_dm.c
     User_File/2_Device/Motor/Motor_DJI/device_motor_dji.c

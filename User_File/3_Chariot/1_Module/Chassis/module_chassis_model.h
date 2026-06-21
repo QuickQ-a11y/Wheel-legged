@@ -6,7 +6,7 @@ extern "C" {
 #endif
 
 #include "app_config.h"
-#include "algorithm_pid.h"
+#include "PID.h"
 
 #include <stdint.h>
 
@@ -47,8 +47,8 @@ typedef enum
 {
     MODULE_CHASSIS_CONTROL_LEFT_WHEEL_TORQUE = 0,
     MODULE_CHASSIS_CONTROL_RIGHT_WHEEL_TORQUE,
-    MODULE_CHASSIS_CONTROL_LEFT_LEG_TORQUE,
-    MODULE_CHASSIS_CONTROL_RIGHT_LEG_TORQUE,
+    MODULE_CHASSIS_CONTROL_LEFT_LEG_TORQUE,     /* 左虚拟腿摆动力矩；正值使左腿角 theta_l 增大。 */
+    MODULE_CHASSIS_CONTROL_RIGHT_LEG_TORQUE,    /* 右虚拟腿摆动力矩；正值使右腿角 theta_r 增大。 */
 } module_chassis_control_output_index_t;
 
 typedef struct
@@ -120,11 +120,11 @@ typedef struct
     float baseSupportForceN;             /* 基础虚拟支撑力，单位 N。 */
     float leftSupportForceFeedforwardN;  /* 左腿支撑力前馈，单位 N。 */
     float rightSupportForceFeedforwardN; /* 右腿支撑力前馈，单位 N。 */
-    float defaultDtSec;
-    float minDtSec;
-    float maxDtSec;
-    float targetState[MODULE_CHASSIS_CONTROL_STATE_COUNT];
-    float motionGain[MODULE_CHASSIS_CONTROL_OUTPUT_COUNT][MODULE_CHASSIS_CONTROL_STATE_COUNT];
+    float defaultDtSec;                         /* 默认控制周期，单位 s。 */
+    float minDtSec;                             /* 控制周期下限，单位 s；异常过小时使用默认周期。 */
+    float maxDtSec;                             /* 控制周期上限，单位 s；异常过大时使用默认周期。 */
+    float targetState[MODULE_CHASSIS_CONTROL_STATE_COUNT]; /* LQR/MPC 风格控制目标状态，顺序见 module_chassis_control_state_index_t。 */
+    float motionGain[MODULE_CHASSIS_CONTROL_OUTPUT_COUNT][MODULE_CHASSIS_CONTROL_STATE_COUNT]; /* 离线计算得到的输出-状态增益矩阵。 */
 } module_chassis_model_config_t;
 
 /**

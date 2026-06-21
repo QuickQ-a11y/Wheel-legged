@@ -1,8 +1,9 @@
-#include "algorithm_pid.h"
+#include "PID.h"
 
 #include <math.h>
 #include <string.h>
 
+/* PID 输出和积分采用对称限幅，limit 小于等于 0 时表示该项不允许输出。 */
 static float Algorithm_PID_LimitFloat(float value, float minValue, float maxValue)
 {
     if (value < minValue)
@@ -60,7 +61,11 @@ app_status_t Algorithm_PID_UpdateByFeedbackRate(const algorithm_pid_config_t *co
     }
 
     error = targetValue - feedbackValue;
+
+    /* 目标值由上层慢速规划给出时，直接使用反馈速度作为阻尼项可减少目标差分噪声。 */
     derivative = -feedbackRate;
+
+    /* 积分按真实周期累加，避免控制任务周期抖动直接改变积分强度。 */
     state->integral += error * dtSec;
     state->integral = Algorithm_PID_LimitSymmetric(state->integral,
                                                    config->integralLimit);
