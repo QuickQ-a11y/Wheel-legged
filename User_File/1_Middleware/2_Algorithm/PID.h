@@ -5,8 +5,6 @@
 extern "C" {
 #endif
 
-#include "app_status.h"
-
 /**
  * @brief PID 参数配置。
  *
@@ -38,7 +36,7 @@ typedef struct
  *
  * 调用方在控制器初始化阶段调用一次，运行中是否清积分由具体控制状态机决定。
  */
-app_status_t Algorithm_PID_Init(algorithm_pid_state_t *state);
+void Algorithm_PID_Init(algorithm_pid_state_t *state);
 
 /**
  * @brief 使用反馈速度作为阻尼项更新 PID 输出。
@@ -46,13 +44,13 @@ app_status_t Algorithm_PID_Init(algorithm_pid_state_t *state);
  * `dtSec` 是本次更新距离上次更新的实际时间间隔，单位 s，用于积分项计算。
  * derivative = -feedbackRate，适合目标值低频变化、反馈速度可信的控制环。
  */
-app_status_t Algorithm_PID_UpdateByFeedbackRate(const algorithm_pid_config_t *config,
-                                                algorithm_pid_state_t *state,
-                                                float targetValue,
-                                                float feedbackValue,
-                                                float feedbackRate,
-                                                float dtSec,
-                                                float *output);
+void Algorithm_PID_UpdateByFeedbackRate(const algorithm_pid_config_t *config,
+                                        algorithm_pid_state_t *state,
+                                        float targetValue,
+                                        float feedbackValue,
+                                        float feedbackRate,
+                                        float dtSec,
+                                        float *output);
 
 #ifdef __cplusplus
 }

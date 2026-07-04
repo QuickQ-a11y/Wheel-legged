@@ -5,7 +5,6 @@
 extern "C" {
 #endif
 
-#include "app_status.h"
 #include "driver_spi.h"
 
 #include <stdint.h>
@@ -55,12 +54,12 @@ typedef struct
  *
  * 当前配置为 ACC 6G/1600Hz，GYRO 2000dps/230Hz。
  */
-app_status_t BMI088_Init(bmi088_t *bmi088, const bmi088_config_t *config);
+void BMI088_Init(bmi088_t *bmi088, const bmi088_config_t *config);
 
 /**
  * @brief 阻塞读取 BMI088 加速度、角速度和温度数据。
  */
-app_status_t BMI088_Read(bmi088_t *bmi088, bmi088_data_t *data);
+void BMI088_Read(bmi088_t *bmi088, bmi088_data_t *data);
 
 /**
  * @brief 获取最近一次初始化或读取错误码。

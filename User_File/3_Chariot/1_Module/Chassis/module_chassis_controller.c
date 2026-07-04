@@ -1,11 +1,14 @@
 #include "module_chassis_controller.h"
 
+#include "Kalman.h"
+#include "LQR.h"
 #include "PID.h"
 
 #include <math.h>
 #include <string.h>
 
 #define MODULE_CHASSIS_RPM_TO_RADPS 0.10471975512f
+#define MODULE_CHASSIS_CONTROLLER_EPSILON 1.0e-6f
 
 /**
  * @brief 底盘控制器内部状态。
@@ -15,12 +18,14 @@
  */
 typedef struct
 {
+    algorithm_kalman_t velocityKalman;
     algorithm_pid_state_t legLengthPid[MODULE_CHASSIS_LEG_COUNT];
     algorithm_pid_state_t rollPid;
-    module_chassis_controller_debug_t debug;
+    float forwardPositionM;
 } module_chassis_controller_state_t;
 
 static module_chassis_controller_state_t chassisControllerState;
+module_chassis_controller_debug_t chassisControllerDebug;
 
 /**
  * @brief 将浮点值限制在指定上下界内。
@@ -74,73 +79,15 @@ static int16_t Module_Chassis_Controller_LimitInt16(float value, int16_t limit)
 }
 
 /**
- * @brief 检查控制器配置是否满足本次计算的最低要求。
- *
- * 这里只检查会导致数组越界、几何无效或输出映射错误的硬约束。
- * 具体参数是否需要重新调参由模型配置和实机测试决定。
- */
-static uint8_t Module_Chassis_Controller_IsConfigValid(
-    const module_chassis_model_config_t *config)
-{
-    uint32_t sideIndex;
-    uint32_t jointIndex;
-
-    if (config == NULL)
-    {
-        return 0U;
-    }
-
-    /* IMU 轴向下标来自模型配置，越界会直接读错姿态角速度。 */
-    if ((config->imu.bodyPitchRateGyroIndex >= APP_CONFIG_IMU_AXIS_COUNT) ||
-        (config->imu.rollRateGyroIndex >= APP_CONFIG_IMU_AXIS_COUNT) ||
-        (config->imu.yawRateGyroIndex >= APP_CONFIG_IMU_AXIS_COUNT))
-    {
-        return 0U;
-    }
-
-    /* 腿部几何和 DM 电机映射是后续正运动学与输出映射的硬边界。 */
-    for (sideIndex = 0U; sideIndex < MODULE_CHASSIS_LEG_COUNT; sideIndex++)
-    {
-        const module_chassis_leg_geometry_config_t *geometry =
-            &config->legs[sideIndex].geometry;
-
-        if ((geometry->link1LengthM <= 0.0f) ||
-            (geometry->link2LengthM <= 0.0f) ||
-            (geometry->link3LengthM <= 0.0f) ||
-            (geometry->link4LengthM <= 0.0f) ||
-            (geometry->minLegLengthM <= 0.0f))
-        {
-            return 0U;
-        }
-
-        for (jointIndex = 0U; jointIndex < MODULE_CHASSIS_LEG_JOINT_COUNT; jointIndex++)
-        {
-            if (config->legs[sideIndex].joints[jointIndex].motorIndex >=
-                APP_CONFIG_DM_MOTOR_COUNT)
-            {
-                return 0U;
-            }
-        }
-    }
-
-    return 1U;
-}
-
-/**
  * @brief 获取本轮控制计算使用的采样周期。
  *
  * IMU 任务提供的 dtSec 可能因初始化、调试暂停或调度抖动异常。
  * 超出配置范围时使用默认周期，避免 PID 积分和微分项被异常周期放大。
  */
-static float Module_Chassis_Controller_GetDtSec(const module_chassis_model_config_t *config,
-                                                const module_chassis_input_t *input)
+static float Module_Chassis_Controller_SelectDtSec(const module_chassis_model_config_t *config,
+                                                   const module_chassis_input_t *input)
 {
     float dtSec;
-
-    if ((config == NULL) || (input == NULL))
-    {
-        return APP_CONFIG_IMU_DEFAULT_DT_SEC;
-    }
 
     dtSec = input->imu.dtSec;
 
@@ -159,11 +106,46 @@ static float Module_Chassis_Controller_GetDtSec(const module_chassis_model_confi
 }
 
 /**
+ * @brief 清空速度卡尔曼和前进位移积分。
+ */
+void Module_Chassis_Controller_ResetMotionState(const module_chassis_model_config_t *config)
+{
+    algorithm_kalman_t *velocityKalman = &chassisControllerState.velocityKalman;
+
+    /*
+     * 速度融合状态固定为 x = [dot_s, ddot_s]。
+     * P/Q/R 参数来自 module_chassis_model.c，后续按实机噪声只改配置表。
+     */
+    Algorithm_Kalman_Init(velocityKalman, 2U, 2U);
+    memcpy(velocityKalman->covariance,
+           config->velocityKalman.initialCovariance,
+           sizeof(config->velocityKalman.initialCovariance));
+    memcpy(velocityKalman->processNoise,
+           config->velocityKalman.processNoise,
+           sizeof(config->velocityKalman.processNoise));
+    memcpy(velocityKalman->measurementNoise,
+           config->velocityKalman.measurementNoise,
+           sizeof(config->velocityKalman.measurementNoise));
+
+    velocityKalman->stateTransition[0] = 1.0f;
+    velocityKalman->stateTransition[1] = config->defaultDtSec;
+    velocityKalman->stateTransition[2] = 0.0f;
+    velocityKalman->stateTransition[3] = 1.0f;
+
+    velocityKalman->measurementMatrix[0] = 1.0f;
+    velocityKalman->measurementMatrix[1] = 0.0f;
+    velocityKalman->measurementMatrix[2] = 0.0f;
+    velocityKalman->measurementMatrix[3] = 1.0f;
+
+    chassisControllerState.forwardPositionM = 0.0f;
+}
+
+/**
  * @brief 从 DM 电机反馈中取出一条腿的前后髋关节状态。
  *
  * legConfig 只保存机械映射下标，真实反馈值来自任务层汇总后的 input。
  */
-static app_status_t Module_Chassis_Controller_GetJointState(
+static void Module_Chassis_Controller_ReadJointState(
     const module_chassis_input_t *input,
     const module_chassis_leg_config_t *legConfig,
     float jointPositionRad[MODULE_CHASSIS_LEG_JOINT_COUNT],
@@ -171,27 +153,14 @@ static app_status_t Module_Chassis_Controller_GetJointState(
 {
     uint32_t jointIndex;
 
-    if ((input == NULL) || (legConfig == NULL) ||
-        (jointPositionRad == NULL) || (jointVelocityRadps == NULL))
-    {
-        return APP_STATUS_INVALID_PARAM;
-    }
-
     for (jointIndex = 0U; jointIndex < MODULE_CHASSIS_LEG_JOINT_COUNT; jointIndex++)
     {
         uint8_t motorIndex = legConfig->joints[jointIndex].motorIndex;
-
-        if (motorIndex >= APP_CONFIG_DM_MOTOR_COUNT)
-        {
-            return APP_STATUS_INVALID_PARAM;
-        }
 
         /* 这里只取设备层维护的真实反馈，机械零位和方向在腿部几何层统一处理。 */
         jointPositionRad[jointIndex] = input->dmMotors[motorIndex].positionRad;
         jointVelocityRadps[jointIndex] = input->dmMotors[motorIndex].velocityRadps;
     }
-
-    return APP_STATUS_OK;
 }
 
 /**
@@ -199,66 +168,53 @@ static app_status_t Module_Chassis_Controller_GetJointState(
  *
  * 输出的 legStates 后续会同时用于状态向量构造和 VMC 力矩映射。
  */
-static app_status_t Module_Chassis_Controller_UpdateLegStates(
+static void Module_Chassis_Controller_BuildLegStates(
     const module_chassis_model_config_t *config,
     const module_chassis_input_t *input,
     module_chassis_leg_state_t legStates[MODULE_CHASSIS_LEG_COUNT])
 {
     uint32_t sideIndex;
 
-    if ((config == NULL) || (input == NULL) || (legStates == NULL))
-    {
-        return APP_STATUS_INVALID_PARAM;
-    }
-
     for (sideIndex = 0U; sideIndex < MODULE_CHASSIS_LEG_COUNT; sideIndex++)
     {
         float jointPositionRad[MODULE_CHASSIS_LEG_JOINT_COUNT] = {0.0f};
         float jointVelocityRadps[MODULE_CHASSIS_LEG_JOINT_COUNT] = {0.0f};
-        app_status_t status;
-
         /* 先按配置表把前后髋关节反馈取出，保持控制器不关心具体电机编号。 */
-        status = Module_Chassis_Controller_GetJointState(input,
-                                                         &config->legs[sideIndex],
-                                                         jointPositionRad,
-                                                         jointVelocityRadps);
-        if (status != APP_STATUS_OK)
-        {
-            return status;
-        }
+        Module_Chassis_Controller_ReadJointState(input,
+                                                 &config->legs[sideIndex],
+                                                 jointPositionRad,
+                                                 jointVelocityRadps);
 
         /* 五连杆状态由腿部模块负责，控制器只消费腿长、腿角和速度结果。 */
-        status = Module_Chassis_Leg_CalculateState(
+        Module_Chassis_Leg_CalculateState(
             &config->legs[sideIndex],
             jointPositionRad[MODULE_CHASSIS_LEG_JOINT_FRONT],
             jointPositionRad[MODULE_CHASSIS_LEG_JOINT_BACK],
             jointVelocityRadps[MODULE_CHASSIS_LEG_JOINT_FRONT],
             jointVelocityRadps[MODULE_CHASSIS_LEG_JOINT_BACK],
             &legStates[sideIndex]);
-        if (status != APP_STATUS_OK)
-        {
-            return status;
-        }
     }
-
-    return APP_STATUS_OK;
 }
 
 /**
- * @brief 构造轮腿平衡控制状态向量。
+ * @brief 构造轮腿平衡控制十维状态向量。
  *
- * 当前状态顺序由 module_chassis_model.h 的枚举固定：
- * 前进位置、前进速度、偏航角、偏航角速度、左右腿摆角及角速度、机体俯仰角及角速度。
- * 前进位置暂时置 0，后续加入里程计或融合速度积分时再统一接入。
+ * 轮速、腿部几何和 IMU 先被整理成局部物理量；最后用一个连续代码块写入
+ * state[0..9]，避免十维状态分散赋值导致 review 时误判数据来源。
  */
 static void Module_Chassis_Controller_BuildState(
     const module_chassis_model_config_t *config,
     const module_chassis_input_t *input,
     const module_chassis_leg_state_t legStates[MODULE_CHASSIS_LEG_COUNT],
+    float dtSec,
     float state[MODULE_CHASSIS_CONTROL_STATE_COUNT],
     float wheelAngularVelocityRadps[APP_CONFIG_DJI_WHEEL_COUNT],
-    float *forwardVelocityMps)
+    float *rawForwardVelocityMps,
+    float *forwardAccelerationMps2,
+    float *fusedForwardAccelerationMps2)
 {
+    algorithm_kalman_t *velocityKalman = &chassisControllerState.velocityKalman;
+    float measurement[ALGORITHM_KALMAN_MAX_MEASUREMENT_COUNT] = {0.0f};
     float leftWheelVelocityRadps;
     float rightWheelVelocityRadps;
     float bodyPitchRad;
@@ -267,6 +223,9 @@ static void Module_Chassis_Controller_BuildState(
     float rightLegAngleRad;
     float leftLegAngleRateRadps;
     float rightLegAngleRateRadps;
+    float fusedForwardVelocityMps;
+    float yawRad;
+    float yawRateRadps;
 
     memset(state, 0, sizeof(float) * MODULE_CHASSIS_CONTROL_STATE_COUNT);
 
@@ -290,27 +249,28 @@ static void Module_Chassis_Controller_BuildState(
         config->imu.bodyPitchRateScale;
 
     /*
-     * 控制腿角沿用 Webots 定义：theta = 竖直参考角 - phi0 + pitch。
-     * theta > 0 已确认对应虚拟腿向机身后方倾斜。
+     * 腿角参考 SPR 的 chassis_feedback_update：
+     * theta = phi0 - 竖直参考角 - pitch。
+     * 这里的符号必须和离线求 K 时的状态定义保持一致。
      */
-    leftLegAngleRad = config->legVerticalAngleOffsetRad -
-                      legStates[MODULE_CHASSIS_LEG_LEFT].phi0Rad +
+    leftLegAngleRad = legStates[MODULE_CHASSIS_LEG_LEFT].phi0Rad -
+                      config->legVerticalAngleOffsetRad -
                       bodyPitchRad;
-    rightLegAngleRad = config->legVerticalAngleOffsetRad -
-                       legStates[MODULE_CHASSIS_LEG_RIGHT].phi0Rad +
+    rightLegAngleRad = legStates[MODULE_CHASSIS_LEG_RIGHT].phi0Rad -
+                       config->legVerticalAngleOffsetRad -
                        bodyPitchRad;
     leftLegAngleRateRadps =
-        legStates[MODULE_CHASSIS_LEG_LEFT].legSwingVelocityRadps +
+        legStates[MODULE_CHASSIS_LEG_LEFT].legSwingVelocityRadps -
         bodyPitchRateRadps;
     rightLegAngleRateRadps =
-        legStates[MODULE_CHASSIS_LEG_RIGHT].legSwingVelocityRadps +
+        legStates[MODULE_CHASSIS_LEG_RIGHT].legSwingVelocityRadps -
         bodyPitchRateRadps;
 
     /*
      * 前进速度由轮速、腿摆角速度和腿长变化速度共同估计。
-     * 该值是控制器当前的速度反馈，不在这里做滤波或积分。
+     * 该值作为卡尔曼测量中的原始速度，不在这里做滤波或积分。
      */
-    *forwardVelocityMps =
+    *rawForwardVelocityMps =
         (config->wheel.radiusM * (leftWheelVelocityRadps + rightWheelVelocityRadps) *
          0.5f) +
         (0.5f * ((legStates[MODULE_CHASSIS_LEG_LEFT].legLengthM *
@@ -322,12 +282,62 @@ static void Module_Chassis_Controller_BuildState(
                  (legStates[MODULE_CHASSIS_LEG_RIGHT].legLengthVelocityMps *
                   sinf(rightLegAngleRad))));
 
-    /* 状态向量顺序必须和离线求 K 时的状态定义完全一致。 */
-    state[MODULE_CHASSIS_STATE_FORWARD_POSITION] = 0.0f;
-    state[MODULE_CHASSIS_STATE_FORWARD_VELOCITY] = *forwardVelocityMps;
-    state[MODULE_CHASSIS_STATE_YAW] = input->imu.yawRad * config->imu.yawAngleScale;
-    state[MODULE_CHASSIS_STATE_YAW_RATE] =
-        input->imu.gyroRadps[config->imu.yawRateGyroIndex] * config->imu.yawRateScale;
+    *forwardAccelerationMps2 =
+        input->imu.motionAccMps2[config->imu.forwardAccelerationIndex] *
+        config->imu.forwardAccelerationScale;
+
+    /*
+     * 速度融合参考 SPR：x = [dot_s, ddot_s]，
+     * z = [原始前进速度, IMU 前向运动加速度]。
+     */
+    if (config->velocityKalman.enabled != 0U)
+    {
+        velocityKalman->stateTransition[0] = 1.0f;
+        velocityKalman->stateTransition[1] = dtSec;
+        velocityKalman->stateTransition[2] = 0.0f;
+        velocityKalman->stateTransition[3] = 1.0f;
+
+        measurement[0] = *rawForwardVelocityMps;
+        measurement[1] = *forwardAccelerationMps2;
+        Algorithm_Kalman_Update(velocityKalman, measurement);
+
+        fusedForwardVelocityMps = velocityKalman->state[0];
+        *fusedForwardAccelerationMps2 = velocityKalman->state[1];
+    }
+    else
+    {
+        fusedForwardVelocityMps = *rawForwardVelocityMps;
+        *fusedForwardAccelerationMps2 = *forwardAccelerationMps2;
+        velocityKalman->state[0] = fusedForwardVelocityMps;
+        velocityKalman->state[1] = *fusedForwardAccelerationMps2;
+    }
+
+    /*
+     * 位置状态沿用 SPR 的调试策略：速度较小时积分，速度过大时清零。
+     * 这样早期未闭环速度目标时，s 不会在快速滑动或搬动机器人时持续漂移。
+     */
+    if ((config->velocityKalman.positionIntegralVelocityLimitMps > 0.0f) &&
+        (fabsf(fusedForwardVelocityMps) <=
+         config->velocityKalman.positionIntegralVelocityLimitMps))
+    {
+        chassisControllerState.forwardPositionM += fusedForwardVelocityMps * dtSec;
+    }
+    else
+    {
+        chassisControllerState.forwardPositionM = 0.0f;
+    }
+
+    yawRad = input->imu.yawRad * config->imu.yawAngleScale;
+    yawRateRadps =
+        input->imu.gyroRadps[config->imu.yawRateGyroIndex] *
+        config->imu.yawRateScale;
+
+    /* 十维状态向量只在这里集中赋值，顺序必须和离线求 K 时完全一致。 */
+    state[MODULE_CHASSIS_STATE_FORWARD_POSITION] =
+        chassisControllerState.forwardPositionM;
+    state[MODULE_CHASSIS_STATE_FORWARD_VELOCITY] = fusedForwardVelocityMps;
+    state[MODULE_CHASSIS_STATE_YAW] = yawRad;
+    state[MODULE_CHASSIS_STATE_YAW_RATE] = yawRateRadps;
     state[MODULE_CHASSIS_STATE_LEFT_LEG_ANGLE] = leftLegAngleRad;
     state[MODULE_CHASSIS_STATE_LEFT_LEG_ANGLE_RATE] = leftLegAngleRateRadps;
     state[MODULE_CHASSIS_STATE_RIGHT_LEG_ANGLE] = rightLegAngleRad;
@@ -337,14 +347,87 @@ static void Module_Chassis_Controller_BuildState(
 }
 
 /**
+ * @brief 根据配置选择本轮 LQR 拟合使用的左右腿长。
+ *
+ * 定腿长模式用于早期固定姿态和电机方向调试；实测模式用于后续变腿长控制。
+ */
+static void Module_Chassis_Controller_SelectLqrLegLength(
+    const module_chassis_model_config_t *config,
+    const module_chassis_leg_state_t legStates[MODULE_CHASSIS_LEG_COUNT],
+    float lqrInputLegLengthM[MODULE_CHASSIS_LEG_COUNT])
+{
+    if (config->lqr.lqrKLengthSource == MODULE_CHASSIS_LQR_K_LENGTH_MEASURED)
+    {
+        lqrInputLegLengthM[MODULE_CHASSIS_LEG_LEFT] =
+            legStates[MODULE_CHASSIS_LEG_LEFT].legLengthM;
+        lqrInputLegLengthM[MODULE_CHASSIS_LEG_RIGHT] =
+            legStates[MODULE_CHASSIS_LEG_RIGHT].legLengthM;
+        return;
+    }
+
+    lqrInputLegLengthM[MODULE_CHASSIS_LEG_LEFT] = config->lqr.fixedLeftLegLengthM;
+    lqrInputLegLengthM[MODULE_CHASSIS_LEG_RIGHT] = config->lqr.fixedRightLegLengthM;
+}
+
+/**
+ * @brief 生成本轮运动控制实际使用的 K 矩阵。
+ *
+ * LQR 拟合关闭时直接使用配置中的 fixedLqrK；开启时使用同一套 poly22 拟合算法，
+ * 只通过 lqrKLengthSource 切换固定腿长或实时腿长输入。
+ */
+static void Module_Chassis_Controller_BuildLqrK(
+    const module_chassis_model_config_t *config,
+    const module_chassis_leg_state_t legStates[MODULE_CHASSIS_LEG_COUNT],
+    float lqrK[MODULE_CHASSIS_CONTROL_OUTPUT_COUNT][MODULE_CHASSIS_CONTROL_STATE_COUNT],
+    float lqrInputLegLengthM[MODULE_CHASSIS_LEG_COUNT],
+    float lqrLimitedLegLengthM[MODULE_CHASSIS_LEG_COUNT],
+    uint8_t *isLqrKFitEnabled,
+    uint8_t *isLqrKLengthLimited)
+{
+    uint8_t isInputLimited = 0U;
+
+    *isLqrKFitEnabled = 0U;
+    *isLqrKLengthLimited = 0U;
+    lqrInputLegLengthM[MODULE_CHASSIS_LEG_LEFT] = 0.0f;
+    lqrInputLegLengthM[MODULE_CHASSIS_LEG_RIGHT] = 0.0f;
+    lqrLimitedLegLengthM[MODULE_CHASSIS_LEG_LEFT] = 0.0f;
+    lqrLimitedLegLengthM[MODULE_CHASSIS_LEG_RIGHT] = 0.0f;
+
+    if (config->lqr.enabled == 0U)
+    {
+        memcpy(lqrK, config->fixedLqrK, sizeof(config->fixedLqrK));
+        return;
+    }
+
+    Module_Chassis_Controller_SelectLqrLegLength(config, legStates, lqrInputLegLengthM);
+
+    Algorithm_LQR_FitLqrKPoly22(
+        &config->lqr.lqrKFitCoefficients[0U][0U][0U],
+        MODULE_CHASSIS_CONTROL_OUTPUT_COUNT,
+        MODULE_CHASSIS_CONTROL_STATE_COUNT,
+        lqrInputLegLengthM[MODULE_CHASSIS_LEG_LEFT],
+        lqrInputLegLengthM[MODULE_CHASSIS_LEG_RIGHT],
+        config->lqr.minFitLegLengthM,
+        config->lqr.maxFitLegLengthM,
+        &lqrK[0U][0U],
+        &lqrLimitedLegLengthM[MODULE_CHASSIS_LEG_LEFT],
+        &lqrLimitedLegLengthM[MODULE_CHASSIS_LEG_RIGHT],
+        &isInputLimited);
+
+    *isLqrKFitEnabled = 1U;
+    *isLqrKLengthLimited = isInputLimited;
+}
+
+/**
  * @brief 根据状态反馈计算 LQR/MPC 风格的运动控制输出。
  *
- * motionGain 是输出到状态的增益矩阵，目标状态与当前状态的误差按行累加。
+ * lqrK 是本轮实际使用的输出到状态增益矩阵，来源可以是固定矩阵，也可以是腿长拟合 K。
  * 输出顺序为左右轮力矩、左右腿摆虚拟力矩。
- * 左右腿摆虚拟力矩为正时，分别使 theta_l/theta_r 增大，即驱动虚拟腿向机身后方摆动。
+ * 左右腿摆虚拟力矩方向跟随 SPR 状态定义，电机最终正负号由模型配置处理。
  */
 static void Module_Chassis_Controller_CalculateMotionOutput(
     const module_chassis_model_config_t *config,
+    const float lqrK[MODULE_CHASSIS_CONTROL_OUTPUT_COUNT][MODULE_CHASSIS_CONTROL_STATE_COUNT],
     const float state[MODULE_CHASSIS_CONTROL_STATE_COUNT],
     float motionOutput[MODULE_CHASSIS_CONTROL_OUTPUT_COUNT])
 {
@@ -358,7 +441,7 @@ static void Module_Chassis_Controller_CalculateMotionOutput(
         /* 每一行增益对应一个广义输出：左轮、右轮、左腿摆、右腿摆。 */
         for (stateIndex = 0U; stateIndex < MODULE_CHASSIS_CONTROL_STATE_COUNT; stateIndex++)
         {
-            outputValue += config->motionGain[outputIndex][stateIndex] *
+            outputValue += lqrK[outputIndex][stateIndex] *
                            (config->targetState[stateIndex] - state[stateIndex]);
         }
 
@@ -372,7 +455,7 @@ static void Module_Chassis_Controller_CalculateMotionOutput(
  * 腿长 PID 负责让虚拟腿收敛到目标腿长，横滚 PID 通过左右腿支撑力差修正横滚。
  * 输出支撑力会交给腿部 VMC 映射为前后髋关节力矩。
  */
-static app_status_t Module_Chassis_Controller_CalculateSupportForces(
+static void Module_Chassis_Controller_CalculateSupportForces(
     const module_chassis_model_config_t *config,
     const module_chassis_input_t *input,
     const module_chassis_leg_state_t legStates[MODULE_CHASSIS_LEG_COUNT],
@@ -387,7 +470,6 @@ static app_status_t Module_Chassis_Controller_CalculateSupportForces(
     float leftPidOutput = 0.0f;
     float rightPidOutput = 0.0f;
     float rollPidOutput = 0.0f;
-    app_status_t status;
 
     rollRad = input->imu.rollRad * config->imu.rollAngleScale;
     rollRateRadps =
@@ -395,7 +477,7 @@ static app_status_t Module_Chassis_Controller_CalculateSupportForces(
         config->imu.rollRateScale;
 
     /* 腿长环输出为虚拟支撑力修正量，反馈速度直接作为阻尼项。 */
-    status = Algorithm_PID_UpdateByFeedbackRate(
+    Algorithm_PID_UpdateByFeedbackRate(
         &config->legLengthPid,
         &chassisControllerState.legLengthPid[MODULE_CHASSIS_LEG_LEFT],
         config->legs[MODULE_CHASSIS_LEG_LEFT].targetLegLengthM,
@@ -403,12 +485,7 @@ static app_status_t Module_Chassis_Controller_CalculateSupportForces(
         legStates[MODULE_CHASSIS_LEG_LEFT].legLengthVelocityMps,
         dtSec,
         &leftPidOutput);
-    if (status != APP_STATUS_OK)
-    {
-        return status;
-    }
-
-    status = Algorithm_PID_UpdateByFeedbackRate(
+    Algorithm_PID_UpdateByFeedbackRate(
         &config->legLengthPid,
         &chassisControllerState.legLengthPid[MODULE_CHASSIS_LEG_RIGHT],
         config->legs[MODULE_CHASSIS_LEG_RIGHT].targetLegLengthM,
@@ -416,23 +493,14 @@ static app_status_t Module_Chassis_Controller_CalculateSupportForces(
         legStates[MODULE_CHASSIS_LEG_RIGHT].legLengthVelocityMps,
         dtSec,
         &rightPidOutput);
-    if (status != APP_STATUS_OK)
-    {
-        return status;
-    }
-
     /* 横滚环输出为左右腿支撑力差，修正方向由下方左右腿合成关系统一处理。 */
-    status = Algorithm_PID_UpdateByFeedbackRate(&config->rollPid,
-                                                &chassisControllerState.rollPid,
-                                                config->targetRollRad,
-                                                rollRad,
-                                                rollRateRadps,
-                                                dtSec,
-                                                &rollPidOutput);
-    if (status != APP_STATUS_OK)
-    {
-        return status;
-    }
+    Algorithm_PID_UpdateByFeedbackRate(&config->rollPid,
+                                       &chassisControllerState.rollPid,
+                                       config->targetRollRad,
+                                       rollRad,
+                                       rollRateRadps,
+                                       dtSec,
+                                       &rollPidOutput);
 
     leftLengthCorrectionN = -leftPidOutput;
     rightLengthCorrectionN = -rightPidOutput;
@@ -452,8 +520,6 @@ static app_status_t Module_Chassis_Controller_CalculateSupportForces(
         rightLengthCorrectionN +
         config->baseSupportForceN -
         config->rightSupportForceFeedforwardN;
-
-    return APP_STATUS_OK;
 }
 
 /**
@@ -539,142 +605,263 @@ static void Module_Chassis_Controller_ApplyWheelCurrents(
  */
 void Module_Chassis_Controller_Init(const module_chassis_model_config_t *config)
 {
-    (void)config;
     memset(&chassisControllerState, 0, sizeof(chassisControllerState));
-    (void)Algorithm_PID_Init(&chassisControllerState.legLengthPid[MODULE_CHASSIS_LEG_LEFT]);
-    (void)Algorithm_PID_Init(&chassisControllerState.legLengthPid[MODULE_CHASSIS_LEG_RIGHT]);
-    (void)Algorithm_PID_Init(&chassisControllerState.rollPid);
+    memset(&chassisControllerDebug, 0, sizeof(chassisControllerDebug));
+    Algorithm_PID_Init(&chassisControllerState.legLengthPid[MODULE_CHASSIS_LEG_LEFT]);
+    Algorithm_PID_Init(&chassisControllerState.legLengthPid[MODULE_CHASSIS_LEG_RIGHT]);
+    Algorithm_PID_Init(&chassisControllerState.rollPid);
+    Module_Chassis_Controller_ResetMotionState(config);
 }
 
 /**
- * @brief 执行一次底盘控制器计算。
+ * @brief 执行一次底盘控制环。
  *
- * 调用链为：配置检查、腿部几何状态计算、控制状态构造、运动控制输出、
- * 支撑力计算、VMC 力矩映射、输出限幅和调试快照更新。
+ * 主流程对齐 SPR 的 chassis_control_loop：先由反馈得到腿部和机体状态，
+ * 再计算支撑力、K 矩阵和 LQR 广义输出，最后通过 VMC 写入电机命令。
+ * 输入 input 来自任务层汇总后的 IMU、DM、DJI 和 CAN 状态；
+ * 输出 output 写回底盘模块，再由任务层统一下发到电机设备层。
+ * 当前只保留站立控制主链路，未接入遥控状态机、自起身、跳跃、KNN 或功率限制。
  */
-app_status_t Module_Chassis_Controller_Update(const module_chassis_model_config_t *config,
+void Module_Chassis_Controller_RunControlLoop(const module_chassis_model_config_t *config,
                                               const module_chassis_input_t *input,
                                               module_chassis_output_t *output)
 {
     module_chassis_leg_state_t legStates[MODULE_CHASSIS_LEG_COUNT];
     module_chassis_leg_joint_torque_t jointTorques[MODULE_CHASSIS_LEG_COUNT];
     float controlState[MODULE_CHASSIS_CONTROL_STATE_COUNT] = {0.0f};
+    float lqrK[MODULE_CHASSIS_CONTROL_OUTPUT_COUNT][MODULE_CHASSIS_CONTROL_STATE_COUNT] = {{0.0f}};
     float motionOutput[MODULE_CHASSIS_CONTROL_OUTPUT_COUNT] = {0.0f};
     float supportForcesN[MODULE_CHASSIS_LEG_COUNT] = {0.0f};
+    float lqrInputLegLengthM[MODULE_CHASSIS_LEG_COUNT] = {0.0f};
+    float lqrLimitedLegLengthM[MODULE_CHASSIS_LEG_COUNT] = {0.0f};
     float wheelAngularVelocityRadps[APP_CONFIG_DJI_WHEEL_COUNT] = {0.0f};
-    float forwardVelocityMps = 0.0f;
+    float rawForwardVelocityMps = 0.0f;
+    float forwardAccelerationMps2 = 0.0f;
+    float fusedForwardAccelerationMps2 = 0.0f;
     float dtSec;
-    app_status_t status;
+    uint8_t isLqrKFitEnabled = 0U;
+    uint8_t isLqrKLengthLimited = 0U;
+    uint32_t sideIndex;
+    uint32_t jointIndex;
 
-    if ((config == NULL) || (input == NULL) || (output == NULL))
-    {
-        return APP_STATUS_INVALID_PARAM;
-    }
-
-    /* 阶段 1：检查配置硬边界，失败时本轮调试数据标记为无效。 */
-    if (Module_Chassis_Controller_IsConfigValid(config) == 0U)
-    {
-        chassisControllerState.debug.isStateValid = 0U;
-        return APP_STATUS_INVALID_PARAM;
-    }
+    output->faultFlags = MODULE_CHASSIS_FAULT_CONTROLLER;
+    chassisControllerDebug.isStateValid = 0U;
 
     memset(legStates, 0, sizeof(legStates));
     memset(jointTorques, 0, sizeof(jointTorques));
 
-    /* 阶段 2：把四个髋关节反馈转换为两条虚拟腿的几何状态。 */
-    status = Module_Chassis_Controller_UpdateLegStates(config, input, legStates);
-    if (status != APP_STATUS_OK)
+    /*
+     * 1. 控制环入口只保留真实安全边界。
+     * 输入：config 中的 IMU 轴向、腿部几何、DM 电机映射和 lqr 配置。
+     * 来源：config 来自 module_chassis_model.c 的默认模型配置。
+     * 输出：本阶段不产生控制量；失败时直接返回，output 保持 module_chassis.c
+     *       预先写入的安全零输出和 MODULE_CHASSIS_FAULT_CONTROLLER。
+     * 去向：边界通过后，config 才允许进入后续反馈、K 矩阵和 VMC 计算。
+     */
+    if ((config->imu.bodyPitchRateGyroIndex >= APP_CONFIG_IMU_AXIS_COUNT) ||
+        (config->imu.rollRateGyroIndex >= APP_CONFIG_IMU_AXIS_COUNT) ||
+        (config->imu.yawRateGyroIndex >= APP_CONFIG_IMU_AXIS_COUNT) ||
+        (config->imu.forwardAccelerationIndex >= APP_CONFIG_IMU_AXIS_COUNT))
     {
-        chassisControllerState.debug.isStateValid = 0U;
-        return status;
+        return;
+    }
+
+    for (sideIndex = 0U; sideIndex < MODULE_CHASSIS_LEG_COUNT; sideIndex++)
+    {
+        const module_chassis_leg_geometry_config_t *geometry =
+            &config->legs[sideIndex].geometry;
+
+        if ((geometry->link1LengthM <= 0.0f) ||
+            (geometry->link2LengthM <= 0.0f) ||
+            (geometry->link3LengthM <= 0.0f) ||
+            (geometry->link4LengthM <= 0.0f) ||
+            (geometry->minLegLengthM <= 0.0f))
+        {
+            return;
+        }
+
+        for (jointIndex = 0U; jointIndex < MODULE_CHASSIS_LEG_JOINT_COUNT; jointIndex++)
+        {
+            if (config->legs[sideIndex].joints[jointIndex].motorIndex >=
+                APP_CONFIG_DM_MOTOR_COUNT)
+            {
+                return;
+            }
+        }
+    }
+
+    if ((config->lqr.enabled != 0U) &&
+        ((config->lqr.minFitLegLengthM <= 0.0f) ||
+         (config->lqr.maxFitLegLengthM < config->lqr.minFitLegLengthM) ||
+         ((config->lqr.lqrKLengthSource != MODULE_CHASSIS_LQR_K_LENGTH_FIXED) &&
+          (config->lqr.lqrKLengthSource != MODULE_CHASSIS_LQR_K_LENGTH_MEASURED)) ||
+         ((config->lqr.lqrKLengthSource == MODULE_CHASSIS_LQR_K_LENGTH_FIXED) &&
+          ((config->lqr.fixedLeftLegLengthM <= 0.0f) ||
+           (config->lqr.fixedRightLegLengthM <= 0.0f)))))
+    {
+        return;
     }
 
     /*
-     * 阶段 3：构造控制状态并计算运动控制输出。
-     * motionOutput 是广义输出，还不是最终电机命令。
+     * 2. 反馈处理：四个髋关节反馈先转换成两条虚拟腿状态，
+     * 再和 IMU、轮速一起组成 LQR 状态向量。
+     * 输入：input->dmMotors、input->djiWheels、input->imu 和 config 的机械/轴向映射。
+     * 来源：input 由 chassis_task.c 从设备层反馈整理后传入。
+     * 输出：legStates、controlState、wheelAngularVelocityRadps、rawForwardVelocityMps、
+     *       forwardAccelerationMps2、fusedForwardAccelerationMps2 和 dtSec。
+     * 去向：BuildState 内部完成原始速度计算、速度融合和十维状态集中赋值；
+     *       最终 controlState 供 LQR 输出使用，轮速和速度融合中间量进入 debug。
      */
-    dtSec = Module_Chassis_Controller_GetDtSec(config, input);
+    Module_Chassis_Controller_BuildLegStates(config, input, legStates);
+    if ((legStates[MODULE_CHASSIS_LEG_LEFT].legLengthM <=
+         config->legs[MODULE_CHASSIS_LEG_LEFT].geometry.minLegLengthM) ||
+        (legStates[MODULE_CHASSIS_LEG_RIGHT].legLengthM <=
+         config->legs[MODULE_CHASSIS_LEG_RIGHT].geometry.minLegLengthM))
+    {
+        return;
+    }
+
+    dtSec = Module_Chassis_Controller_SelectDtSec(config, input);
     Module_Chassis_Controller_BuildState(config,
                                          input,
                                          legStates,
+                                         dtSec,
                                          controlState,
                                          wheelAngularVelocityRadps,
-                                         &forwardVelocityMps);
+                                         &rawForwardVelocityMps,
+                                         &forwardAccelerationMps2,
+                                         &fusedForwardAccelerationMps2);
+
+    /*
+     * 3. 支撑力：先算 VMC 使用的左右腿虚拟支撑力。
+     * 当前只包含腿长 PID、支撑力前馈和横滚补偿。
+     * 输入：config 的腿长目标、PID 参数、支撑力前馈和 roll 目标；
+     *       input->imu 的 roll/roll rate；legStates 的腿长和腿长速度；dtSec。
+     * 来源：目标和 PID 来自 module_chassis_model.c，IMU 来自任务层输入，
+     *       腿部状态来自阶段 2。
+     * 输出：supportForcesN[左腿/右腿]，单位 N。
+     * 去向：supportForcesN 在阶段 6 进入 VMC，和腿摆力矩一起映射到髋关节力矩。
+     */
+    Module_Chassis_Controller_CalculateSupportForces(config,
+                                                     input,
+                                                     legStates,
+                                                     dtSec,
+                                                     supportForcesN);
+
+    /*
+     * 4. K 矩阵：定腿长和变腿长只在这里选择输入腿长，
+     * 后面的 LQR 输出、VMC 和电机命令共用同一套代码。
+     * 输入：config->lqr 的拟合开关、腿长来源、拟合范围和 K 拟合系数；
+     *       legStates 的实时腿长。
+     * 来源：lqr 配置集中在 module_chassis_model.c，实时腿长来自阶段 2。
+     * 输出：lqrK[4][10]、lqrInputLegLengthM、lqrLimitedLegLengthM、
+     *       isLqrKFitEnabled 和 isLqrKLengthLimited。
+     * 去向：lqrK 在阶段 5 计算轮/腿广义输出，其余量写入 debug 方便确认拟合输入。
+     */
+    Module_Chassis_Controller_BuildLqrK(config,
+                                        legStates,
+                                        lqrK,
+                                        lqrInputLegLengthM,
+                                        lqrLimitedLegLengthM,
+                                        &isLqrKFitEnabled,
+                                        &isLqrKLengthLimited);
+
+    /*
+     * 5. LQR 输出：motionOutput 顺序为左轮、右轮、左腿摆、右腿摆，
+     * 这里仍是控制层广义力矩，不是电机原始命令。
+     * 输入：lqrK、controlState 和 config->targetState。
+     * 来源：lqrK 来自阶段 4，controlState 来自阶段 2，targetState 来自模型配置。
+     * 输出：motionOutput[左轮力矩、右轮力矩、左腿摆力矩、右腿摆力矩]。
+     * 去向：轮力矩在阶段 7 转换为 DJI 电流；腿摆力矩在阶段 6 进入 VMC。
+     */
     Module_Chassis_Controller_CalculateMotionOutput(config,
+                                                    lqrK,
                                                     controlState,
                                                     motionOutput);
+
     /*
-     * 阶段 4：腿长和横滚闭环生成左右虚拟支撑力。
-     * 支撑力后续和腿摆力矩一起交给 VMC 做关节力矩映射。
+     * 6. VMC 映射：进入雅可比映射前再次检查几何有效性。
+     * 奇异位姿下不做关节力矩映射，避免雅可比导致力矩异常放大。
+     * 输入：config 的腿部几何和关节力矩方向，legStates 的五连杆姿态，
+     *       supportForcesN 和 motionOutput 中的左右腿摆力矩。
+     * 来源：几何配置来自 module_chassis_model.c，腿部状态来自阶段 2，
+     *       支撑力来自阶段 3，腿摆力矩来自阶段 5。
+     * 输出：jointTorques[左腿/右腿] 的前后髋关节力矩，单位 N*m。
+     * 去向：jointTorques 在阶段 7 写入 output->dmCommands。
      */
-    status = Module_Chassis_Controller_CalculateSupportForces(config,
-                                                              input,
-                                                              legStates,
-                                                              dtSec,
-                                                              supportForcesN);
-    if (status != APP_STATUS_OK)
+    if ((fabsf(legStates[MODULE_CHASSIS_LEG_LEFT].legLengthM) <=
+         MODULE_CHASSIS_CONTROLLER_EPSILON) ||
+        (fabsf(legStates[MODULE_CHASSIS_LEG_RIGHT].legLengthM) <=
+         MODULE_CHASSIS_CONTROLLER_EPSILON) ||
+        (fabsf(sinf(legStates[MODULE_CHASSIS_LEG_LEFT].phi2Rad -
+                    legStates[MODULE_CHASSIS_LEG_LEFT].phi3Rad)) <=
+         MODULE_CHASSIS_CONTROLLER_EPSILON) ||
+        (fabsf(sinf(legStates[MODULE_CHASSIS_LEG_RIGHT].phi2Rad -
+                    legStates[MODULE_CHASSIS_LEG_RIGHT].phi3Rad)) <=
+         MODULE_CHASSIS_CONTROLLER_EPSILON))
     {
-        chassisControllerState.debug.isStateValid = 0U;
-        return status;
+        return;
     }
 
-    /* 阶段 5：左腿 VMC，把支撑力和左腿摆力矩映射到前后髋关节。 */
-    status = Module_Chassis_Leg_MapVirtualForce(
+    Module_Chassis_Leg_MapVirtualForce(
         &config->legs[MODULE_CHASSIS_LEG_LEFT],
         &legStates[MODULE_CHASSIS_LEG_LEFT],
         supportForcesN[MODULE_CHASSIS_LEG_LEFT],
         motionOutput[MODULE_CHASSIS_CONTROL_LEFT_LEG_TORQUE],
         &jointTorques[MODULE_CHASSIS_LEG_LEFT]);
-    if (status != APP_STATUS_OK)
-    {
-        chassisControllerState.debug.isStateValid = 0U;
-        return status;
-    }
 
-    /* 阶段 6：右腿 VMC，符号约定与左腿一致，电机安装方向由配置处理。 */
-    status = Module_Chassis_Leg_MapVirtualForce(
+    Module_Chassis_Leg_MapVirtualForce(
         &config->legs[MODULE_CHASSIS_LEG_RIGHT],
         &legStates[MODULE_CHASSIS_LEG_RIGHT],
         supportForcesN[MODULE_CHASSIS_LEG_RIGHT],
         motionOutput[MODULE_CHASSIS_CONTROL_RIGHT_LEG_TORQUE],
         &jointTorques[MODULE_CHASSIS_LEG_RIGHT]);
-    if (status != APP_STATUS_OK)
-    {
-        chassisControllerState.debug.isStateValid = 0U;
-        return status;
-    }
 
-    /* 阶段 7：把广义控制量写入输出结构，实际 CAN 下发由任务层完成。 */
+    /*
+     * 7. 输出赋值：控制器只写本轮 output，CAN 发送仍由任务层统一完成。
+     * 默认输出开关继续封锁非零命令。
+     * 输入：config 的输出开关和限幅参数、jointTorques、motionOutput 中的轮力矩。
+     * 来源：输出开关和限幅来自 module_chassis_model.c，jointTorques 来自阶段 6，
+     *       轮力矩来自阶段 5。
+     * 输出：output->dmCommands、output->djiCurrents 和 output->faultFlags。
+     * 去向：output 返回 module_chassis.c，再由 chassis_task.c 写入 DM 命令、
+     *       DJI 电流发送缓存和 CAN 发送请求。
+     */
     Module_Chassis_Controller_ApplyJointTorques(config, jointTorques, output);
     Module_Chassis_Controller_ApplyWheelCurrents(config, motionOutput, output);
+    output->faultFlags = MODULE_CHASSIS_FAULT_NONE;
 
-    /* 阶段 8：保存本轮中间量，供串口、调试器或日志 review 控制链路。 */
-    memcpy(chassisControllerState.debug.legStates, legStates, sizeof(legStates));
-    memcpy(chassisControllerState.debug.controlState, controlState, sizeof(controlState));
-    memcpy(chassisControllerState.debug.motionOutput, motionOutput, sizeof(motionOutput));
-    memcpy(chassisControllerState.debug.supportForcesN, supportForcesN, sizeof(supportForcesN));
-    memcpy(chassisControllerState.debug.wheelAngularVelocityRadps,
+    /*
+     * 8. 调试快照。
+     * 输入：本轮控制环所有关键中间量。
+     * 来源：阶段 2 到阶段 7 的局部变量。
+     * 输出：chassisControllerDebug。
+     * 去向：调试器、串口日志或 review 时直接观察，不再额外封装状态读取接口。
+     */
+    memcpy(chassisControllerDebug.legStates, legStates, sizeof(legStates));
+    memcpy(chassisControllerDebug.controlState, controlState, sizeof(controlState));
+    memcpy(chassisControllerDebug.lqrK,
+           lqrK,
+           sizeof(lqrK));
+    memcpy(chassisControllerDebug.motionOutput, motionOutput, sizeof(motionOutput));
+    memcpy(chassisControllerDebug.supportForcesN, supportForcesN, sizeof(supportForcesN));
+    memcpy(chassisControllerDebug.lqrInputLegLengthM,
+           lqrInputLegLengthM,
+           sizeof(lqrInputLegLengthM));
+    memcpy(chassisControllerDebug.lqrLimitedLegLengthM,
+           lqrLimitedLegLengthM,
+           sizeof(lqrLimitedLegLengthM));
+    memcpy(chassisControllerDebug.wheelAngularVelocityRadps,
            wheelAngularVelocityRadps,
            sizeof(wheelAngularVelocityRadps));
-    chassisControllerState.debug.forwardVelocityMps = forwardVelocityMps;
-    chassisControllerState.debug.isStateValid = 1U;
-
-    return APP_STATUS_OK;
-}
-
-/**
- * @brief 读取最近一次控制器中间量。
- *
- * debug 中的 isStateValid 为 0 时，说明最近一次控制计算未完整通过。
- */
-app_status_t Module_Chassis_Controller_GetDebug(module_chassis_controller_debug_t *debug)
-{
-    if (debug == NULL)
-    {
-        return APP_STATUS_INVALID_PARAM;
-    }
-
-    *debug = chassisControllerState.debug;
-
-    return APP_STATUS_OK;
+    chassisControllerDebug.rawForwardVelocityMps = rawForwardVelocityMps;
+    chassisControllerDebug.forwardVelocityMps =
+        controlState[MODULE_CHASSIS_STATE_FORWARD_VELOCITY];
+    chassisControllerDebug.forwardAccelerationMps2 = forwardAccelerationMps2;
+    chassisControllerDebug.fusedForwardAccelerationMps2 = fusedForwardAccelerationMps2;
+    chassisControllerDebug.forwardPositionM =
+        controlState[MODULE_CHASSIS_STATE_FORWARD_POSITION];
+    chassisControllerDebug.isLqrKFitEnabled = isLqrKFitEnabled;
+    chassisControllerDebug.isLqrKLengthLimited = isLqrKLengthLimited;
+    chassisControllerDebug.isStateValid = 1U;
 }

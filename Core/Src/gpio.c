@@ -53,8 +53,16 @@ void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, ACC_CS_Pin|GYRO_CS_Pin, GPIO_PIN_SET);
+  /* 本家 H7 板级电源使能：上电拉高 24V_1、24V_2 和 5V。 */
+  HAL_GPIO_WritePin(GPIOC, POWER_24V_2_Pin|POWER_24V_1_Pin|POWER_5V_Pin
+                          |ACC_CS_Pin|GYRO_CS_Pin, GPIO_PIN_SET);
+
+  /* 配置板级电源使能脚。 */
+  GPIO_InitStruct.Pin = POWER_24V_2_Pin|POWER_24V_1_Pin|POWER_5V_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pins : ACC_CS_Pin GYRO_CS_Pin */
   GPIO_InitStruct.Pin = ACC_CS_Pin|GYRO_CS_Pin;

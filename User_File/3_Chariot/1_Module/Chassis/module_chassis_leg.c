@@ -11,18 +11,13 @@ typedef struct
     float y;
 } module_chassis_leg_vector_t;
 
-static uint8_t Module_Chassis_Leg_IsValidDenominator(float value)
-{
-    return (fabsf(value) > MODULE_CHASSIS_LEG_EPSILON) ? 1U : 0U;
-}
-
 /**
  * @brief 根据前后主动杆角度计算五连杆几何状态。
  *
  * B、D 是两根主动杆末端点，C 是两根从动杆的交点。
  * 求解失败说明当前关节角不满足五连杆闭链几何，控制器应进入安全输出。
  */
-static app_status_t Module_Chassis_Leg_CalculateForwardGeometry(
+static void Module_Chassis_Leg_CalculateForwardGeometry(
     const module_chassis_leg_geometry_config_t *geometry,
     float phi1Rad,
     float phi4Rad,
@@ -40,12 +35,6 @@ static app_status_t Module_Chassis_Leg_CalculateForwardGeometry(
     float sqrtArgument;
     float sqrtValue;
 
-    if ((geometry == NULL) || (state == NULL) || (pointB == NULL) ||
-        (pointC == NULL) || (pointD == NULL))
-    {
-        return APP_STATUS_INVALID_PARAM;
-    }
-
     /* 先由两个主动杆角度确定 B、D 点，坐标原点取左右固定铰点中点。 */
     pointB->x = (-geometry->frameJointDistanceM * 0.5f) +
                 (geometry->link1LengthM * cosf(phi1Rad));
@@ -59,7 +48,8 @@ static app_status_t Module_Chassis_Leg_CalculateForwardGeometry(
     pointBDLength = sqrtf((pointBDx * pointBDx) + (pointBDy * pointBDy));
     if (pointBDLength <= MODULE_CHASSIS_LEG_EPSILON)
     {
-        return APP_STATUS_ERROR;
+        memset(state, 0, sizeof(*state));
+        return;
     }
 
     /*
@@ -75,7 +65,8 @@ static app_status_t Module_Chassis_Leg_CalculateForwardGeometry(
                    (equationC * equationC);
     if (sqrtArgument < -MODULE_CHASSIS_LEG_EPSILON)
     {
-        return APP_STATUS_ERROR;
+        memset(state, 0, sizeof(*state));
+        return;
     }
     if (sqrtArgument < 0.0f)
     {
@@ -83,7 +74,7 @@ static app_status_t Module_Chassis_Leg_CalculateForwardGeometry(
     }
 
     sqrtValue = sqrtf(sqrtArgument);
-    /* 当前机构只选用与 Webots/实机装配一致的交点分支，不在运行时切换构型。 */
+    /* 当前机构只选用与实机装配一致的交点分支，不在运行时切换构型。 */
     state->phi2Rad = 2.0f * atan2f(equationB + sqrtValue,
                                    equationA + equationC);
     pointC->x = (-geometry->frameJointDistanceM * 0.5f) +
@@ -99,12 +90,11 @@ static app_status_t Module_Chassis_Leg_CalculateForwardGeometry(
     if ((state->legLengthM <= geometry->minLegLengthM) ||
         (state->legLengthM <= MODULE_CHASSIS_LEG_EPSILON))
     {
-        return APP_STATUS_ERROR;
+        memset(state, 0, sizeof(*state));
+        return;
     }
 
     state->phi0Rad = atan2f(pointC->y, pointC->x);
-
-    return APP_STATUS_OK;
 }
 
 /**
@@ -112,7 +102,7 @@ static app_status_t Module_Chassis_Leg_CalculateForwardGeometry(
  *
  * 速度计算使用闭链约束的一阶导数，先解出从动杆角速度，再得到 C 点速度。
  */
-static app_status_t Module_Chassis_Leg_CalculateVelocity(
+static void Module_Chassis_Leg_CalculateVelocity(
     const module_chassis_leg_geometry_config_t *geometry,
     const module_chassis_leg_state_t *state,
     const module_chassis_leg_vector_t *pointB,
@@ -134,12 +124,6 @@ static app_status_t Module_Chassis_Leg_CalculateVelocity(
     float rhsY;
     float phi2VelocityRadps;
     float legLengthSquared;
-
-    if ((geometry == NULL) || (state == NULL) || (pointB == NULL) ||
-        (pointC == NULL) || (pointD == NULL) || (outputState == NULL))
-    {
-        return APP_STATUS_INVALID_PARAM;
-    }
 
     (void)pointB;
     (void)pointD;
@@ -163,9 +147,10 @@ static app_status_t Module_Chassis_Leg_CalculateVelocity(
     matrix12 = geometry->link3LengthM * sinf(state->phi3Rad);
     matrix22 = -geometry->link3LengthM * cosf(state->phi3Rad);
     determinant = (matrix11 * matrix22) - (matrix12 * matrix21);
-    if (Module_Chassis_Leg_IsValidDenominator(determinant) == 0U)
+    if (fabsf(determinant) <= MODULE_CHASSIS_LEG_EPSILON)
     {
-        return APP_STATUS_ERROR;
+        memset(outputState, 0, sizeof(*outputState));
+        return;
     }
 
     rhsX = pointDVelocity.x - pointBVelocity.x;
@@ -183,40 +168,32 @@ static app_status_t Module_Chassis_Leg_CalculateVelocity(
         outputState->legLengthM;
 
     legLengthSquared = outputState->legLengthM * outputState->legLengthM;
-    if (Module_Chassis_Leg_IsValidDenominator(legLengthSquared) == 0U)
+    if (fabsf(legLengthSquared) <= MODULE_CHASSIS_LEG_EPSILON)
     {
-        return APP_STATUS_ERROR;
+        memset(outputState, 0, sizeof(*outputState));
+        return;
     }
 
     /*
-     * 控制状态使用的是 theta = 竖直参考角 - phi0 + pitch。
-     * 因此腿摆速度为 -d(phi0)/dt，正值表示 theta 增大。
+     * 这里保存 d(phi0)/dt，控制器按 SPR 的 theta 定义再组合机体俯仰角速度。
      */
     outputState->legSwingVelocityRadps =
-        -(((pointC->x * pointCVelocity.y) - (pointC->y * pointCVelocity.x)) /
-          legLengthSquared);
-
-    return APP_STATUS_OK;
+        ((pointC->x * pointCVelocity.y) - (pointC->y * pointCVelocity.x)) /
+        legLengthSquared;
 }
 
-app_status_t Module_Chassis_Leg_CalculateState(const module_chassis_leg_config_t *config,
-                                               float frontPositionRad,
-                                               float backPositionRad,
-                                               float frontVelocityRadps,
-                                               float backVelocityRadps,
-                                               module_chassis_leg_state_t *state)
+void Module_Chassis_Leg_CalculateState(const module_chassis_leg_config_t *config,
+                                       float frontPositionRad,
+                                       float backPositionRad,
+                                       float frontVelocityRadps,
+                                       float backVelocityRadps,
+                                       module_chassis_leg_state_t *state)
 {
     module_chassis_leg_vector_t pointB = {0.0f, 0.0f};
     module_chassis_leg_vector_t pointC = {0.0f, 0.0f};
     module_chassis_leg_vector_t pointD = {0.0f, 0.0f};
     float phi1VelocityRadps;
     float phi4VelocityRadps;
-    app_status_t status;
-
-    if ((config == NULL) || (state == NULL))
-    {
-        return APP_STATUS_INVALID_PARAM;
-    }
 
     /* 电机反馈角先按模型配置转换成五连杆几何角，方向和零位都不在控制器里修正。 */
     memset(state, 0, sizeof(*state));
@@ -227,16 +204,16 @@ app_status_t Module_Chassis_Leg_CalculateState(const module_chassis_leg_config_t
                      (config->joints[MODULE_CHASSIS_LEG_JOINT_BACK].angleScale *
                       backPositionRad);
 
-    status = Module_Chassis_Leg_CalculateForwardGeometry(&config->geometry,
-                                                         state->phi1Rad,
-                                                         state->phi4Rad,
-                                                         state,
-                                                         &pointB,
-                                                         &pointC,
-                                                         &pointD);
-    if (status != APP_STATUS_OK)
+    Module_Chassis_Leg_CalculateForwardGeometry(&config->geometry,
+                                                state->phi1Rad,
+                                                state->phi4Rad,
+                                                state,
+                                                &pointB,
+                                                &pointC,
+                                                &pointD);
+    if (state->legLengthM <= MODULE_CHASSIS_LEG_EPSILON)
     {
-        return status;
+        return;
     }
 
     /* 角速度同样只在几何层做方向映射，保证状态量单位统一为 rad/s。 */
@@ -247,45 +224,42 @@ app_status_t Module_Chassis_Leg_CalculateState(const module_chassis_leg_config_t
         config->joints[MODULE_CHASSIS_LEG_JOINT_BACK].angleScale *
         backVelocityRadps;
 
-    return Module_Chassis_Leg_CalculateVelocity(&config->geometry,
-                                                state,
-                                                &pointB,
-                                                &pointC,
-                                                &pointD,
-                                                phi1VelocityRadps,
-                                                phi4VelocityRadps,
-                                                state);
+    Module_Chassis_Leg_CalculateVelocity(&config->geometry,
+                                         state,
+                                         &pointB,
+                                         &pointC,
+                                         &pointD,
+                                         phi1VelocityRadps,
+                                         phi4VelocityRadps,
+                                         state);
 }
 
-app_status_t Module_Chassis_Leg_MapVirtualForce(const module_chassis_leg_config_t *config,
-                                                const module_chassis_leg_state_t *state,
-                                                float supportForceN,
-                                                float swingTorqueNm,
-                                                module_chassis_leg_joint_torque_t *jointTorque)
+void Module_Chassis_Leg_MapVirtualForce(const module_chassis_leg_config_t *config,
+                                        const module_chassis_leg_state_t *state,
+                                        float supportForceN,
+                                        float swingTorqueNm,
+                                        module_chassis_leg_joint_torque_t *jointTorque)
 {
     float denominator;
     float frontTorqueByGeometry;
     float backTorqueByGeometry;
 
-    if ((config == NULL) || (state == NULL) || (jointTorque == NULL))
-    {
-        return APP_STATUS_INVALID_PARAM;
-    }
+    memset(jointTorque, 0, sizeof(*jointTorque));
 
     /*
      * denominator 来自五连杆雅可比矩阵。
      * 接近 0 表示力到关节力矩的映射奇异，继续输出会放大力矩命令。
      */
     denominator = sinf(state->phi2Rad - state->phi3Rad);
-    if ((Module_Chassis_Leg_IsValidDenominator(denominator) == 0U) ||
-        (Module_Chassis_Leg_IsValidDenominator(state->legLengthM) == 0U))
+    if ((fabsf(denominator) <= MODULE_CHASSIS_LEG_EPSILON) ||
+        (fabsf(state->legLengthM) <= MODULE_CHASSIS_LEG_EPSILON))
     {
-        return APP_STATUS_ERROR;
+        return;
     }
 
     /*
-     * swingTorqueNm 是虚拟腿摆广义力矩，正方向为使 theta 增大。
-     * Webots 符号测试确认 theta 增大时虚拟腿向机身后方摆动。
+     * swingTorqueNm 是虚拟腿摆广义力矩，正方向跟随 SPR 状态定义。
+     * 最终电机方向仍需要通过 torqueScale 和实机低力矩测试确认。
      */
     /* 前髋关节力矩由虚拟支撑力分量和虚拟腿摆力矩分量叠加得到。 */
     frontTorqueByGeometry =
@@ -317,6 +291,4 @@ app_status_t Module_Chassis_Leg_MapVirtualForce(const module_chassis_leg_config_
     jointTorque->backTorqueNm =
         backTorqueByGeometry *
         config->joints[MODULE_CHASSIS_LEG_JOINT_BACK].torqueScale;
-
-    return APP_STATUS_OK;
 }

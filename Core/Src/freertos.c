@@ -1,4 +1,4 @@
-﻿/* USER CODE BEGIN Header */
+/* USER CODE BEGIN Header */
 /**
   ******************************************************************************
   * File Name          : freertos.c
@@ -27,7 +27,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "task_can.h"
-#include "task_chassis.h"
+#include "chassis_task.h"
 #include "task_imu.h"
 
 /* USER CODE END Includes */
@@ -100,7 +100,7 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_THREADS */
   CAN_Task_Init();
-  Chassis_Task_Init();
+  ChassisTask_Init();
   IMU_Task_Init();
   /* USER CODE END RTOS_THREADS */
 

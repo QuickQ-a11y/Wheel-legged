@@ -6,7 +6,6 @@ extern "C" {
 #endif
 
 #include "app_config.h"
-#include "app_status.h"
 #include "fdcan.h"
 
 #include <stdint.h>
@@ -35,24 +34,24 @@ extern driver_fdcan_object_t driverFdcan2Object;
  *
  * 驱动层只配置硬件收发和接收回调，不解析电机协议。
  */
-app_status_t Driver_FDCAN_Init(FDCAN_HandleTypeDef *handle,
-                            driver_fdcan_rx_callback_t rxCallback);
+void Driver_FDCAN_Init(FDCAN_HandleTypeDef *handle,
+                       driver_fdcan_rx_callback_t rxCallback);
 
 /**
  * @brief 更新指定 FDCAN 外设的接收回调。
  */
-app_status_t Driver_FDCAN_RegisterRxCallback(FDCAN_HandleTypeDef *handle,
-                                          driver_fdcan_rx_callback_t rxCallback);
+void Driver_FDCAN_RegisterRxCallback(FDCAN_HandleTypeDef *handle,
+                                     driver_fdcan_rx_callback_t rxCallback);
 
 /**
  * @brief 发送一帧标准 ID Classic CAN 数据帧。
  *
  * identifier 范围为 0x000..0x7FF，length 最大为 8 字节。
  */
-app_status_t Driver_FDCAN_SendData(FDCAN_HandleTypeDef *handle,
-                                uint32_t identifier,
-                                const uint8_t *data,
-                                uint8_t length);
+void Driver_FDCAN_SendData(FDCAN_HandleTypeDef *handle,
+                           uint32_t identifier,
+                           const uint8_t *data,
+                           uint8_t length);
 
 /**
  * @brief 将 HAL DLC 字段转换为实际数据长度。

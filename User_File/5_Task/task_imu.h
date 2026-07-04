@@ -5,7 +5,6 @@
 extern "C" {
 #endif
 
-#include "app_status.h"
 #include "device_bmi088.h"
 
 typedef struct
@@ -20,11 +19,14 @@ typedef struct
     float rollRad;                                   /* 横滚角，单位 rad。 */
     float pitchRad;                                  /* 俯仰角，单位 rad。 */
     float yawRad;                                    /* 偏航角，单位 rad。 */
+    float motionAccMps2[BMI088_AXIS_COUNT];          /* 去重力后的自然坐标系运动加速度，单位 m/s^2。 */
     float dtSec;                                     /* 最近一次姿态积分周期，单位 s。 */
 } task_imu_state_t;
 
+extern task_imu_state_t imuTaskDebugState;           /* Watch 窗口长期观察用 IMU 快照，业务读取仍使用 IMU_Task_GetState。 */
+
 void IMU_Task_Init(void);
-app_status_t IMU_Task_GetState(task_imu_state_t *state);
+void IMU_Task_GetState(task_imu_state_t *state);
 
 #ifdef __cplusplus
 }

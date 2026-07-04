@@ -47,7 +47,15 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     User_File/1_Middleware/1_Driver/FDCAN/driver_fdcan.c
     User_File/1_Middleware/1_Driver/SPI/driver_spi.c
+    User_File/1_Middleware/2_Algorithm/Kalman.c
+    User_File/1_Middleware/2_Algorithm/LQR.c
     User_File/1_Middleware/2_Algorithm/PID.c
+    Middlewares/ST/ARM/DSP/Source/MatrixFunctions/arm_mat_init_f32.c
+    Middlewares/ST/ARM/DSP/Source/MatrixFunctions/arm_mat_add_f32.c
+    Middlewares/ST/ARM/DSP/Source/MatrixFunctions/arm_mat_sub_f32.c
+    Middlewares/ST/ARM/DSP/Source/MatrixFunctions/arm_mat_mult_f32.c
+    Middlewares/ST/ARM/DSP/Source/MatrixFunctions/arm_mat_trans_f32.c
+    Middlewares/ST/ARM/DSP/Source/MatrixFunctions/arm_mat_inverse_f32.c
     User_File/2_Device/IMU/BMI088/device_bmi088.c
     User_File/2_Device/Motor/Motor_DM/device_motor_dm.c
     User_File/2_Device/Motor/Motor_DJI/device_motor_dji.c
@@ -56,7 +64,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     User_File/3_Chariot/1_Module/Chassis/module_chassis_leg.c
     User_File/3_Chariot/1_Module/Chassis/module_chassis_model.c
     User_File/5_Task/task_can.c
-    User_File/5_Task/task_chassis.c
+    User_File/5_Task/chassis_task.c
     User_File/5_Task/task_imu.c
     User_File/5_Task/task_can_dispatch.c
 )
@@ -73,11 +81,15 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     User_File/2_Device/Motor/Motor_DJI
     User_File/3_Chariot/1_Module/Chassis
     User_File/5_Task
+    Middlewares/ST/ARM/DSP/Include
+    Middlewares/ST/ARM/DSP/PrivateInclude
 )
 
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
+    ARM_MATH_CM7
+    DISABLEFLOAT16
 )
 
 # Remove wrong libob.a library dependency when using cpp files

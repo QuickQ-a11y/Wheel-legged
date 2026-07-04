@@ -10,12 +10,12 @@ static int16_t Motor_DJI_MakeInt16(uint8_t highByte, uint8_t lowByte)
     return (int16_t)(((uint16_t)highByte << 8U) | (uint16_t)lowByte);
 }
 
-app_status_t Motor_DJI_UpdateFeedback(motor_dji_t *motor,
-                                      const uint8_t data[APP_CONFIG_DJI_FEEDBACK_LENGTH])
+void Motor_DJI_UpdateFeedback(motor_dji_t *motor,
+                              const uint8_t data[APP_CONFIG_DJI_FEEDBACK_LENGTH])
 {
     if ((motor == NULL) || (data == NULL))
     {
-        return APP_STATUS_INVALID_PARAM;
+        return;
     }
 
     motor->lastEncoderRaw = motor->encoderRaw;
@@ -26,8 +26,6 @@ app_status_t Motor_DJI_UpdateFeedback(motor_dji_t *motor,
     motor->feedbackCount++;
     motor->lastUpdateTick = HAL_GetTick();
     motor->isOnline = 1U;
-
-    return APP_STATUS_OK;
 }
 
 uint8_t Motor_DJI_IsOnline(const motor_dji_t *motor, uint32_t nowTick)

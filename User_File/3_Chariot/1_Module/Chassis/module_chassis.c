@@ -5,7 +5,6 @@
 
 #include <string.h>
 
-static module_chassis_output_t chassisLastOutput;
 static const module_chassis_model_config_t *chassisModelConfig;
 
 /**
@@ -15,25 +14,39 @@ static const module_chassis_model_config_t *chassisModelConfig;
  */
 static void Module_Chassis_SetZeroOutput(module_chassis_output_t *output)
 {
-    if (output == NULL)
-    {
-        return;
-    }
-
     memset(output, 0, sizeof(*output));
     output->safeOutput = 1U;
 }
 
-/**
- * @brief 根据输入状态生成故障标志。
- *
- * 当前检查使能、IMU、两类电机在线状态和 CAN 错误累计值。
- */
-static uint32_t Module_Chassis_CheckFaults(const module_chassis_input_t *input)
+void Module_Chassis_Init(void)
 {
-    uint32_t faultFlags = MODULE_CHASSIS_FAULT_NONE;
+    chassisModelConfig = Module_Chassis_Model_GetDefaultConfig();
+    Module_Chassis_Controller_Init(chassisModelConfig);
+}
+
+void Module_Chassis_ResetMotionState(void)
+{
+    if (chassisModelConfig != NULL)
+    {
+        Module_Chassis_Controller_ResetMotionState(chassisModelConfig);
+    }
+}
+
+void Module_Chassis_RunControl(const module_chassis_input_t *input,
+                               module_chassis_output_t *output)
+{
+    uint32_t faultFlags;
+    uint8_t jointOutputAllowed;
+    uint8_t wheelOutputAllowed;
     uint32_t index;
 
+    Module_Chassis_SetZeroOutput(output);
+
+    /*
+     * 故障位直接在主流程里生成，避免再包一层 Check 函数。
+     * 设备异常时不会进入控制器，输出继续保持安全零输出。
+     */
+    faultFlags = MODULE_CHASSIS_FAULT_NONE;
     if (input->isEnabled == 0U)
     {
         faultFlags |= MODULE_CHASSIS_FAULT_DISABLED;
@@ -68,71 +81,35 @@ static uint32_t Module_Chassis_CheckFaults(const module_chassis_input_t *input)
     {
         faultFlags |= MODULE_CHASSIS_FAULT_CAN;
     }
-
-    return faultFlags;
-}
-
-static uint8_t Module_Chassis_IsOutputAllowed(const module_chassis_model_config_t *config)
-{
-    uint8_t jointOutputAllowed;
-    uint8_t wheelOutputAllowed;
-
-    if ((config == NULL) || (APP_CONFIG_CHASSIS_CONTROLLER_OUTPUT_ENABLE == 0U))
-    {
-        return 0U;
-    }
-
-    jointOutputAllowed =
-        ((config->output.jointTorqueOutputEnabled != 0U) &&
-         (config->output.jointTorqueLimitNm > 0.0f)) ? 1U : 0U;
-    wheelOutputAllowed =
-        ((config->output.wheelCurrentOutputEnabled != 0U) &&
-         (config->wheel.torqueLimitNm > 0.0f) &&
-         (config->wheel.torqueToCurrentRaw != 0.0f) &&
-         (config->wheel.currentLimitRaw > 0)) ? 1U : 0U;
-
-    return ((jointOutputAllowed != 0U) || (wheelOutputAllowed != 0U)) ? 1U : 0U;
-}
-
-void Module_Chassis_Init(void)
-{
-    chassisModelConfig = Module_Chassis_Model_GetDefaultConfig();
-    Module_Chassis_Controller_Init(chassisModelConfig);
-    Module_Chassis_SetZeroOutput(&chassisLastOutput);
-    chassisLastOutput.faultFlags = MODULE_CHASSIS_FAULT_DISABLED;
-}
-
-app_status_t Module_Chassis_Update(const module_chassis_input_t *input,
-                                module_chassis_output_t *output)
-{
-    uint32_t faultFlags;
-
-    if ((input == NULL) || (output == NULL))
-    {
-        return APP_STATUS_INVALID_PARAM;
-    }
-
-    Module_Chassis_SetZeroOutput(output);
-    faultFlags = Module_Chassis_CheckFaults(input);
     output->faultFlags = faultFlags;
 
     if ((faultFlags == MODULE_CHASSIS_FAULT_NONE) && (chassisModelConfig != NULL))
     {
-        app_status_t controllerStatus =
-            Module_Chassis_Controller_Update(chassisModelConfig, input, output);
-
-        if (controllerStatus != APP_STATUS_OK)
-        {
-            Module_Chassis_SetZeroOutput(output);
-            output->faultFlags = MODULE_CHASSIS_FAULT_CONTROLLER;
-        }
+        Module_Chassis_Controller_RunControlLoop(chassisModelConfig, input, output);
+    }
+    else if (chassisModelConfig != NULL)
+    {
+        Module_Chassis_Controller_ResetMotionState(chassisModelConfig);
     }
 
     /*
      * 控制链已经参与计算，但默认编译配置和模型配置均不允许非零输出。
      * 后续实机调试必须同时打开编译宏、模型输出开关和限幅参数。
      */
-    if (Module_Chassis_IsOutputAllowed(chassisModelConfig) == 0U)
+    jointOutputAllowed =
+        ((chassisModelConfig != NULL) &&
+         (APP_CONFIG_CHASSIS_CONTROLLER_OUTPUT_ENABLE != 0U) &&
+         (chassisModelConfig->output.jointTorqueOutputEnabled != 0U) &&
+         (chassisModelConfig->output.jointTorqueLimitNm > 0.0f)) ? 1U : 0U;
+    wheelOutputAllowed =
+        ((chassisModelConfig != NULL) &&
+         (APP_CONFIG_CHASSIS_CONTROLLER_OUTPUT_ENABLE != 0U) &&
+         (chassisModelConfig->output.wheelCurrentOutputEnabled != 0U) &&
+         (chassisModelConfig->wheel.torqueLimitNm > 0.0f) &&
+         (chassisModelConfig->wheel.torqueToCurrentRaw != 0.0f) &&
+         (chassisModelConfig->wheel.currentLimitRaw > 0)) ? 1U : 0U;
+
+    if ((jointOutputAllowed == 0U) && (wheelOutputAllowed == 0U))
     {
         output->safeOutput = 1U;
     }
@@ -140,8 +117,4 @@ app_status_t Module_Chassis_Update(const module_chassis_input_t *input,
     {
         output->safeOutput = (output->faultFlags == MODULE_CHASSIS_FAULT_NONE) ? 0U : 1U;
     }
-
-    chassisLastOutput = *output;
-
-    return APP_STATUS_OK;
 }

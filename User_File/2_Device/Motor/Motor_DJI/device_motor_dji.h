@@ -6,7 +6,6 @@ extern "C" {
 #endif
 
 #include "app_config.h"
-#include "app_status.h"
 
 #include <stdint.h>
 
@@ -27,8 +26,8 @@ typedef struct
  *
  * 反馈帧为大端格式：编码器、转速、电流各 16 位，温度 8 位。
  */
-app_status_t Motor_DJI_UpdateFeedback(motor_dji_t *motor,
-                                      const uint8_t data[APP_CONFIG_DJI_FEEDBACK_LENGTH]);
+void Motor_DJI_UpdateFeedback(motor_dji_t *motor,
+                              const uint8_t data[APP_CONFIG_DJI_FEEDBACK_LENGTH]);
 
 /**
  * @brief 判断 DJI 电机反馈是否仍在线。

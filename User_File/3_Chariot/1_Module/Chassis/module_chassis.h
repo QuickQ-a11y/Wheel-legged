@@ -6,7 +6,6 @@ extern "C" {
 #endif
 
 #include "app_config.h"
-#include "app_status.h"
 
 #include <stdint.h>
 
@@ -27,6 +26,7 @@ typedef struct
     float pitchRad;              /* 俯仰角，单位 rad。 */
     float yawRad;                /* 偏航角，单位 rad。 */
     float gyroRadps[APP_CONFIG_IMU_AXIS_COUNT]; /* 去零偏后的陀螺角速度，单位 rad/s。 */
+    float motionAccMps2[APP_CONFIG_IMU_AXIS_COUNT]; /* 去重力后的自然坐标系运动加速度，单位 m/s^2。 */
     float dtSec;                 /* 最近一次姿态积分周期，单位 s。 */
 } module_chassis_imu_state_t;
 
@@ -75,12 +75,19 @@ typedef struct
 void Module_Chassis_Init(void);
 
 /**
- * @brief 根据输入状态计算底盘输出。
+ * @brief 清空底盘运动融合状态。
  *
- * 第一阶段接入控制器状态计算，但默认仍保持安全零输出。
+ * 零力矩、故障或模式切出站立控制时调用，避免旧的速度和位移积分影响下次控制。
  */
-app_status_t Module_Chassis_Update(const module_chassis_input_t *input,
-                                module_chassis_output_t *output);
+void Module_Chassis_ResetMotionState(void);
+
+/**
+ * @brief 执行一轮底盘控制并生成输出。
+ *
+ * 包含故障检查、控制器计算和安全输出判断。第一阶段默认仍保持安全零输出。
+ */
+void Module_Chassis_RunControl(const module_chassis_input_t *input,
+                               module_chassis_output_t *output);
 
 #ifdef __cplusplus
 }

@@ -137,38 +137,33 @@ static int16_t BMI088_MakeTemperatureRaw(const uint8_t data[2])
  *
  * ACC 读协议需要“命令 + dummy + 数据”处在同一次 CS 有效窗口内。
  */
-static app_status_t BMI088_ReadAccRegisters(bmi088_t *bmi088,
-                                            uint8_t reg,
-                                            uint8_t *data,
-                                            uint8_t length)
+static uint8_t BMI088_ReadAccRegisters(bmi088_t *bmi088,
+                                       uint8_t reg,
+                                       uint8_t *data,
+                                       uint8_t length)
 {
     uint8_t txBuffer[BMI088_SPI_MAX_DATA_LENGTH + BMI088_ACC_READ_OVERHEAD] = {0};
     uint8_t rxBuffer[BMI088_SPI_MAX_DATA_LENGTH + BMI088_ACC_READ_OVERHEAD] = {0};
-    app_status_t status;
 
     if ((bmi088 == NULL) ||
         (data == NULL) ||
         (length == 0U) ||
         (length > BMI088_SPI_MAX_DATA_LENGTH))
     {
-        return APP_STATUS_INVALID_PARAM;
+        return 0U;
     }
 
     txBuffer[0] = BMI088_READ_BIT | reg;
-    status = Driver_SPI_TransmitReceive(bmi088->config.spiHandle,
-                                     &bmi088->config.accChipSelect,
-                                     txBuffer,
-                                     rxBuffer,
-                                     (uint16_t)(length + BMI088_ACC_READ_OVERHEAD),
-                                     BMI088_GetTimeout(bmi088));
-    if (status != APP_STATUS_OK)
-    {
-        return status;
-    }
+    Driver_SPI_TransmitReceive(bmi088->config.spiHandle,
+                               &bmi088->config.accChipSelect,
+                               txBuffer,
+                               rxBuffer,
+                               (uint16_t)(length + BMI088_ACC_READ_OVERHEAD),
+                               BMI088_GetTimeout(bmi088));
 
     memcpy(data, &rxBuffer[BMI088_ACC_READ_OVERHEAD], length);
 
-    return APP_STATUS_OK;
+    return 1U;
 }
 
 /**
@@ -176,74 +171,73 @@ static app_status_t BMI088_ReadAccRegisters(bmi088_t *bmi088,
  *
  * GYRO 读协议为“命令 + 数据”，没有加速度计额外 dummy 字节。
  */
-static app_status_t BMI088_ReadGyroRegisters(bmi088_t *bmi088,
-                                             uint8_t reg,
-                                             uint8_t *data,
-                                             uint8_t length)
+static uint8_t BMI088_ReadGyroRegisters(bmi088_t *bmi088,
+                                        uint8_t reg,
+                                        uint8_t *data,
+                                        uint8_t length)
 {
     uint8_t txBuffer[BMI088_SPI_MAX_DATA_LENGTH + BMI088_GYRO_READ_OVERHEAD] = {0};
     uint8_t rxBuffer[BMI088_SPI_MAX_DATA_LENGTH + BMI088_GYRO_READ_OVERHEAD] = {0};
-    app_status_t status;
 
     if ((bmi088 == NULL) ||
         (data == NULL) ||
         (length == 0U) ||
         (length > BMI088_SPI_MAX_DATA_LENGTH))
     {
-        return APP_STATUS_INVALID_PARAM;
+        return 0U;
     }
 
     txBuffer[0] = BMI088_READ_BIT | reg;
-    status = Driver_SPI_TransmitReceive(bmi088->config.spiHandle,
-                                     &bmi088->config.gyroChipSelect,
-                                     txBuffer,
-                                     rxBuffer,
-                                     (uint16_t)(length + BMI088_GYRO_READ_OVERHEAD),
-                                     BMI088_GetTimeout(bmi088));
-    if (status != APP_STATUS_OK)
-    {
-        return status;
-    }
+    Driver_SPI_TransmitReceive(bmi088->config.spiHandle,
+                               &bmi088->config.gyroChipSelect,
+                               txBuffer,
+                               rxBuffer,
+                               (uint16_t)(length + BMI088_GYRO_READ_OVERHEAD),
+                               BMI088_GetTimeout(bmi088));
 
     memcpy(data, &rxBuffer[BMI088_GYRO_READ_OVERHEAD], length);
 
-    return APP_STATUS_OK;
+    return 1U;
 }
 
-static app_status_t BMI088_WriteAccRegister(bmi088_t *bmi088,
-                                            uint8_t reg,
-                                            uint8_t value)
+static uint8_t BMI088_WriteAccRegister(bmi088_t *bmi088,
+                                       uint8_t reg,
+                                       uint8_t value)
 {
     uint8_t txBuffer[2] = {reg, value};
 
     if (bmi088 == NULL)
     {
-        return APP_STATUS_INVALID_PARAM;
+        return 0U;
     }
 
-    return Driver_SPI_Transmit(bmi088->config.spiHandle,
-                            &bmi088->config.accChipSelect,
-                            txBuffer,
-                            sizeof(txBuffer),
-                            BMI088_GetTimeout(bmi088));
+    Driver_SPI_Transmit(bmi088->config.spiHandle,
+                        &bmi088->config.accChipSelect,
+                        txBuffer,
+                        sizeof(txBuffer),
+                        BMI088_GetTimeout(bmi088));
+
+    return 1U;
 }
 
-static app_status_t BMI088_WriteGyroRegister(bmi088_t *bmi088,
-                                             uint8_t reg,
-                                             uint8_t value)
+static uint8_t BMI088_WriteGyroRegister(bmi088_t *bmi088,
+                                        uint8_t reg,
+                                        uint8_t value)
 {
     uint8_t txBuffer[2] = {reg, value};
 
     if (bmi088 == NULL)
     {
-        return APP_STATUS_INVALID_PARAM;
+        return 0U;
     }
 
-    return Driver_SPI_Transmit(bmi088->config.spiHandle,
-                            &bmi088->config.gyroChipSelect,
-                            txBuffer,
-                            sizeof(txBuffer),
-                            BMI088_GetTimeout(bmi088));
+    Driver_SPI_Transmit(bmi088->config.spiHandle,
+                        &bmi088->config.gyroChipSelect,
+                        txBuffer,
+                        sizeof(txBuffer),
+                        BMI088_GetTimeout(bmi088));
+
+    return 1U;
 }
 
 /**
@@ -259,13 +253,13 @@ static uint32_t BMI088_WriteAndCheckAccRegister(bmi088_t *bmi088,
         return BMI088_ERROR_CONFIG;
     }
 
-    if (BMI088_WriteAccRegister(bmi088, config->reg, config->value) != APP_STATUS_OK)
+    if (BMI088_WriteAccRegister(bmi088, config->reg, config->value) == 0U)
     {
         return config->errorCode | BMI088_ERROR_SPI_TRANSFER;
     }
 
     HAL_Delay(1U);
-    if (BMI088_ReadAccRegisters(bmi088, config->reg, &readValue, 1U) != APP_STATUS_OK)
+    if (BMI088_ReadAccRegisters(bmi088, config->reg, &readValue, 1U) == 0U)
     {
         return config->errorCode | BMI088_ERROR_SPI_TRANSFER;
     }
@@ -286,13 +280,13 @@ static uint32_t BMI088_WriteAndCheckGyroRegister(bmi088_t *bmi088,
         return BMI088_ERROR_CONFIG;
     }
 
-    if (BMI088_WriteGyroRegister(bmi088, config->reg, config->value) != APP_STATUS_OK)
+    if (BMI088_WriteGyroRegister(bmi088, config->reg, config->value) == 0U)
     {
         return config->errorCode | BMI088_ERROR_SPI_TRANSFER;
     }
 
     HAL_Delay(1U);
-    if (BMI088_ReadGyroRegisters(bmi088, config->reg, &readValue, 1U) != APP_STATUS_OK)
+    if (BMI088_ReadGyroRegisters(bmi088, config->reg, &readValue, 1U) == 0U)
     {
         return config->errorCode | BMI088_ERROR_SPI_TRANSFER;
     }
@@ -309,17 +303,30 @@ static uint32_t BMI088_InitAcc(bmi088_t *bmi088)
     uint32_t errorCode = BMI088_ERROR_NONE;
     uint32_t index;
 
-    /* 上电后先 fake read，确保加速度计退出 I2C 兼容模式并进入 SPI 时序。 */
+    /*
+     * ACC 上电后第一次 SPI 读可能只完成接口模式切换。
+     * 这里按本家代码连续读两次，后续只用第二次结果判断芯片 ID。
+     */
     (void)BMI088_ReadAccRegisters(bmi088, BMI088_ACC_CHIP_ID_REG, &chipId, 1U);
     HAL_Delay(1U);
+    if (BMI088_ReadAccRegisters(bmi088, BMI088_ACC_CHIP_ID_REG, &chipId, 1U) == 0U)
+    {
+        return BMI088_ERROR_ACC_CHIP_ID | BMI088_ERROR_SPI_TRANSFER;
+    }
+    HAL_Delay(1U);
 
-    if (BMI088_WriteAccRegister(bmi088, BMI088_ACC_SOFTRESET_REG, BMI088_ACC_SOFTRESET_VALUE) != APP_STATUS_OK)
+    if (BMI088_WriteAccRegister(bmi088, BMI088_ACC_SOFTRESET_REG, BMI088_ACC_SOFTRESET_VALUE) == 0U)
     {
         return BMI088_ERROR_ACC_CHIP_ID | BMI088_ERROR_SPI_TRANSFER;
     }
     HAL_Delay(150U);
 
-    if (BMI088_ReadAccRegisters(bmi088, BMI088_ACC_CHIP_ID_REG, &chipId, 1U) != APP_STATUS_OK)
+    /*
+     * 软复位后也连续读两次，避免复位恢复阶段的首帧无效值影响初始化判断。
+     */
+    (void)BMI088_ReadAccRegisters(bmi088, BMI088_ACC_CHIP_ID_REG, &chipId, 1U);
+    HAL_Delay(1U);
+    if (BMI088_ReadAccRegisters(bmi088, BMI088_ACC_CHIP_ID_REG, &chipId, 1U) == 0U)
     {
         return BMI088_ERROR_ACC_CHIP_ID | BMI088_ERROR_SPI_TRANSFER;
     }
@@ -347,13 +354,27 @@ static uint32_t BMI088_InitGyro(bmi088_t *bmi088)
     uint32_t errorCode = BMI088_ERROR_NONE;
     uint32_t index;
 
-    if (BMI088_WriteGyroRegister(bmi088, BMI088_GYRO_SOFTRESET_REG, BMI088_GYRO_SOFTRESET_VALUE) != APP_STATUS_OK)
+    /*
+     * GYRO 没有 ACC 的额外 dummy 字节，但本家代码同样在复位前后各读两次，
+     * 这里保持相同初始化节奏，方便对照实机问题。
+     */
+    (void)BMI088_ReadGyroRegisters(bmi088, BMI088_GYRO_CHIP_ID_REG, &chipId, 1U);
+    HAL_Delay(1U);
+    if (BMI088_ReadGyroRegisters(bmi088, BMI088_GYRO_CHIP_ID_REG, &chipId, 1U) == 0U)
+    {
+        return BMI088_ERROR_GYRO_CHIP_ID | BMI088_ERROR_SPI_TRANSFER;
+    }
+    HAL_Delay(1U);
+
+    if (BMI088_WriteGyroRegister(bmi088, BMI088_GYRO_SOFTRESET_REG, BMI088_GYRO_SOFTRESET_VALUE) == 0U)
     {
         return BMI088_ERROR_GYRO_CHIP_ID | BMI088_ERROR_SPI_TRANSFER;
     }
     HAL_Delay(80U);
 
-    if (BMI088_ReadGyroRegisters(bmi088, BMI088_GYRO_CHIP_ID_REG, &chipId, 1U) != APP_STATUS_OK)
+    (void)BMI088_ReadGyroRegisters(bmi088, BMI088_GYRO_CHIP_ID_REG, &chipId, 1U);
+    HAL_Delay(1U);
+    if (BMI088_ReadGyroRegisters(bmi088, BMI088_GYRO_CHIP_ID_REG, &chipId, 1U) == 0U)
     {
         return BMI088_ERROR_GYRO_CHIP_ID | BMI088_ERROR_SPI_TRANSFER;
     }
@@ -372,7 +393,7 @@ static uint32_t BMI088_InitGyro(bmi088_t *bmi088)
     return errorCode;
 }
 
-app_status_t BMI088_Init(bmi088_t *bmi088, const bmi088_config_t *config)
+void BMI088_Init(bmi088_t *bmi088, const bmi088_config_t *config)
 {
     uint32_t errorCode;
 
@@ -382,7 +403,7 @@ app_status_t BMI088_Init(bmi088_t *bmi088, const bmi088_config_t *config)
         {
             bmi088->lastErrorCode = BMI088_ERROR_CONFIG;
         }
-        return APP_STATUS_INVALID_PARAM;
+        return;
     }
 
     memset(bmi088, 0, sizeof(*bmi088));
@@ -403,11 +424,9 @@ app_status_t BMI088_Init(bmi088_t *bmi088, const bmi088_config_t *config)
     errorCode = BMI088_InitAcc(bmi088);
     errorCode |= BMI088_InitGyro(bmi088);
     bmi088->lastErrorCode = errorCode;
-
-    return (errorCode == BMI088_ERROR_NONE) ? APP_STATUS_OK : APP_STATUS_ERROR;
 }
 
-app_status_t BMI088_Read(bmi088_t *bmi088, bmi088_data_t *data)
+void BMI088_Read(bmi088_t *bmi088, bmi088_data_t *data)
 {
     uint8_t accBuffer[6] = {0};
     uint8_t gyroBuffer[6] = {0};
@@ -416,15 +435,15 @@ app_status_t BMI088_Read(bmi088_t *bmi088, bmi088_data_t *data)
 
     if (bmi088 == NULL)
     {
-        return APP_STATUS_INVALID_PARAM;
+        return;
     }
 
-    if ((BMI088_ReadAccRegisters(bmi088, BMI088_ACC_XOUT_L_REG, accBuffer, sizeof(accBuffer)) != APP_STATUS_OK) ||
-        (BMI088_ReadGyroRegisters(bmi088, BMI088_GYRO_X_L_REG, gyroBuffer, sizeof(gyroBuffer)) != APP_STATUS_OK) ||
-        (BMI088_ReadAccRegisters(bmi088, BMI088_ACC_TEMP_M_REG, tempBuffer, sizeof(tempBuffer)) != APP_STATUS_OK))
+    if ((BMI088_ReadAccRegisters(bmi088, BMI088_ACC_XOUT_L_REG, accBuffer, sizeof(accBuffer)) == 0U) ||
+        (BMI088_ReadGyroRegisters(bmi088, BMI088_GYRO_X_L_REG, gyroBuffer, sizeof(gyroBuffer)) == 0U) ||
+        (BMI088_ReadAccRegisters(bmi088, BMI088_ACC_TEMP_M_REG, tempBuffer, sizeof(tempBuffer)) == 0U))
     {
         bmi088->lastErrorCode = BMI088_ERROR_SPI_TRANSFER;
-        return APP_STATUS_ERROR;
+        return;
     }
 
     for (axis = 0U; axis < BMI088_AXIS_COUNT; axis++)
@@ -446,8 +465,6 @@ app_status_t BMI088_Read(bmi088_t *bmi088, bmi088_data_t *data)
     {
         *data = bmi088->data;
     }
-
-    return APP_STATUS_OK;
 }
 
 uint32_t BMI088_GetErrorCode(const bmi088_t *bmi088)

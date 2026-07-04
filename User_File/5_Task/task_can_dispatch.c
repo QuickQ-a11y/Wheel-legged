@@ -22,7 +22,7 @@ void CAN_Task_RxMessageCallback(const task_can_rx_message_t *message)
     if ((message->bus == APP_CAN_BUS_FDCAN1) &&
         (message->length == APP_CONFIG_DM_FRAME_LENGTH))
     {
-        (void)Motor_DM_UpdateFeedback(message->bus, message->identifier, message->data);
+        Motor_DM_UpdateFeedback(message->bus, message->identifier, message->data);
         return;
     }
 
@@ -35,11 +35,11 @@ void CAN_Task_RxMessageCallback(const task_can_rx_message_t *message)
     switch (message->identifier)
     {
     case APP_CONFIG_DJI_LEFT_FEEDBACK_ID:
-        (void)Motor_DJI_UpdateFeedback(&chassisDjiWheels[0U], message->data);
+        Motor_DJI_UpdateFeedback(&chassisDjiWheels[0U], message->data);
         break;
 
     case APP_CONFIG_DJI_RIGHT_FEEDBACK_ID:
-        (void)Motor_DJI_UpdateFeedback(&chassisDjiWheels[1U], message->data);
+        Motor_DJI_UpdateFeedback(&chassisDjiWheels[1U], message->data);
         break;
 
     default:

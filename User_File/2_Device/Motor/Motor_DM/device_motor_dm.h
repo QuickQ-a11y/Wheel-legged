@@ -6,7 +6,6 @@ extern "C" {
 #endif
 
 #include "app_config.h"
-#include "app_status.h"
 
 #include <stdint.h>
 
@@ -53,21 +52,21 @@ void Motor_DM_Init(void);
 /**
  * @brief 解析一帧 DM MIT 反馈。
  */
-app_status_t Motor_DM_UpdateFeedback(app_can_bus_t bus,
-                                     uint32_t rxId,
-                                     const uint8_t data[APP_CONFIG_DM_FRAME_LENGTH]);
+void Motor_DM_UpdateFeedback(app_can_bus_t bus,
+                             uint32_t rxId,
+                             const uint8_t data[APP_CONFIG_DM_FRAME_LENGTH]);
 
 /**
  * @brief 设置单个 DM 电机命令缓存。
  */
-app_status_t Motor_DM_SetCommand(motor_dm_index_t index,
-                                 const motor_dm_command_t *command);
+void Motor_DM_SetCommand(motor_dm_index_t index,
+                         const motor_dm_command_t *command);
 
 /**
  * @brief 读取单个 DM 电机状态快照。
  */
-app_status_t Motor_DM_GetState(motor_dm_index_t index,
-                               motor_dm_state_t *state);
+void Motor_DM_GetState(motor_dm_index_t index,
+                       motor_dm_state_t *state);
 
 void Motor_DM_SetSafe(uint8_t safe);
 uint8_t Motor_DM_IsSafe(void);
