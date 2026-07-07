@@ -4,18 +4,19 @@
  * 本文件集中保存当前轮腿底盘的软件坐标、硬件映射和极性配置。
  *
  * 一、IMU 软件坐标约定
- * - input->imu.rollRad / pitchRad / yawRad 已由 IMU 任务解算为机体系姿态角。
+ * - input->imu.rollRad / pitchRad / yawRad 已由 IMU 任务转换为整车右手系姿态角。
+ * - 整车右手系定义为 X 前、Y 左、Z 上；角度和角速度按右手定则为正。
  * - 当前按 IMU 任务输出约定：gyroRadps[0] 为绕机体 X 轴横滚角速度，
  *   gyroRadps[1] 为绕机体 Y 轴俯仰角速度，gyroRadps[2] 为绕机体 Z 轴偏航角速度。
  * - gyroRadps[0] 当前配置为 roll rate，gyroRadps[1] 当前配置为 pitch rate，
  *   gyroRadps[2] 当前配置为 yaw rate。
- * - bodyPitchAngleScale、rollAngleScale、yawAngleScale 用于修正 IMU 安装方向。
- *   当前均为 +1，表示控制器直接使用 IMU 任务给出的角度正方向。
- * - motionAccMps2 为 IMU 任务去重力并转到自然坐标系后的运动加速度。
+ * - bodyPitchAngleScale、rollAngleScale、yawAngleScale 只用于匹配底盘控制状态定义，
+ *   不再用于左右手系转换；当前均为 +1，表示控制器直接使用整车右手系姿态。
+ * - motionAccMps2 为 IMU 任务去重力并转到整车右手系后的运动加速度。
  *   forwardAccelerationIndex / forwardAccelerationScale 定义其中哪一轴作为 dot_s
  *   卡尔曼融合的前向加速度输入。
- * - 如果实机安装方向与控制状态定义相反，只允许在本文件对应 scale 中改符号，
- *   不在控制器、任务层或 LQR 系数表里临时反号。
+ * - 如果底盘控制状态定义与整车右手系相反，只允许在本文件对应 scale 中改符号，
+ *   不在控制器或 LQR 系数表里临时反号。
  *
  * 二、轮电机软件极性
  * - 左轮反馈来自 DJI 数组下标 0，对应 CAN 反馈 ID 0x201。
@@ -106,9 +107,9 @@ static const module_chassis_model_config_t chassisDefaultModelConfig = {
     },
     .imu = {
         /*
-         * 当前 IMU 轴向映射：
+         * 当前 IMU 轴向映射使用整车右手系：
          * gyro[0] -> roll rate，gyro[1] -> body pitch rate，gyro[2] -> yaw rate。
-         * 所有 angle/rate scale 均为 +1，表示暂不反转 IMU 任务输出的姿态正方向。
+         * 所有 angle/rate scale 均为 +1，表示底盘直接使用整车右手系姿态正方向。
          */
         .bodyPitchRateGyroIndex = 1U,
         .rollRateGyroIndex = 0U,

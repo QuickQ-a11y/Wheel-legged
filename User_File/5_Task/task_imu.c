@@ -2,7 +2,10 @@
 
 #include "app_config.h"
 #include "main.h"
+#include "PID.h"
+#include "QuaternionEKF.h"
 #include "spi.h"
+#include "tim.h"
 
 #include "cmsis_os2.h"
 
@@ -16,6 +19,14 @@ static osMutexId_t imuStateMutex;
 static bmi088_t imuBmi088;
 task_imu_state_t imuTaskDebugState;
 
+static const algorithm_pid_config_t imuTemperaturePidConfig = {
+    .kp = APP_CONFIG_IMU_TEMP_PID_KP,
+    .ki = APP_CONFIG_IMU_TEMP_PID_KI,
+    .kd = APP_CONFIG_IMU_TEMP_PID_KD,
+    .integralLimit = APP_CONFIG_IMU_TEMP_PID_INTEGRAL_LIMIT,
+    .outputLimit = APP_CONFIG_IMU_TEMP_PWM_LIMIT,
+};
+
 static const osThreadAttr_t imuTaskAttributes = {
     .name = "ImuTask",
     .stack_size = 768U * 4U,
@@ -25,6 +36,48 @@ static const osThreadAttr_t imuTaskAttributes = {
 static const osMutexAttr_t imuStateMutexAttributes = {
     .name = "ImuStateMutex",
 };
+
+static float IMU_Task_LimitFloat(float value, float minValue, float maxValue)
+{
+    if (value < minValue)
+    {
+        return minValue;
+    }
+
+    if (value > maxValue)
+    {
+        return maxValue;
+    }
+
+    return value;
+}
+
+/**
+ * @brief 生成 IMU 姿态 EKF 参数。
+ *
+ * 参数集中来自 app_config.h；后续调实车时优先改配置，不在滤波流程里散落常数。
+ */
+static algorithm_quaternion_ekf_config_t IMU_Task_GetAttitudeFilterConfig(void)
+{
+    algorithm_quaternion_ekf_config_t config = {
+        .quaternionProcessNoise = APP_CONFIG_IMU_EKF_QUATERNION_PROCESS_NOISE,
+        .gyroBiasProcessNoise = APP_CONFIG_IMU_EKF_GYRO_BIAS_PROCESS_NOISE,
+        .accelMeasurementNoise = APP_CONFIG_IMU_EKF_ACCEL_MEASUREMENT_NOISE,
+        .quaternionInitialCovariance =
+            APP_CONFIG_IMU_EKF_QUATERNION_INITIAL_COVARIANCE,
+        .gyroBiasInitialCovariance =
+            APP_CONFIG_IMU_EKF_GYRO_BIAS_INITIAL_COVARIANCE,
+        .accelLpfTimeSec = APP_CONFIG_IMU_EKF_ACCEL_LPF_TIME_SEC,
+        .accelNormMinMps2 = APP_CONFIG_IMU_EKF_ACCEL_NORM_MIN_MPS2,
+        .accelNormMaxMps2 = APP_CONFIG_IMU_EKF_ACCEL_NORM_MAX_MPS2,
+        .gyroStableThresholdRadps =
+            APP_CONFIG_IMU_EKF_GYRO_STABLE_THRESHOLD_RADPS,
+        .gyroBiasCorrectionLimitRadps =
+            APP_CONFIG_IMU_EKF_GYRO_BIAS_CORRECTION_LIMIT_RADPS,
+    };
+
+    return config;
+}
 
 /**
  * @brief 累计启动阶段陀螺零偏。
@@ -36,11 +89,6 @@ static void IMU_Task_UpdateGyroBias(task_imu_state_t *state,
                                     uint32_t *biasSampleCount)
 {
     uint32_t axis;
-
-    if ((state == NULL) || (gyroSum == NULL) || (biasSampleCount == NULL))
-    {
-        return;
-    }
 
     if (*biasSampleCount >= APP_CONFIG_IMU_BIAS_SAMPLE_COUNT)
     {
@@ -59,78 +107,173 @@ static void IMU_Task_UpdateGyroBias(task_imu_state_t *state,
 }
 
 /**
- * @brief 用陀螺积分和加速度低频修正更新基础姿态。
+ * @brief 根据 SPR 的方式控制 BMI088 加热 PWM。
  *
- * yaw 当前没有磁力计或外部观测，只做陀螺积分，不能作为长期绝对航向。
+ * 输入来自 BMI088 温度读数和 app_config.h 中的温控参数；输出写入 TIM3_CH4，
+ * 同时把目标温度、误差、PID 输出和 PWM 比较值保存在 imuTaskDebugState 快照中。
+ */
+static void IMU_Task_UpdateTemperatureControl(task_imu_state_t *state,
+                                              algorithm_pid_state_t *temperaturePid)
+{
+    float pidOutput = 0.0f;
+    uint32_t pwmCompare;
+
+    state->temperatureTargetCelsius = APP_CONFIG_IMU_TEMP_TARGET_CELSIUS;
+    state->temperatureErrorCelsius =
+        APP_CONFIG_IMU_TEMP_TARGET_CELSIUS - state->bmi088Data.temperatureCelsius;
+    state->isTemperatureStable =
+        (fabsf(state->temperatureErrorCelsius) <=
+         APP_CONFIG_IMU_TEMP_STABLE_BAND_CELSIUS)
+            ? 1U
+            : 0U;
+
+    Algorithm_PID_UpdateByFeedbackRate(&imuTemperaturePidConfig,
+                                       temperaturePid,
+                                       APP_CONFIG_IMU_TEMP_TARGET_CELSIUS,
+                                       state->bmi088Data.temperatureCelsius,
+                                       0.0f,
+                                       APP_CONFIG_IMU_DEFAULT_DT_SEC,
+                                       &pidOutput);
+
+    pidOutput = IMU_Task_LimitFloat(pidOutput,
+                                    0.0f,
+                                    APP_CONFIG_IMU_TEMP_PWM_LIMIT);
+    state->isTemperatureProtected =
+        (state->bmi088Data.temperatureCelsius >=
+         APP_CONFIG_IMU_TEMP_PROTECT_CELSIUS)
+            ? 1U
+            : 0U;
+    if (state->isTemperatureProtected != 0U)
+    {
+        pidOutput = 0.0f;
+        Algorithm_PID_Init(temperaturePid);
+    }
+
+    pwmCompare = (uint32_t)pidOutput;
+    state->temperaturePidOutput = pidOutput;
+    state->temperaturePwmCompare = pwmCompare;
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, pwmCompare);
+}
+
+/**
+ * @brief 用四元数 EKF 更新姿态。
+ *
+ * 输入来自 BMI088 原始角速度/加速度和启动阶段静态零偏；输出写回 state 的姿态、
+ * 四元数、EKF 残余零偏和滤波后角速度。Yaw 没有外部观测，仍不能作为长期绝对航向。
  */
 static void IMU_Task_UpdateAttitude(task_imu_state_t *state,
+                                    algorithm_quaternion_ekf_t *attitudeFilter,
                                     uint32_t *lastUpdateTick)
 {
-    const bmi088_data_t *data;
+    const bmi088_data_t *data = &state->bmi088Data;
     uint32_t nowTick;
     float dtSec;
-    float gyroX;
-    float gyroY;
-    float gyroZ;
-    float accRoll;
-    float accPitch;
+    float gyroRadps[BMI088_AXIS_COUNT];
+    uint32_t axis;
 
-    if ((state == NULL) || (lastUpdateTick == NULL) || (state->isAttitudeReady == 0U))
+    if (state->isAttitudeReady == 0U)
     {
         return;
     }
 
-    data = &state->bmi088Data;
     nowTick = data->lastUpdateTick;
     if (*lastUpdateTick == 0U)
     {
-        *lastUpdateTick = nowTick;
-        state->dtSec = APP_CONFIG_IMU_DEFAULT_DT_SEC;
-        return;
-    }
-
-    dtSec = (float)(nowTick - *lastUpdateTick) * 0.001f;
-    if ((dtSec <= 0.0f) || (dtSec > 0.05f))
-    {
         dtSec = APP_CONFIG_IMU_DEFAULT_DT_SEC;
+    }
+    else
+    {
+        dtSec = (float)(nowTick - *lastUpdateTick) * 0.001f;
+        if ((dtSec <= 0.0f) || (dtSec > 0.05f))
+        {
+            dtSec = APP_CONFIG_IMU_DEFAULT_DT_SEC;
+        }
     }
     *lastUpdateTick = nowTick;
     state->dtSec = dtSec;
 
-    gyroX = data->gyroRadps[0] - state->gyroBiasRadps[0];
-    gyroY = data->gyroRadps[1] - state->gyroBiasRadps[1];
-    gyroZ = data->gyroRadps[2] - state->gyroBiasRadps[2];
+    for (axis = 0U; axis < BMI088_AXIS_COUNT; axis++)
+    {
+        gyroRadps[axis] = data->gyroRadps[axis] - state->gyroBiasRadps[axis];
+    }
 
-    accRoll = atan2f(data->accMps2[1], data->accMps2[2]);
-    accPitch = atan2f(-data->accMps2[0],
-                      sqrtf((data->accMps2[1] * data->accMps2[1]) +
-                            (data->accMps2[2] * data->accMps2[2])));
+    Algorithm_QuaternionEKF_Update(attitudeFilter,
+                                   gyroRadps,
+                                   data->accMps2,
+                                   dtSec);
 
-    state->rollRad =
-        (APP_CONFIG_IMU_COMPLEMENTARY_ALPHA * (state->rollRad + gyroX * dtSec)) +
-        ((1.0f - APP_CONFIG_IMU_COMPLEMENTARY_ALPHA) * accRoll);
-    state->pitchRad =
-        (APP_CONFIG_IMU_COMPLEMENTARY_ALPHA * (state->pitchRad + gyroY * dtSec)) +
-        ((1.0f - APP_CONFIG_IMU_COMPLEMENTARY_ALPHA) * accPitch);
-    state->yawRad += gyroZ * dtSec;
+    memcpy(state->quaternion,
+           attitudeFilter->quaternion,
+           sizeof(state->quaternion));
+    memcpy(state->gyroBiasEkfRadps,
+           attitudeFilter->gyroBiasRadps,
+           sizeof(state->gyroBiasEkfRadps));
+    memcpy(state->filteredGyroRadps,
+           attitudeFilter->filteredGyroRadps,
+           sizeof(state->filteredGyroRadps));
+    state->rollRad = attitudeFilter->rollRad;
+    state->pitchRad = attitudeFilter->pitchRad;
+    state->yawRad = attitudeFilter->yawRad;
+    state->yawTotalRad = attitudeFilter->yawTotalRad;
 }
 
 /**
- * @brief 计算自然坐标系下的运动加速度。
+ * @brief 在静止且温度稳定时慢速修正 Z 轴陀螺零偏。
  *
- * 输入来自 BMI088 原始加速度和当前互补滤波姿态；输出写入 state->motionAccMps2。
+ * SPR 的四元数 EKF 不观测 Z 轴零偏，因为加速度无法约束 yaw；这里不把 Z 轴塞进 EKF，
+ * 只在调试和站稳条件明确满足时学习 gyroBiasRadps[2]，降低静止时 yaw 持续漂移。
+ */
+static void IMU_Task_UpdateStableZBias(task_imu_state_t *state)
+{
+    float zBiasFilterRatio;
+
+    state->accNormMps2 = sqrtf(
+        (state->bmi088Data.accMps2[0] * state->bmi088Data.accMps2[0]) +
+        (state->bmi088Data.accMps2[1] * state->bmi088Data.accMps2[1]) +
+        (state->bmi088Data.accMps2[2] * state->bmi088Data.accMps2[2]));
+    state->gyroNormRadps = sqrtf(
+        (state->filteredGyroRadps[0] * state->filteredGyroRadps[0]) +
+        (state->filteredGyroRadps[1] * state->filteredGyroRadps[1]) +
+        (state->filteredGyroRadps[2] * state->filteredGyroRadps[2]));
+    state->zGyroResidualRadps = state->filteredGyroRadps[2];
+    state->isZBiasUpdated = 0U;
+
+    if (state->isAttitudeReady == 0U)
+    {
+        return;
+    }
+
+    if ((state->isTemperatureStable == 0U) ||
+        (state->accNormMps2 < APP_CONFIG_IMU_EKF_ACCEL_NORM_MIN_MPS2) ||
+        (state->accNormMps2 > APP_CONFIG_IMU_EKF_ACCEL_NORM_MAX_MPS2) ||
+        (state->gyroNormRadps > APP_CONFIG_IMU_Z_BIAS_GYRO_NORM_MAX_RADPS))
+    {
+        return;
+    }
+
+    /*
+     * Z 轴零偏只做慢速一阶学习，不参与姿态 EKF 观测更新。
+     * 更新后的零偏会在下一轮姿态积分前扣除。
+     */
+    zBiasFilterRatio =
+        state->dtSec / (APP_CONFIG_IMU_Z_BIAS_LPF_TIME_SEC + state->dtSec);
+    zBiasFilterRatio = IMU_Task_LimitFloat(zBiasFilterRatio, 0.0f, 1.0f);
+    state->gyroBiasRadps[2] += zBiasFilterRatio * state->zGyroResidualRadps;
+    state->zBiasUpdateCount++;
+    state->isZBiasUpdated = 1U;
+}
+
+/**
+ * @brief 计算 IMU 内部坐标下的运动加速度。
+ *
+ * 输入来自 BMI088 原始加速度和当前 EKF 四元数；输出写入 state->motionAccMps2。
  * 流程参考 SPR：先用姿态估计出机体系重力分量，扣除重力得到机体运动加速度，
- * 再旋转到自然坐标系，供底盘卡尔曼速度融合使用。
+ * 再旋转到内部导航坐标；保存快照前会统一转换为整车右手系。
  */
 static void IMU_Task_UpdateMotionAcceleration(task_imu_state_t *state)
 {
     const bmi088_data_t *data = &state->bmi088Data;
-    float sinRoll;
-    float cosRoll;
-    float sinPitch;
-    float cosPitch;
-    float sinYaw;
-    float cosYaw;
+    const float gravityEarth[BMI088_AXIS_COUNT] = {0.0f, 0.0f, TASK_IMU_GRAVITY_MPS2};
     float gravityBody[BMI088_AXIS_COUNT];
     float motionAccBody[BMI088_AXIS_COUNT];
     float motionAccEarth[BMI088_AXIS_COUNT];
@@ -142,22 +285,9 @@ static void IMU_Task_UpdateMotionAcceleration(task_imu_state_t *state)
         return;
     }
 
-    sinRoll = sinf(state->rollRad);
-    cosRoll = cosf(state->rollRad);
-    sinPitch = sinf(state->pitchRad);
-    cosPitch = cosf(state->pitchRad);
-    sinYaw = sinf(state->yawRad);
-    cosYaw = cosf(state->yawRad);
-
-    /*
-     * 静止时加速度计主要测到重力，当前姿态定义下：
-     * accX = -g * sin(pitch)
-     * accY =  g * sin(roll) * cos(pitch)
-     * accZ =  g * cos(roll) * cos(pitch)
-     */
-    gravityBody[0] = -TASK_IMU_GRAVITY_MPS2 * sinPitch;
-    gravityBody[1] = TASK_IMU_GRAVITY_MPS2 * sinRoll * cosPitch;
-    gravityBody[2] = TASK_IMU_GRAVITY_MPS2 * cosRoll * cosPitch;
+    Algorithm_QuaternionEKF_EarthToBody(gravityEarth,
+                                         state->quaternion,
+                                         gravityBody);
 
     for (axis = 0U; axis < BMI088_AXIS_COUNT; axis++)
     {
@@ -165,26 +295,12 @@ static void IMU_Task_UpdateMotionAcceleration(task_imu_state_t *state)
     }
 
     /*
-     * R = Rz(yaw) * Ry(pitch) * Rx(roll)，把机体系运动加速度转到自然坐标系。
-     * 当前 yaw 只由陀螺积分得到，长期会漂移；调试时如只关心机体前向，
-     * 可在 module_chassis_model.c 中调整前向加速度的轴向映射。
+     * 运动加速度先转到滤波器内部导航坐标，保存给业务层前再转成整车右手系。
+     * 当前 yaw 仍由陀螺积分主导，长时间运行时 X/Y 方向会随 yaw 漂移。
      */
-    motionAccEarth[0] =
-        (cosYaw * cosPitch * motionAccBody[0]) +
-        (((cosYaw * sinPitch * sinRoll) - (sinYaw * cosRoll)) *
-         motionAccBody[1]) +
-        (((cosYaw * sinPitch * cosRoll) + (sinYaw * sinRoll)) *
-         motionAccBody[2]);
-    motionAccEarth[1] =
-        (sinYaw * cosPitch * motionAccBody[0]) +
-        (((sinYaw * sinPitch * sinRoll) + (cosYaw * cosRoll)) *
-         motionAccBody[1]) +
-        (((sinYaw * sinPitch * cosRoll) - (cosYaw * sinRoll)) *
-         motionAccBody[2]);
-    motionAccEarth[2] =
-        (-sinPitch * motionAccBody[0]) +
-        (cosPitch * sinRoll * motionAccBody[1]) +
-        (cosPitch * cosRoll * motionAccBody[2]);
+    Algorithm_QuaternionEKF_BodyToEarth(motionAccBody,
+                                         state->quaternion,
+                                         motionAccEarth);
 
     if ((APP_CONFIG_IMU_MOTION_ACCEL_LPF_TIME_SEC <= 0.0f) ||
         (state->dtSec <= 0.0f))
@@ -225,6 +341,47 @@ static void IMU_Task_SaveState(const task_imu_state_t *state)
 }
 
 /**
+ * @brief 把 IMU 内部坐标快照转换为整车右手系输出。
+ *
+ * BMI088 原始数据保留传感器坐标，便于排查硬件；姿态角、角速度、运动加速度
+ * 和零偏作为业务层输入，统一转换到 X 前、Y 左、Z 上的整车右手系。
+ */
+static void IMU_Task_BuildRightHandOutput(const task_imu_state_t *internalState,
+                                          task_imu_state_t *outputState)
+{
+    *outputState = *internalState;
+
+    /* Z 轴镜像时，线加速度是普通向量，仅 Z 分量反号。 */
+    outputState->motionAccMps2[2] = -outputState->motionAccMps2[2];
+
+    /*
+     * 角速度、欧拉角和陀螺零偏是旋转量；Z 轴镜像后绕 X/Y 轴的正方向取反。
+     * quaternion 同步转换为 roll'=-roll, pitch'=-pitch, yaw'=yaw 对应的表示。
+     */
+    outputState->gyroBiasRadps[0] = -outputState->gyroBiasRadps[0];
+    outputState->gyroBiasRadps[1] = -outputState->gyroBiasRadps[1];
+    outputState->gyroBiasEkfRadps[0] = -outputState->gyroBiasEkfRadps[0];
+    outputState->gyroBiasEkfRadps[1] = -outputState->gyroBiasEkfRadps[1];
+    outputState->filteredGyroRadps[0] = -outputState->filteredGyroRadps[0];
+    outputState->filteredGyroRadps[1] = -outputState->filteredGyroRadps[1];
+    outputState->quaternion[1] = -outputState->quaternion[1];
+    outputState->quaternion[2] = -outputState->quaternion[2];
+    outputState->rollRad = -outputState->rollRad;
+    outputState->pitchRad = -outputState->pitchRad;
+}
+
+/**
+ * @brief 保存整车右手系 IMU 快照。
+ */
+static void IMU_Task_SaveRightHandState(const task_imu_state_t *internalState)
+{
+    task_imu_state_t outputState;
+
+    IMU_Task_BuildRightHandOutput(internalState, &outputState);
+    IMU_Task_SaveState(&outputState);
+}
+
+/**
  * @brief 生成当前硬件上的 BMI088 配置。
  */
 static bmi088_config_t IMU_Task_GetBmi088Config(void)
@@ -248,6 +405,10 @@ static bmi088_config_t IMU_Task_GetBmi088Config(void)
 static void ImuTask(void *argument)
 {
     const bmi088_config_t bmi088Config = IMU_Task_GetBmi088Config();
+    const algorithm_quaternion_ekf_config_t attitudeFilterConfig =
+        IMU_Task_GetAttitudeFilterConfig();
+    algorithm_quaternion_ekf_t attitudeFilter = {0};
+    algorithm_pid_state_t temperaturePid = {0};
     task_imu_state_t localState = {0};
     float gyroSum[BMI088_AXIS_COUNT] = {0.0f};
     uint32_t biasSampleCount = 0U;
@@ -270,7 +431,7 @@ static void ImuTask(void *argument)
             if (localState.lastErrorCode != BMI088_ERROR_NONE)
             {
                 localState.initErrorCount++;
-                IMU_Task_SaveState(&localState);
+                IMU_Task_SaveRightHandState(&localState);
                 (void)osDelay(APP_CONFIG_IMU_INIT_RETRY_TICKS);
                 wakeTick = osKernelGetTickCount();
                 continue;
@@ -278,6 +439,11 @@ static void ImuTask(void *argument)
 
             localState.isInitialized = 1U;
             localState.lastErrorCode = BMI088_ERROR_NONE;
+            localState.quaternion[0] = 1.0f;
+            Algorithm_QuaternionEKF_Init(&attitudeFilter, &attitudeFilterConfig);
+            Algorithm_PID_Init(&temperaturePid);
+            (void)HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);
+            __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0U);
             memset(gyroSum, 0, sizeof(gyroSum));
             biasSampleCount = 0U;
             attitudeLastTick = 0U;
@@ -288,15 +454,22 @@ static void ImuTask(void *argument)
         if (localState.lastErrorCode != BMI088_ERROR_NONE)
         {
             localState.readErrorCount++;
+            __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0U);
+            localState.temperaturePidOutput = 0.0f;
+            localState.temperaturePwmCompare = 0U;
         }
         else
         {
+            IMU_Task_UpdateTemperatureControl(&localState, &temperaturePid);
             IMU_Task_UpdateGyroBias(&localState, gyroSum, &biasSampleCount);
-            IMU_Task_UpdateAttitude(&localState, &attitudeLastTick);
+            IMU_Task_UpdateAttitude(&localState,
+                                    &attitudeFilter,
+                                    &attitudeLastTick);
+            IMU_Task_UpdateStableZBias(&localState);
             IMU_Task_UpdateMotionAcceleration(&localState);
         }
 
-        IMU_Task_SaveState(&localState);
+        IMU_Task_SaveRightHandState(&localState);
 
         wakeTick += APP_CONFIG_IMU_TASK_PERIOD_TICKS;
         (void)osDelayUntil(wakeTick);

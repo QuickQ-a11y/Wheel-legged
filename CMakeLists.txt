@@ -50,6 +50,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     User_File/1_Middleware/2_Algorithm/Kalman.c
     User_File/1_Middleware/2_Algorithm/LQR.c
     User_File/1_Middleware/2_Algorithm/PID.c
+    User_File/1_Middleware/2_Algorithm/QuaternionEKF.c
     Middlewares/ST/ARM/DSP/Source/MatrixFunctions/arm_mat_init_f32.c
     Middlewares/ST/ARM/DSP/Source/MatrixFunctions/arm_mat_add_f32.c
     Middlewares/ST/ARM/DSP/Source/MatrixFunctions/arm_mat_sub_f32.c

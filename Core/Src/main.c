@@ -22,6 +22,7 @@
 #include "cmsis_os2.h"
 #include "fdcan.h"
 #include "spi.h"
+#include "tim.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -99,6 +100,7 @@ int main(void)
   MX_FDCAN1_Init();
   MX_FDCAN2_Init();
   MX_SPI2_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */

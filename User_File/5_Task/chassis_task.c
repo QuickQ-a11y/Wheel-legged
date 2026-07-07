@@ -57,12 +57,9 @@ static void ChassisTask_FillImuInput(const task_imu_state_t *imuState,
     chassisInput->imu.rollRad = imuState->rollRad;
     chassisInput->imu.pitchRad = imuState->pitchRad;
     chassisInput->imu.yawRad = imuState->yawRad;
-    chassisInput->imu.gyroRadps[0] =
-        imuState->bmi088Data.gyroRadps[0] - imuState->gyroBiasRadps[0];
-    chassisInput->imu.gyroRadps[1] =
-        imuState->bmi088Data.gyroRadps[1] - imuState->gyroBiasRadps[1];
-    chassisInput->imu.gyroRadps[2] =
-        imuState->bmi088Data.gyroRadps[2] - imuState->gyroBiasRadps[2];
+    memcpy(chassisInput->imu.gyroRadps,
+           imuState->filteredGyroRadps,
+           sizeof(chassisInput->imu.gyroRadps));
     memcpy(chassisInput->imu.motionAccMps2,
            imuState->motionAccMps2,
            sizeof(chassisInput->imu.motionAccMps2));

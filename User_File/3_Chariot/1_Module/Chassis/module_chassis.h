@@ -22,11 +22,11 @@ typedef struct
     uint8_t isInitialized;       /* IMU 已完成初始化。 */
     uint8_t isAttitudeReady;     /* 姿态估计已经完成零偏准备。 */
     uint32_t errorCode;          /* IMU 设备层最近一次错误码。 */
-    float rollRad;               /* 横滚角，单位 rad。 */
-    float pitchRad;              /* 俯仰角，单位 rad。 */
-    float yawRad;                /* 偏航角，单位 rad。 */
-    float gyroRadps[APP_CONFIG_IMU_AXIS_COUNT]; /* 去零偏后的陀螺角速度，单位 rad/s。 */
-    float motionAccMps2[APP_CONFIG_IMU_AXIS_COUNT]; /* 去重力后的自然坐标系运动加速度，单位 m/s^2。 */
+    float rollRad;               /* 整车右手系横滚角，单位 rad。 */
+    float pitchRad;              /* 整车右手系俯仰角，单位 rad。 */
+    float yawRad;                /* 整车右手系偏航角，单位 rad。 */
+    float gyroRadps[APP_CONFIG_IMU_AXIS_COUNT]; /* 整车右手系去零偏角速度，单位 rad/s。 */
+    float motionAccMps2[APP_CONFIG_IMU_AXIS_COUNT]; /* 整车右手系去重力运动加速度，单位 m/s^2。 */
     float dtSec;                 /* 最近一次姿态积分周期，单位 s。 */
 } module_chassis_imu_state_t;
 
