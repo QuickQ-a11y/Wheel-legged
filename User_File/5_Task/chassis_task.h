@@ -5,21 +5,22 @@
 extern "C" {
 #endif
 
-#include <stdint.h>
+#include "chassis_control.h"
 
-typedef enum
-{
-    CHASSIS_MODE_ZERO_FORCE = 0, /* 零力模式，强制安全输出。 */
-    CHASSIS_MODE_FOLLOW,        /* 跟随模式，当前作为站立控制主入口。 */
-    CHASSIS_MODE_TOP,           /* 小陀螺模式，当前暂用站立控制链路。 */
-    CHASSIS_MODE_SELF_SAVE,     /* 自救模式，当前未接入控制逻辑。 */
-    CHASSIS_MODE_BENCH,         /* 小板凳模式，用于后续腿和轮调试。 */
-} chassis_mode_t;
+/**
+ * @brief 初始化底盘控制状态并创建底盘任务。
+ */
+void chassis_task_init(void);
 
-void ChassisTask_Init(void);
-void ChassisTask_SetEnable(uint8_t enable);
-void ChassisTask_SetMode(chassis_mode_t mode);
-void ChassisTask_NotifyImuReady(void);
+/**
+ * @brief 设置底盘使能，未使能时持续输出零力矩和零电流。
+ */
+void chassis_set_enable(uint8_t enable);
+
+/**
+ * @brief 设置底盘外层模式，由任务主循环转换为控制状态。
+ */
+void chassis_set_mode(chassis_mode_t mode);
 
 #ifdef __cplusplus
 }

@@ -1,4 +1,4 @@
-﻿#ifndef DEVICE_MOTOR_DM_H
+#ifndef DEVICE_MOTOR_DM_H
 #define DEVICE_MOTOR_DM_H
 
 #ifdef __cplusplus
@@ -54,7 +54,7 @@ void Motor_DM_Init(void);
  */
 void Motor_DM_UpdateFeedback(app_can_bus_t bus,
                              uint32_t rxId,
-                             const uint8_t data[APP_CONFIG_DM_FRAME_LENGTH]);
+                             const uint8_t data[APP_DM_FRAME_LEN]);
 
 /**
  * @brief 设置单个 DM 电机命令缓存。

@@ -1,4 +1,4 @@
-﻿#include "task_can.h"
+#include "task_can.h"
 
 #include "driver_fdcan.h"
 
@@ -14,16 +14,14 @@ typedef struct
     FDCAN_HandleTypeDef *handle;                         /* 目标 FDCAN 外设。 */
     uint32_t identifier;                                 /* 标准帧 ID。 */
     uint8_t length;                                      /* 数据长度。 */
-    uint8_t enabled;                                     /* 是否参与周期发送。 */
-    uint8_t used;                                        /* 槽位是否已被占用。 */
-    uint8_t data[APP_CONFIG_CAN_MAX_DATA_LENGTH];        /* 待发送数据。 */
+    uint8_t data[APP_CAN_DATA_MAX_BYTES];        /* 待发送数据。 */
 } task_can_tx_frame_t;
 
 static osThreadId_t canTaskHandle;
 static osMutexId_t canTxMutex;
 static osMessageQueueId_t canRxQueue;
 
-static task_can_tx_frame_t canTxFrames[APP_CONFIG_CAN_TX_FRAME_CAPACITY];
+static task_can_tx_frame_t canTxFrames[APP_CAN_TX_CAP];
 static volatile uint32_t canTxBusyCount;
 static volatile uint32_t canTxErrorCount;
 static volatile uint32_t canRxOverflowCount;
@@ -56,19 +54,14 @@ static app_can_bus_t CAN_Task_GetBus(FDCAN_HandleTypeDef *handle)
     return APP_CAN_BUS_UNKNOWN;
 }
 
-static uint8_t CAN_Task_IsValidHandle(FDCAN_HandleTypeDef *handle)
-{
-    return ((handle == &hfdcan1) || (handle == &hfdcan2)) ? 1U : 0U;
-}
-
 static int32_t CAN_Task_FindTxFrame(FDCAN_HandleTypeDef *handle,
                                     uint32_t identifier)
 {
     uint32_t index;
 
-    for (index = 0U; index < APP_CONFIG_CAN_TX_FRAME_CAPACITY; index++)
+    for (index = 0U; index < APP_CAN_TX_CAP; index++)
     {
-        if ((canTxFrames[index].used != 0U) &&
+        if ((canTxFrames[index].handle != NULL) &&
             (canTxFrames[index].handle == handle) &&
             (canTxFrames[index].identifier == identifier))
         {
@@ -83,37 +76,15 @@ static int32_t CAN_Task_FindFreeTxFrame(void)
 {
     uint32_t index;
 
-    for (index = 0U; index < APP_CONFIG_CAN_TX_FRAME_CAPACITY; index++)
+    for (index = 0U; index < APP_CAN_TX_CAP; index++)
     {
-        if (canTxFrames[index].used == 0U)
+        if (canTxFrames[index].handle == NULL)
         {
             return (int32_t)index;
         }
     }
 
     return -1;
-}
-
-/**
- * @brief 从发送表复制一帧，避免发送时长期持有互斥锁。
- */
-static uint8_t CAN_Task_CopyTxFrame(uint32_t index,
-                                    task_can_tx_frame_t *frame)
-{
-    if ((index >= APP_CONFIG_CAN_TX_FRAME_CAPACITY) || (frame == NULL))
-    {
-        return 0U;
-    }
-
-    if (osMutexAcquire(canTxMutex, osWaitForever) != osOK)
-    {
-        return 0U;
-    }
-
-    *frame = canTxFrames[index];
-    (void)osMutexRelease(canTxMutex);
-
-    return 1U;
 }
 
 /**
@@ -133,9 +104,9 @@ static void CAN_Task_RxCallback(FDCAN_HandleTypeDef *handle,
     message.bus = CAN_Task_GetBus(handle);
     message.identifier = frame->header.Identifier;
     message.length = Driver_FDCAN_DlcToLength(frame->header.DataLength);
-    if (message.length > APP_CONFIG_CAN_MAX_DATA_LENGTH)
+    if (message.length > APP_CAN_DATA_MAX_BYTES)
     {
-        message.length = APP_CONFIG_CAN_MAX_DATA_LENGTH;
+        message.length = APP_CAN_DATA_MAX_BYTES;
     }
 
     memcpy(message.data, frame->data, message.length);
@@ -157,23 +128,26 @@ static void CAN_Task_RxCallback(FDCAN_HandleTypeDef *handle,
 }
 
 /**
- * @brief 发送所有已启用的缓存帧。
+ * @brief 发送所有已缓存的最新命令帧。
  */
 static void CAN_Task_SendFrames(void)
 {
     uint32_t index;
 
-    for (index = 0U; index < APP_CONFIG_CAN_TX_FRAME_CAPACITY; index++)
+    for (index = 0U; index < APP_CAN_TX_CAP; index++)
     {
         task_can_tx_frame_t frame = {0};
 
-        if (CAN_Task_CopyTxFrame(index, &frame) == 0U)
+        if (osMutexAcquire(canTxMutex, osWaitForever) != osOK)
         {
-            canTxErrorCount++;
+            canTxBusyCount++;
             continue;
         }
 
-        if ((frame.used == 0U) || (frame.enabled == 0U))
+        frame = canTxFrames[index];
+        (void)osMutexRelease(canTxMutex);
+
+        if (frame.handle == NULL)
         {
             continue;
         }
@@ -208,7 +182,7 @@ static void CanTask(void *argument)
     {
         uint32_t flags = osThreadFlagsWait(CAN_TASK_FLAG_RX | CAN_TASK_FLAG_TX,
                                            osFlagsWaitAny,
-                                           APP_CONFIG_CAN_TASK_PERIOD_TICKS);
+                                           APP_CAN_PERIOD_TICKS);
 
         if (flags == (uint32_t)osFlagsErrorTimeout)
         {
@@ -231,7 +205,7 @@ static void CanTask(void *argument)
             }
         }
 
-        wakeTick += APP_CONFIG_CAN_TASK_PERIOD_TICKS;
+        wakeTick += APP_CAN_PERIOD_TICKS;
         (void)osDelayUntil(wakeTick);
     }
 }
@@ -239,7 +213,7 @@ static void CanTask(void *argument)
 void CAN_Task_Init(void)
 {
     canTxMutex = osMutexNew(&canTxMutexAttributes);
-    canRxQueue = osMessageQueueNew(APP_CONFIG_CAN_RX_QUEUE_LENGTH,
+    canRxQueue = osMessageQueueNew(APP_CAN_RX_QUEUE_LEN,
                                    sizeof(task_can_rx_message_t),
                                    NULL);
 
@@ -251,14 +225,9 @@ void CAN_Task_Init(void)
     canTaskHandle = osThreadNew(CanTask, NULL, &canTaskAttributes);
 }
 
-void CAN_Task_SetDjiCurrent(const int16_t current[APP_CONFIG_DJI_WHEEL_COUNT])
+void CAN_Task_SetDjiCurrent(const int16_t current[APP_WHEEL_COUNT])
 {
-    uint8_t data[APP_CONFIG_DJI_COMMAND_LENGTH] = {0};
-
-    if (current == NULL)
-    {
-        return;
-    }
+    uint8_t data[APP_DJI_TX_LEN] = {0};
 
     data[0] = (uint8_t)((uint16_t)current[0] >> 8U);
     data[1] = (uint8_t)((uint16_t)current[0]);
@@ -266,9 +235,9 @@ void CAN_Task_SetDjiCurrent(const int16_t current[APP_CONFIG_DJI_WHEEL_COUNT])
     data[3] = (uint8_t)((uint16_t)current[1]);
 
     CAN_Task_UpdateTxFrame(&hfdcan2,
-                           APP_CONFIG_DJI_CURRENT_TX_ID,
+                           APP_DJI_TX_ID,
                            data,
-                           APP_CONFIG_DJI_COMMAND_LENGTH);
+                           APP_DJI_TX_LEN);
 }
 
 void CAN_Task_UpdateTxFrame(FDCAN_HandleTypeDef *handle,
@@ -278,11 +247,7 @@ void CAN_Task_UpdateTxFrame(FDCAN_HandleTypeDef *handle,
 {
     int32_t frameIndex;
 
-    if ((CAN_Task_IsValidHandle(handle) == 0U) ||
-        (identifier > APP_CONFIG_CAN_STD_ID_MAX) ||
-        (data == NULL) ||
-        (length > APP_CONFIG_CAN_MAX_DATA_LENGTH) ||
-        (canTxMutex == NULL))
+    if ((length > APP_CAN_DATA_MAX_BYTES) || (canTxMutex == NULL))
     {
         canTxErrorCount++;
         return;
@@ -310,40 +275,9 @@ void CAN_Task_UpdateTxFrame(FDCAN_HandleTypeDef *handle,
     canTxFrames[frameIndex].handle = handle;
     canTxFrames[frameIndex].identifier = identifier;
     canTxFrames[frameIndex].length = length;
-    canTxFrames[frameIndex].enabled = 1U;
-    canTxFrames[frameIndex].used = 1U;
     memset(canTxFrames[frameIndex].data, 0, sizeof(canTxFrames[frameIndex].data));
     memcpy(canTxFrames[frameIndex].data, data, length);
 
-    (void)osMutexRelease(canTxMutex);
-}
-
-void CAN_Task_EnableTxFrame(FDCAN_HandleTypeDef *handle,
-                            uint32_t identifier,
-                            uint8_t enabled)
-{
-    int32_t frameIndex;
-
-    if ((CAN_Task_IsValidHandle(handle) == 0U) || (canTxMutex == NULL))
-    {
-        canTxErrorCount++;
-        return;
-    }
-
-    if (osMutexAcquire(canTxMutex, osWaitForever) != osOK)
-    {
-        canTxBusyCount++;
-        return;
-    }
-
-    frameIndex = CAN_Task_FindTxFrame(handle, identifier);
-    if (frameIndex < 0)
-    {
-        (void)osMutexRelease(canTxMutex);
-        return;
-    }
-
-    canTxFrames[frameIndex].enabled = (enabled != 0U) ? 1U : 0U;
     (void)osMutexRelease(canTxMutex);
 }
 

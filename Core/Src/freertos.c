@@ -29,6 +29,7 @@
 #include "task_can.h"
 #include "chassis_task.h"
 #include "task_imu.h"
+#include "task_usb.h"
 
 /* USER CODE END Includes */
 
@@ -50,12 +51,14 @@
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
 
+char * volatile rtosStackOverflowTaskName;
+
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 128 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -66,6 +69,7 @@ const osThreadAttr_t defaultTask_attributes = {
 
 void StartDefaultTask(void *argument);
 
+extern void MX_USB_DEVICE_Init(void);
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
 /**
@@ -100,8 +104,9 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_THREADS */
   CAN_Task_Init();
-  ChassisTask_Init();
+  chassis_task_init();
   IMU_Task_Init();
+  USB_Task_Init();
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -119,6 +124,8 @@ void MX_FREERTOS_Init(void) {
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument)
 {
+  /* init code for USB_DEVICE */
+  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN StartDefaultTask */
   /* Infinite loop */
   for(;;)
@@ -130,6 +137,22 @@ void StartDefaultTask(void *argument)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
+
+/**
+ * @brief 记录发生栈溢出的任务并停止调度。
+ *
+ * 在 Watch 中查看 rtosStackOverflowTaskName 可以直接确定溢出的任务。
+ */
+void vApplicationStackOverflowHook(TaskHandle_t taskHandle, char *taskName)
+{
+  (void)taskHandle;
+
+  rtosStackOverflowTaskName = taskName;
+  taskDISABLE_INTERRUPTS();
+  while (1)
+  {
+  }
+}
 
 /* USER CODE END Application */
 

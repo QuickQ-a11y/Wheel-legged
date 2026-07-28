@@ -35,7 +35,7 @@ typedef struct
     float zGyroResidualRadps;                        /* Z 轴扣除当前零偏后的残余角速度，单位 rad/s。 */
     uint32_t zBiasUpdateCount;                       /* 静止且温度稳定时，Z 轴零偏慢速更新次数。 */
     uint8_t isZBiasUpdated;                          /* 最近一轮是否更新了 Z 轴零偏。 */
-    float dtSec;                                     /* 最近一次姿态积分周期，单位 s。 */
+    float dtSec;                                     /* 最近一次IMU采样处理的实际周期，单位s。 */
 } task_imu_state_t;
 
 extern task_imu_state_t imuTaskDebugState;           /* Watch 窗口长期观察用 IMU 快照，业务读取仍使用 IMU_Task_GetState。 */

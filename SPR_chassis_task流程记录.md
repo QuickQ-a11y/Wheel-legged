@@ -171,7 +171,7 @@ R = [100, 0;
      0, 1.0e12]
 ```
 
-这些参数集中在 `module_chassis_model.c` 的 `velocityKalman` 中。前向加速度轴向由 `imu.forwardAccelerationIndex` 和 `imu.forwardAccelerationScale` 配置。零力矩、故障和安全输出路径会清空速度融合状态，等价于 SPR 在零力矩下清 `kf_x/kf_dx`。
+这些参数集中在 `chassis_config.c` 的 `speed_kalman` 中。前向加速度轴向由 `imu.forward_accel_axis` 和 `imu.forward_accel_scale` 配置。零力矩、故障和安全输出路径会清空速度融合状态，等价于 SPR 在零力矩下清 `kf_x/kf_dx`。
 
 第一阶段复现时建议：
 
@@ -263,13 +263,13 @@ LQR_K(Leg_L, chassis_move.Right_Leg.K);
 Leg_L = (left_leg_L + right_leg_L) / 2
 ```
 
-当前工程已经改为更显眼的 `lqrK` 命名，并支持左右腿长二元拟合：
+当前工程使用 `chassis.lqr_k` 保存本轮 K 矩阵，并支持左右腿长二元拟合：
 
 ```text
-lqrKFitCoefficients -> Algorithm_LQR_FitLqrKPoly22() -> lqrK[4][10]
+chassis_config.lqr.coefficients -> Algorithm_LQR_FitLqrKPoly22() -> chassis.lqr_k[4][10]
 ```
 
-后续复现时，应继续使用当前工程的 `lqrK` 链路，不回退到 SPR 的一维 `K[12]` 数组写法。
+后续扩展时，应继续使用当前工程的 `lqr_k` 链路，不回退到 SPR 的一维 `K[12]` 数组写法。
 
 ### 6.3 模式状态分发
 
@@ -381,19 +381,19 @@ SPR 在主循环尾部根据安全条件发送轮电机电流：
 
 ```text
 chassis_task.c
-    -> Module_Chassis_RunControl()
-        -> module_chassis_controller.c
-            -> output
-                -> ChassisTask_ApplyOutput()
+    -> chassis_control_loop()
+        -> chassis_vmc.c
+            -> chassis.joint_torque_nm / wheel_current
+                -> chassis_cmd_send()
 ```
 
-后续复现 SPR 流程时，最终 CMD 输出仍应集中在任务层尾部统一下发。控制器只负责填充本轮输出，不直接发送 CAN。
+最终 CMD 输出集中在任务层尾部统一下发。控制器只填写 `chassis` 的本轮命令，不直接发送 CAN。
 
 ## 8. 当前工程复现建议
 
 建议后续改造顺序：
 
-1. 在 `chassis_task.c` 中调整主循环结构，让流程变成：
+1. `chassis_task.c` 当前主循环已经实现为：
 
 ```text
 设置模式
@@ -405,14 +405,14 @@ chassis_task.c
 
 2. 新增外层模式和内层状态的清晰边界。
 3. 把遥控或上层控制输入转成目标腿长、速度、yaw、roll 和模式。
-4. 保持 `Module_Chassis_Controller_RunControlLoop()` 的 SPR 风格主顺序，后续新增能力时继续按支撑力、K 矩阵、LQR 输出、VMC、命令输出分段接入。
-5. 保留当前 `lqrK`、PID、VMC 和安全输出链路。
+4. 保持 `chassis_control_loop()` 的 SPR 风格主顺序，后续新增能力时继续按支撑力、K 矩阵、LQR 输出、VMC、命令输出分段接入。
+5. 保留当前 `chassis.lqr_k`、PID、VMC 和安全输出链路。
 6. 第一阶段只接入正常站立、零力矩、倒地框架、小板凳模式。
 7. 上台阶、跳跃、气弹簧、离心力、KNN 和功率限制后续再接。
 
 不建议做的事：
 
-- 不直接照搬 SPR 的全局变量结构。
+- 不照搬 SPR 的多套全局变量；当前只保留唯一实际状态 `chassis`。
 - 不把所有控制计算塞进 `chassis_task.c`。
 - 不在任务层硬编码机械参数、IMU 方向、电机方向或 LQR 系数。
 - 不在未确认实机方向和限幅前打开非零输出。

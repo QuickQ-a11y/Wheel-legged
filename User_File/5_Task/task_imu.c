@@ -1,4 +1,4 @@
-﻿#include "task_imu.h"
+#include "task_imu.h"
 
 #include "app_config.h"
 #include "main.h"
@@ -20,11 +20,11 @@ static bmi088_t imuBmi088;
 task_imu_state_t imuTaskDebugState;
 
 static const algorithm_pid_config_t imuTemperaturePidConfig = {
-    .kp = APP_CONFIG_IMU_TEMP_PID_KP,
-    .ki = APP_CONFIG_IMU_TEMP_PID_KI,
-    .kd = APP_CONFIG_IMU_TEMP_PID_KD,
-    .integralLimit = APP_CONFIG_IMU_TEMP_PID_INTEGRAL_LIMIT,
-    .outputLimit = APP_CONFIG_IMU_TEMP_PWM_LIMIT,
+    .kp = APP_IMU_TEMP_KP,
+    .ki = APP_IMU_TEMP_KI,
+    .kd = APP_IMU_TEMP_KD,
+    .integralLimit = APP_IMU_TEMP_I_LIMIT,
+    .outputLimit = APP_IMU_TEMP_PWM_MAX,
 };
 
 static const osThreadAttr_t imuTaskAttributes = {
@@ -60,20 +60,20 @@ static float IMU_Task_LimitFloat(float value, float minValue, float maxValue)
 static algorithm_quaternion_ekf_config_t IMU_Task_GetAttitudeFilterConfig(void)
 {
     algorithm_quaternion_ekf_config_t config = {
-        .quaternionProcessNoise = APP_CONFIG_IMU_EKF_QUATERNION_PROCESS_NOISE,
-        .gyroBiasProcessNoise = APP_CONFIG_IMU_EKF_GYRO_BIAS_PROCESS_NOISE,
-        .accelMeasurementNoise = APP_CONFIG_IMU_EKF_ACCEL_MEASUREMENT_NOISE,
+        .quaternionProcessNoise = APP_IMU_EKF_QUAT_NOISE,
+        .gyroBiasProcessNoise = APP_IMU_EKF_BIAS_NOISE,
+        .accelMeasurementNoise = APP_IMU_EKF_ACCEL_NOISE,
         .quaternionInitialCovariance =
-            APP_CONFIG_IMU_EKF_QUATERNION_INITIAL_COVARIANCE,
+            APP_IMU_EKF_QUAT_COV,
         .gyroBiasInitialCovariance =
-            APP_CONFIG_IMU_EKF_GYRO_BIAS_INITIAL_COVARIANCE,
-        .accelLpfTimeSec = APP_CONFIG_IMU_EKF_ACCEL_LPF_TIME_SEC,
-        .accelNormMinMps2 = APP_CONFIG_IMU_EKF_ACCEL_NORM_MIN_MPS2,
-        .accelNormMaxMps2 = APP_CONFIG_IMU_EKF_ACCEL_NORM_MAX_MPS2,
+            APP_IMU_EKF_BIAS_COV,
+        .accelLpfTimeSec = APP_IMU_EKF_ACCEL_LPF_S,
+        .accelNormMinMps2 = APP_IMU_EKF_ACCEL_MIN_MPS2,
+        .accelNormMaxMps2 = APP_IMU_EKF_ACCEL_MAX_MPS2,
         .gyroStableThresholdRadps =
-            APP_CONFIG_IMU_EKF_GYRO_STABLE_THRESHOLD_RADPS,
+            APP_IMU_EKF_GYRO_STABLE_RADPS,
         .gyroBiasCorrectionLimitRadps =
-            APP_CONFIG_IMU_EKF_GYRO_BIAS_CORRECTION_LIMIT_RADPS,
+            APP_IMU_EKF_BIAS_CORR_RADPS,
     };
 
     return config;
@@ -90,7 +90,7 @@ static void IMU_Task_UpdateGyroBias(task_imu_state_t *state,
 {
     uint32_t axis;
 
-    if (*biasSampleCount >= APP_CONFIG_IMU_BIAS_SAMPLE_COUNT)
+    if (*biasSampleCount >= APP_IMU_BIAS_SAMPLES)
     {
         return;
     }
@@ -103,7 +103,7 @@ static void IMU_Task_UpdateGyroBias(task_imu_state_t *state,
 
     (*biasSampleCount)++;
     state->isAttitudeReady =
-        (*biasSampleCount >= APP_CONFIG_IMU_BIAS_SAMPLE_COUNT) ? 1U : 0U;
+        (*biasSampleCount >= APP_IMU_BIAS_SAMPLES) ? 1U : 0U;
 }
 
 /**
@@ -113,34 +113,35 @@ static void IMU_Task_UpdateGyroBias(task_imu_state_t *state,
  * 同时把目标温度、误差、PID 输出和 PWM 比较值保存在 imuTaskDebugState 快照中。
  */
 static void IMU_Task_UpdateTemperatureControl(task_imu_state_t *state,
-                                              algorithm_pid_state_t *temperaturePid)
+                                              algorithm_pid_state_t *temperaturePid,
+                                              float dtSec)
 {
     float pidOutput = 0.0f;
     uint32_t pwmCompare;
 
-    state->temperatureTargetCelsius = APP_CONFIG_IMU_TEMP_TARGET_CELSIUS;
+    state->temperatureTargetCelsius = APP_IMU_TEMP_TARGET_C;
     state->temperatureErrorCelsius =
-        APP_CONFIG_IMU_TEMP_TARGET_CELSIUS - state->bmi088Data.temperatureCelsius;
+        APP_IMU_TEMP_TARGET_C - state->bmi088Data.temperatureCelsius;
     state->isTemperatureStable =
         (fabsf(state->temperatureErrorCelsius) <=
-         APP_CONFIG_IMU_TEMP_STABLE_BAND_CELSIUS)
+         APP_IMU_TEMP_STABLE_C)
             ? 1U
             : 0U;
 
     Algorithm_PID_UpdateByFeedbackRate(&imuTemperaturePidConfig,
                                        temperaturePid,
-                                       APP_CONFIG_IMU_TEMP_TARGET_CELSIUS,
+                                       APP_IMU_TEMP_TARGET_C,
                                        state->bmi088Data.temperatureCelsius,
                                        0.0f,
-                                       APP_CONFIG_IMU_DEFAULT_DT_SEC,
+                                       dtSec,
                                        &pidOutput);
 
     pidOutput = IMU_Task_LimitFloat(pidOutput,
                                     0.0f,
-                                    APP_CONFIG_IMU_TEMP_PWM_LIMIT);
+                                    APP_IMU_TEMP_PWM_MAX);
     state->isTemperatureProtected =
         (state->bmi088Data.temperatureCelsius >=
-         APP_CONFIG_IMU_TEMP_PROTECT_CELSIUS)
+         APP_IMU_TEMP_PROTECT_C)
             ? 1U
             : 0U;
     if (state->isTemperatureProtected != 0U)
@@ -163,11 +164,9 @@ static void IMU_Task_UpdateTemperatureControl(task_imu_state_t *state,
  */
 static void IMU_Task_UpdateAttitude(task_imu_state_t *state,
                                     algorithm_quaternion_ekf_t *attitudeFilter,
-                                    uint32_t *lastUpdateTick)
+                                    float dtSec)
 {
     const bmi088_data_t *data = &state->bmi088Data;
-    uint32_t nowTick;
-    float dtSec;
     float gyroRadps[BMI088_AXIS_COUNT];
     uint32_t axis;
 
@@ -175,22 +174,6 @@ static void IMU_Task_UpdateAttitude(task_imu_state_t *state,
     {
         return;
     }
-
-    nowTick = data->lastUpdateTick;
-    if (*lastUpdateTick == 0U)
-    {
-        dtSec = APP_CONFIG_IMU_DEFAULT_DT_SEC;
-    }
-    else
-    {
-        dtSec = (float)(nowTick - *lastUpdateTick) * 0.001f;
-        if ((dtSec <= 0.0f) || (dtSec > 0.05f))
-        {
-            dtSec = APP_CONFIG_IMU_DEFAULT_DT_SEC;
-        }
-    }
-    *lastUpdateTick = nowTick;
-    state->dtSec = dtSec;
 
     for (axis = 0U; axis < BMI088_AXIS_COUNT; axis++)
     {
@@ -244,9 +227,9 @@ static void IMU_Task_UpdateStableZBias(task_imu_state_t *state)
     }
 
     if ((state->isTemperatureStable == 0U) ||
-        (state->accNormMps2 < APP_CONFIG_IMU_EKF_ACCEL_NORM_MIN_MPS2) ||
-        (state->accNormMps2 > APP_CONFIG_IMU_EKF_ACCEL_NORM_MAX_MPS2) ||
-        (state->gyroNormRadps > APP_CONFIG_IMU_Z_BIAS_GYRO_NORM_MAX_RADPS))
+        (state->accNormMps2 < APP_IMU_EKF_ACCEL_MIN_MPS2) ||
+        (state->accNormMps2 > APP_IMU_EKF_ACCEL_MAX_MPS2) ||
+        (state->gyroNormRadps > APP_IMU_Z_BIAS_GYRO_MAX_RADPS))
     {
         return;
     }
@@ -256,7 +239,7 @@ static void IMU_Task_UpdateStableZBias(task_imu_state_t *state)
      * 更新后的零偏会在下一轮姿态积分前扣除。
      */
     zBiasFilterRatio =
-        state->dtSec / (APP_CONFIG_IMU_Z_BIAS_LPF_TIME_SEC + state->dtSec);
+        state->dtSec / (APP_IMU_Z_BIAS_LPF_S + state->dtSec);
     zBiasFilterRatio = IMU_Task_LimitFloat(zBiasFilterRatio, 0.0f, 1.0f);
     state->gyroBiasRadps[2] += zBiasFilterRatio * state->zGyroResidualRadps;
     state->zBiasUpdateCount++;
@@ -302,7 +285,7 @@ static void IMU_Task_UpdateMotionAcceleration(task_imu_state_t *state)
                                          state->quaternion,
                                          motionAccEarth);
 
-    if ((APP_CONFIG_IMU_MOTION_ACCEL_LPF_TIME_SEC <= 0.0f) ||
+    if ((APP_IMU_ACCEL_LPF_S <= 0.0f) ||
         (state->dtSec <= 0.0f))
     {
         filterRatio = 1.0f;
@@ -310,7 +293,7 @@ static void IMU_Task_UpdateMotionAcceleration(task_imu_state_t *state)
     else
     {
         filterRatio =
-            state->dtSec / (APP_CONFIG_IMU_MOTION_ACCEL_LPF_TIME_SEC + state->dtSec);
+            state->dtSec / (APP_IMU_ACCEL_LPF_S + state->dtSec);
     }
 
     for (axis = 0U; axis < BMI088_AXIS_COUNT; axis++)
@@ -396,7 +379,7 @@ static bmi088_config_t IMU_Task_GetBmi088Config(void)
             .gpioPort = GYRO_CS_GPIO_Port,
             .gpioPin = GYRO_CS_Pin,
         },
-        .timeoutMs = APP_CONFIG_IMU_SPI_TIMEOUT_MS,
+        .timeoutMs = APP_IMU_SPI_TIMEOUT_MS,
     };
 
     return config;
@@ -411,8 +394,10 @@ static void ImuTask(void *argument)
     algorithm_pid_state_t temperaturePid = {0};
     task_imu_state_t localState = {0};
     float gyroSum[BMI088_AXIS_COUNT] = {0.0f};
+    const float tickSec = 1.0f / (float)osKernelGetTickFreq();
+    float dtSec = APP_CTRL_DT_S;
     uint32_t biasSampleCount = 0U;
-    uint32_t attitudeLastTick = 0U;
+    uint32_t sampleLastTick = 0U;
     uint32_t wakeTick = osKernelGetTickCount();
 
     (void)argument;
@@ -432,7 +417,7 @@ static void ImuTask(void *argument)
             {
                 localState.initErrorCount++;
                 IMU_Task_SaveRightHandState(&localState);
-                (void)osDelay(APP_CONFIG_IMU_INIT_RETRY_TICKS);
+                (void)osDelay(APP_IMU_INIT_RETRY_TICKS);
                 wakeTick = osKernelGetTickCount();
                 continue;
             }
@@ -446,7 +431,7 @@ static void ImuTask(void *argument)
             __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0U);
             memset(gyroSum, 0, sizeof(gyroSum));
             biasSampleCount = 0U;
-            attitudeLastTick = 0U;
+            sampleLastTick = 0U;
         }
 
         BMI088_Read(&imuBmi088, &localState.bmi088Data);
@@ -460,18 +445,42 @@ static void ImuTask(void *argument)
         }
         else
         {
-            IMU_Task_UpdateTemperatureControl(&localState, &temperaturePid);
+            uint32_t sampleTick = osKernelGetTickCount();
+
+            /* IMU滤波、温控PID和零偏更新共用本轮采样的实际dt。 */
+            if (sampleLastTick == 0U)
+            {
+                dtSec = APP_CTRL_DT_S;
+            }
+            else
+            {
+                dtSec = (float)(sampleTick - sampleLastTick) * tickSec;
+                if ((dtSec <= 0.0f) || (dtSec > 0.05f))
+                {
+                    dtSec = APP_CTRL_DT_S;
+                }
+            }
+            sampleLastTick = sampleTick;
+            localState.dtSec = dtSec;
+
+            IMU_Task_UpdateTemperatureControl(&localState,
+                                              &temperaturePid,
+                                              dtSec);
             IMU_Task_UpdateGyroBias(&localState, gyroSum, &biasSampleCount);
             IMU_Task_UpdateAttitude(&localState,
                                     &attitudeFilter,
-                                    &attitudeLastTick);
+                                    dtSec);
             IMU_Task_UpdateStableZBias(&localState);
             IMU_Task_UpdateMotionAcceleration(&localState);
         }
 
         IMU_Task_SaveRightHandState(&localState);
 
-        wakeTick += APP_CONFIG_IMU_TASK_PERIOD_TICKS;
+        wakeTick += APP_CTRL_TICKS;
+        if ((int32_t)(osKernelGetTickCount() - wakeTick) >= 0)
+        {
+            wakeTick = osKernelGetTickCount() + APP_CTRL_TICKS;
+        }
         (void)osDelayUntil(wakeTick);
     }
 }

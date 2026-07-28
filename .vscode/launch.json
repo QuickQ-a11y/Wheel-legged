@@ -24,6 +24,23 @@
                     "imageFileName": "${command:st-stm32-ide-debug-launch.get-projects-binary-from-context1}"
                 }
             ]
+        },
+        {
+            "name": "Cortex-Debug: J-Link Live Watch",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/Wheel-legged.elf",
+            "servertype": "jlink",
+            "serverpath": "C:/Users/25697/AppData/Local/stm32cube/bundles/jlink-gdbserver/9.24.0+st.1/bin/JLinkGDBServerCL.exe",
+            "armToolchainPath": "C:/Users/25697/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin",
+            "device": "STM32H723VG",
+            "interface": "swd",
+            "runToEntryPoint": "main",
+            "liveWatch": {
+                "enabled": true,
+                "samplesPerSecond": 2
+            }
         }
     ]
 }

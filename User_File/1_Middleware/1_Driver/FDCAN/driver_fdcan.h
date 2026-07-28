@@ -1,4 +1,4 @@
-﻿#ifndef DRIVER_FDCAN_H
+#ifndef DRIVER_FDCAN_H
 #define DRIVER_FDCAN_H
 
 #ifdef __cplusplus
@@ -13,7 +13,7 @@ extern "C" {
 typedef struct
 {
     FDCAN_RxHeaderTypeDef header;                       /* HAL 原始接收头。 */
-    uint8_t data[APP_CONFIG_CAN_MAX_DATA_LENGTH];       /* Classic CAN 最大 8 字节数据。 */
+    uint8_t data[APP_CAN_DATA_MAX_BYTES];       /* Classic CAN 最大 8 字节数据。 */
 } driver_fdcan_rx_frame_t;
 
 typedef void (*driver_fdcan_rx_callback_t)(FDCAN_HandleTypeDef *handle,
@@ -47,6 +47,7 @@ void Driver_FDCAN_RegisterRxCallback(FDCAN_HandleTypeDef *handle,
  * @brief 发送一帧标准 ID Classic CAN 数据帧。
  *
  * identifier 范围为 0x000..0x7FF，length 最大为 8 字节。
+ * 发送接口不等待 ACK、不重发失败帧；队列满或 HAL 添加失败时直接丢弃当前帧。
  */
 void Driver_FDCAN_SendData(FDCAN_HandleTypeDef *handle,
                            uint32_t identifier,

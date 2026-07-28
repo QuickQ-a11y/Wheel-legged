@@ -3,7 +3,6 @@
 #include "app_config.h"
 #include "device_motor_dji.h"
 #include "device_motor_dm.h"
-#include "module_chassis.h"
 #include "task_can.h"
 #include "task_can_dispatch.h"
 #include "task_imu.h"
@@ -12,119 +11,112 @@
 
 #include <string.h>
 
-typedef enum
-{
-    CHASSIS_STATE_STANDING = 0,       /* 正常站立和平衡控制。 */
-    CHASSIS_STATE_ZERO_FORCE,         /* 零力矩状态，所有输出保持安全零值。 */
-    CHASSIS_STATE_FALLEN,             /* 倒地状态框架，后续接入起身前腿部调整。 */
-    CHASSIS_STATE_FALLING_TO_STAND,   /* 重新站立框架，后续接入小板凳准备姿态。 */
-    CHASSIS_STATE_BENCH,              /* 小板凳调试状态，后续验证腿和轮。 */
-} chassis_state_t;
-
-static osThreadId_t chassisTaskHandle;
-static uint8_t chassisEnable;
-static chassis_mode_t chassisMode;
-static chassis_state_t chassisState;
-
-static const osThreadAttr_t chassisTaskAttributes = {
+static const osThreadAttr_t chassis_task_attributes = {
     .name = "ChassisTask",
     .stack_size = 1024U * 4U,
     .priority = (osPriority_t)osPriorityHigh,
 };
 
 /**
- * @brief 将输出结构清零并标记为安全输出。
- *
- * 未实现模式、未使能和故障兜底都使用这一路径，避免电机保留上一帧命令。
+ * @brief 从 IMU、DM、DJI 和 CAN 任务读取本轮底盘反馈。
  */
-static void ChassisTask_SetZeroOutput(module_chassis_output_t *chassisOutput)
+static void chassis_feedback_update(void)
 {
-    memset(chassisOutput, 0, sizeof(*chassisOutput));
-    chassisOutput->safeOutput = 1U;
-    chassisOutput->faultFlags = MODULE_CHASSIS_FAULT_NONE;
-    Module_Chassis_ResetMotionState();
-}
-
-/**
- * @brief 将 IMU 任务状态转换为底盘模块输入。
- */
-static void ChassisTask_FillImuInput(const task_imu_state_t *imuState,
-                                     module_chassis_input_t *chassisInput)
-{
-    chassisInput->imu.isInitialized = imuState->isInitialized;
-    chassisInput->imu.isAttitudeReady = imuState->isAttitudeReady;
-    chassisInput->imu.errorCode = imuState->lastErrorCode;
-    chassisInput->imu.rollRad = imuState->rollRad;
-    chassisInput->imu.pitchRad = imuState->pitchRad;
-    chassisInput->imu.yawRad = imuState->yawRad;
-    memcpy(chassisInput->imu.gyroRadps,
-           imuState->filteredGyroRadps,
-           sizeof(chassisInput->imu.gyroRadps));
-    memcpy(chassisInput->imu.motionAccMps2,
-           imuState->motionAccMps2,
-           sizeof(chassisInput->imu.motionAccMps2));
-    chassisInput->imu.dtSec = imuState->dtSec;
-}
-
-/**
- * @brief 将电机设备层状态转换为底盘模块输入。
- */
-static void ChassisTask_FillMotorInput(uint32_t nowTick,
-                                       module_chassis_input_t *chassisInput)
-{
+    task_imu_state_t imu_state = {0};
+    uint32_t now_tick = HAL_GetTick();
     uint32_t index;
+
+    IMU_Task_GetState(&imu_state);
+    chassis.imu.initialized = imu_state.isInitialized;
+    chassis.imu.attitude_ready = imu_state.isAttitudeReady;
+    chassis.imu.error_code = imu_state.lastErrorCode;
+    chassis.imu.roll_rad = imu_state.rollRad;
+    chassis.imu.pitch_rad = imu_state.pitchRad;
+    chassis.imu.yaw_rad = imu_state.yawRad;
+    memcpy(chassis.imu.gyro_radps,
+           imu_state.filteredGyroRadps,
+           sizeof(chassis.imu.gyro_radps));
+    memcpy(chassis.imu.motion_accel_mps2,
+           imu_state.motionAccMps2,
+           sizeof(chassis.imu.motion_accel_mps2));
 
     for (index = 0U; index < MOTOR_DM_COUNT; index++)
     {
-        motor_dm_state_t dmState = {0};
+        motor_dm_state_t motor_state = {0};
 
-        Motor_DM_GetState((motor_dm_index_t)index, &dmState);
-        chassisInput->dmMotors[index].isOnline =
-            Motor_DM_IsOnline((motor_dm_index_t)index, nowTick);
-        chassisInput->dmMotors[index].positionRad = dmState.positionRad;
-        chassisInput->dmMotors[index].velocityRadps = dmState.velocityRadps;
-        chassisInput->dmMotors[index].torqueNm = dmState.torqueNm;
+        Motor_DM_GetState((motor_dm_index_t)index, &motor_state);
+        chassis.dm_motor[index].online =
+            Motor_DM_IsOnline((motor_dm_index_t)index, now_tick);
+        chassis.dm_motor[index].position_rad = motor_state.positionRad;
+        chassis.dm_motor[index].speed_radps = motor_state.velocityRadps;
+        chassis.dm_motor[index].torque_nm = motor_state.torqueNm;
     }
 
-    for (index = 0U; index < APP_CONFIG_DJI_WHEEL_COUNT; index++)
+    for (index = 0U; index < APP_WHEEL_COUNT; index++)
     {
-        const motor_dji_t *wheel = &chassisDjiWheels[index];
+        chassis.wheel_motor[index].online =
+            Motor_DJI_IsOnline(&chassisDjiWheels[index], now_tick);
+        chassis.wheel_motor[index].speed_rpm = chassisDjiWheels[index].speedRpm;
+        chassis.wheel_motor[index].current = chassisDjiWheels[index].currentRaw;
+    }
 
-        chassisInput->djiWheels[index].isOnline = Motor_DJI_IsOnline(wheel, nowTick);
-        chassisInput->djiWheels[index].speedRpm = wheel->speedRpm;
-        chassisInput->djiWheels[index].currentRaw = wheel->currentRaw;
+    chassis.can_tx_error_count = CAN_Task_GetTxErrorCount();
+}
+
+/**
+ * @brief 按使能和外层模式选择本轮控制状态。
+ */
+static void chassis_state_update(void)
+{
+    if (chassis.enabled == 0U)
+    {
+        chassis.state = CHASSIS_ZERO_FORCE;
+        return;
+    }
+
+    switch (chassis.mode)
+    {
+    case CHASSIS_MODE_ZERO_FORCE:
+        chassis.state = CHASSIS_ZERO_FORCE;
+        break;
+
+    case CHASSIS_MODE_FOLLOW:
+    case CHASSIS_MODE_TOP:
+        if ((chassis.state == CHASSIS_ZERO_FORCE) ||
+            (chassis.state == CHASSIS_FALLEN) ||
+            (chassis.state == CHASSIS_BENCH))
+        {
+            chassis.state = CHASSIS_STANDING;
+        }
+        break;
+
+    case CHASSIS_MODE_SELF_SAVE:
+        if ((chassis.state != CHASSIS_FALLEN) &&
+            (chassis.state != CHASSIS_FALLING_TO_STAND))
+        {
+            chassis.state = CHASSIS_FALLEN;
+        }
+        break;
+
+    case CHASSIS_MODE_BENCH:
+        chassis.state = CHASSIS_BENCH;
+        break;
+
+    default:
+        chassis.state = CHASSIS_ZERO_FORCE;
+        break;
     }
 }
 
 /**
- * @brief 收集底盘模块输入，对应 SPR 的 chassis_feedback_update 前半段。
- *
- * 当前工程的腿部几何、状态向量和 VMC 中间量仍在底盘模块中计算。
- * 任务层只负责把设备层反馈整理成模块输入。
+ * @brief 将底盘最终命令写入 DM 设备层和 DJI CAN 发送缓存。
  */
-static void ChassisTask_ReadFeedback(module_chassis_input_t *chassisInput)
-{
-    task_imu_state_t imuState = {0};
-    uint32_t nowTick = HAL_GetTick();
-
-    memset(chassisInput, 0, sizeof(*chassisInput));
-    chassisInput->isEnabled = chassisEnable;
-    chassisInput->canTxErrorCount = CAN_Task_GetTxErrorCount();
-
-    IMU_Task_GetState(&imuState);
-    ChassisTask_FillImuInput(&imuState, chassisInput);
-    ChassisTask_FillMotorInput(nowTick, chassisInput);
-}
-
-/**
- * @brief 将底盘模块输出下发到电机设备层和 CAN 发送缓存。
- */
-static void ChassisTask_ApplyOutput(const module_chassis_output_t *chassisOutput)
+static void chassis_cmd_send(void)
 {
     uint32_t index;
 
-    Motor_DM_SetSafe(chassisOutput->safeOutput);
-    if (chassisOutput->safeOutput != 0U)
+    Motor_DM_SetSafe(chassis.safe_output);
+    if (chassis.safe_output != 0U)
     {
         Motor_DM_ZeroAll();
     }
@@ -132,225 +124,103 @@ static void ChassisTask_ApplyOutput(const module_chassis_output_t *chassisOutput
     for (index = 0U; index < MOTOR_DM_COUNT; index++)
     {
         motor_dm_command_t command = {
-            .torqueNm = chassisOutput->dmCommands[index].torqueNm,
+            .torqueNm = chassis.joint_torque_nm[index],
         };
 
         Motor_DM_SetCommand((motor_dm_index_t)index, &command);
     }
 
-    CAN_Task_SetDjiCurrent(chassisOutput->djiCurrents);
+    CAN_Task_SetDjiCurrent(chassis.wheel_current);
     Motor_DM_UpdateTxFrames();
     CAN_Task_RequestTx();
 }
 
-/**
- * @brief 设置外层底盘模式，对应 SPR 的 chassis_set_mode。
- *
- * 目前遥控/上层输入尚未接入，外层模式由 ChassisTask_SetMode 写入。
- * 后续接入遥控时，只在这里把遥控值映射成 chassisMode。
- */
-static void ChassisTask_SelectMode(void)
+static void chassis_task(void *argument)
 {
-    /* 当前没有遥控源，保留阶段入口以固定 SPR 风格主流程。 */
-
-}
-
-/**
- * @brief 设置本轮控制状态，对应 SPR 的 chassis_set_contorl。
- *
- * 第一阶段只根据外层模式选择内层状态；速度、腿长、yaw 和 roll 目标
- * 后续在这里接入遥控或上层控制输入。
- */
-static void ChassisTask_SetControl(void)
-{
-    if (chassisEnable == 0U)
-    {
-        chassisState = CHASSIS_STATE_ZERO_FORCE;
-        return;
-    }
-
-    switch (chassisMode)
-    {
-    case CHASSIS_MODE_ZERO_FORCE:
-        chassisState = CHASSIS_STATE_ZERO_FORCE;
-        break;
-
-    case CHASSIS_MODE_FOLLOW:
-    case CHASSIS_MODE_TOP:
-        if ((chassisState == CHASSIS_STATE_ZERO_FORCE) ||
-            (chassisState == CHASSIS_STATE_FALLEN) ||
-            (chassisState == CHASSIS_STATE_BENCH))
-        {
-            chassisState = CHASSIS_STATE_STANDING;
-        }
-        break;
-
-    case CHASSIS_MODE_SELF_SAVE:
-        if ((chassisState != CHASSIS_STATE_FALLEN) &&
-            (chassisState != CHASSIS_STATE_FALLING_TO_STAND))
-        {
-            chassisState = CHASSIS_STATE_FALLEN;
-        }
-        break;
-
-    case CHASSIS_MODE_BENCH:
-        chassisState = CHASSIS_STATE_BENCH;
-        break;
-
-    default:
-        chassisState = CHASSIS_STATE_ZERO_FORCE;
-        break;
-    }
-}
-
-/**
- * @brief 正常站立状态，当前进入现有 LQR/VMC 平衡链路。
- */
-static void ChassisTask_StayStanding(const module_chassis_input_t *chassisInput,
-                                     module_chassis_output_t *chassisOutput)
-{
-    Module_Chassis_RunControl(chassisInput, chassisOutput);
-}
-
-/**
- * @brief 零力矩状态，持续覆盖安全零输出。
- */
-static void ChassisTask_StayZeroForce(module_chassis_output_t *chassisOutput)
-{
-    ChassisTask_SetZeroOutput(chassisOutput);
-}
-
-/**
- * @brief 倒地状态框架，当前不输出非零力矩。
- *
- * 真正起身前需要补充倒地判据、目标腿姿态和关节 PID 参数。
- */
-static void ChassisTask_StayFallen(module_chassis_output_t *chassisOutput)
-{
-    ChassisTask_SetZeroOutput(chassisOutput);
-}
-
-/**
- * @brief 重新站立状态框架，当前仍保持安全零输出。
- */
-static void ChassisTask_StayFallingToStand(module_chassis_output_t *chassisOutput)
-{
-    ChassisTask_SetZeroOutput(chassisOutput);
-}
-
-/**
- * @brief 小板凳调试状态框架，当前不输出非零力矩。
- */
-static void ChassisTask_StayBench(module_chassis_output_t *chassisOutput)
-{
-    ChassisTask_SetZeroOutput(chassisOutput);
-}
-
-/**
- * @brief 按内层状态执行一轮控制，对应 SPR 的 chassis_control_loop。
- */
-static void ChassisTask_ControlLoop(const module_chassis_input_t *chassisInput,
-                                    module_chassis_output_t *chassisOutput)
-{
-    if (chassisEnable == 0U)
-    {
-        ChassisTask_SetZeroOutput(chassisOutput);
-        chassisOutput->faultFlags = MODULE_CHASSIS_FAULT_DISABLED;
-        return;
-    }
-
-    switch (chassisState)
-    {
-    case CHASSIS_STATE_STANDING:
-        ChassisTask_StayStanding(chassisInput, chassisOutput);
-        break;
-
-    case CHASSIS_STATE_ZERO_FORCE:
-        ChassisTask_StayZeroForce(chassisOutput);
-        break;
-
-    case CHASSIS_STATE_FALLEN:
-        ChassisTask_StayFallen(chassisOutput);
-        break;
-
-    case CHASSIS_STATE_FALLING_TO_STAND:
-        ChassisTask_StayFallingToStand(chassisOutput);
-        break;
-
-    case CHASSIS_STATE_BENCH:
-        ChassisTask_StayBench(chassisOutput);
-        break;
-
-    default:
-        ChassisTask_StayZeroForce(chassisOutput);
-        break;
-    }
-}
-
-static void ChassisTask(void *argument)
-{
-    uint32_t wakeTick = osKernelGetTickCount();
+    const float tick_sec = 1.0f / (float)osKernelGetTickFreq();
+    uint32_t control_last_tick = 0U;
+    uint32_t wake_tick = osKernelGetTickCount();
 
     (void)argument;
 
     Motor_DM_Init();
     Motor_DM_SetEnable(0U);
-    Module_Chassis_Init();
 
     for (;;)
     {
-        module_chassis_input_t chassisInput = {0};
-        module_chassis_output_t chassisOutput = {0};
+        uint32_t control_tick = osKernelGetTickCount();
 
-        ChassisTask_SelectMode();
-        ChassisTask_ReadFeedback(&chassisInput);
-        ChassisTask_SetControl();
-        ChassisTask_ControlLoop(&chassisInput, &chassisOutput);
+        /* 底盘PID、速度Kalman和位移积分只使用底盘自己的实际周期。 */
+        if (control_last_tick == 0U)
+        {
+            chassis.control_dt_s = chassis_config.default_dt_s;
+        }
+        else
+        {
+            chassis.control_dt_s =
+                (float)(control_tick - control_last_tick) * tick_sec;
+            if ((chassis.control_dt_s < chassis_config.min_dt_s) ||
+                (chassis.control_dt_s > chassis_config.max_dt_s))
+            {
+                chassis.control_dt_s = chassis_config.default_dt_s;
+            }
+        }
+        control_last_tick = control_tick;
 
-        ChassisTask_ApplyOutput(&chassisOutput);
+        /* 反馈 -> 状态选择 -> 控制 -> 电机命令，保持单向数据流。 */
+        chassis_feedback_update();
+        chassis_state_update();
 
-        wakeTick += APP_CONFIG_CHASSIS_TASK_PERIOD_TICKS;
-        (void)osDelayUntil(wakeTick);
+        switch (chassis.state)
+        {
+        case CHASSIS_STANDING:
+            chassis_control_loop();
+            break;
+
+        case CHASSIS_ZERO_FORCE:
+        case CHASSIS_FALLEN:
+        case CHASSIS_FALLING_TO_STAND:
+        case CHASSIS_BENCH:
+        default:
+            chassis_zero_output();
+            if (chassis.enabled == 0U)
+            {
+                chassis.fault_flags = CHASSIS_FAULT_DISABLED;
+            }
+            break;
+        }
+
+        chassis_cmd_send();
+
+        wake_tick += APP_CTRL_TICKS;
+        if ((int32_t)(osKernelGetTickCount() - wake_tick) >= 0)
+        {
+            wake_tick = osKernelGetTickCount() + APP_CTRL_TICKS;
+        }
+        (void)osDelayUntil(wake_tick);
     }
 }
 
-void ChassisTask_Init(void)
+void chassis_task_init(void)
 {
-    chassisEnable = 0U;
-    chassisMode = CHASSIS_MODE_ZERO_FORCE;
-    chassisState = CHASSIS_STATE_ZERO_FORCE;
-    chassisTaskHandle = osThreadNew(ChassisTask, NULL, &chassisTaskAttributes);
+    chassis_control_init();
+    (void)osThreadNew(chassis_task, NULL, &chassis_task_attributes);
 }
 
-void ChassisTask_SetEnable(uint8_t enable)
+void chassis_set_enable(uint8_t enable)
 {
-    chassisEnable = (enable != 0U) ? 1U : 0U;
-    Motor_DM_SetEnable(chassisEnable);
+    chassis.enabled = (enable != 0U) ? 1U : 0U;
+    Motor_DM_SetEnable(chassis.enabled);
 }
 
-void ChassisTask_SetMode(chassis_mode_t mode)
+void chassis_set_mode(chassis_mode_t mode)
 {
-    switch (mode)
+    if (mode <= CHASSIS_MODE_BENCH)
     {
-    case CHASSIS_MODE_ZERO_FORCE:
-    case CHASSIS_MODE_FOLLOW:
-    case CHASSIS_MODE_TOP:
-    case CHASSIS_MODE_SELF_SAVE:
-    case CHASSIS_MODE_BENCH:
-        chassisMode = mode;
-        break;
-
-    default:
-        chassisMode = CHASSIS_MODE_ZERO_FORCE;
-        break;
+        chassis.mode = mode;
     }
-}
-
-void ChassisTask_NotifyImuReady(void)
-{
-    /*
-     * 底盘任务当前使用固定周期调度。
-     * 保留该接口是为了兼容旧调用链，后续如改为 IMU 触发可在此处设置任务标志。
-     */
-    (void)chassisTaskHandle;
+    else
+    {
+        chassis.mode = CHASSIS_MODE_ZERO_FORCE;
+    }
 }

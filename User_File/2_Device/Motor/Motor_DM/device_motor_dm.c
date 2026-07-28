@@ -1,16 +1,9 @@
-﻿#include "device_motor_dm.h"
+#include "device_motor_dm.h"
 
 #include "task_can.h"
 #include "fdcan.h"
 
 #include <string.h>
-
-#define MOTOR_DM_POSITION_MIN_RAD (-12.5f)
-#define MOTOR_DM_POSITION_MAX_RAD 12.5f
-#define MOTOR_DM_VELOCITY_MIN_RADPS (-45.0f)
-#define MOTOR_DM_VELOCITY_MAX_RADPS 45.0f
-#define MOTOR_DM_TORQUE_MIN_NM (-40.0f)
-#define MOTOR_DM_TORQUE_MAX_NM 40.0f
 
 typedef struct
 {
@@ -99,7 +92,7 @@ static void Motor_DM_UpdateModeFrames(void)
 
     for (index = 0U; index < MOTOR_DM_COUNT; index++)
     {
-        uint8_t data[APP_CONFIG_DM_FRAME_LENGTH] = {
+        uint8_t data[APP_DM_FRAME_LEN] = {
             0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU,
             (dmEnable != 0U) ? 0xFCU : 0xFDU,
         };
@@ -110,7 +103,7 @@ static void Motor_DM_UpdateModeFrames(void)
             CAN_Task_UpdateTxFrame(handle,
                                    dmMotors[index].config.txId,
                                    data,
-                                   APP_CONFIG_DM_FRAME_LENGTH);
+                                   APP_DM_FRAME_LEN);
         }
     }
 }
@@ -120,13 +113,13 @@ void Motor_DM_Init(void)
     memset(dmMotors, 0, sizeof(dmMotors));
 
     dmMotors[MOTOR_DM_LEFT_FRONT].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_CONFIG_DM_LEFT_FRONT_TX_ID, APP_CONFIG_DM_LEFT_FRONT_RX_ID, APP_CONFIG_DM_LEFT_DIRECTION};
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_DM_LEFT_FRONT_TX_ID, APP_DM_LEFT_FRONT_RX_ID, APP_DM_LEFT_DIR};
     dmMotors[MOTOR_DM_LEFT_BACK].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_CONFIG_DM_LEFT_BACK_TX_ID, APP_CONFIG_DM_LEFT_BACK_RX_ID, APP_CONFIG_DM_LEFT_DIRECTION};
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_DM_LEFT_BACK_TX_ID, APP_DM_LEFT_BACK_RX_ID, APP_DM_LEFT_DIR};
     dmMotors[MOTOR_DM_RIGHT_FRONT].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_CONFIG_DM_RIGHT_FRONT_TX_ID, APP_CONFIG_DM_RIGHT_FRONT_RX_ID, APP_CONFIG_DM_RIGHT_DIRECTION};
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_DM_RIGHT_FRONT_TX_ID, APP_DM_RIGHT_FRONT_RX_ID, APP_DM_RIGHT_DIR};
     dmMotors[MOTOR_DM_RIGHT_BACK].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_CONFIG_DM_RIGHT_BACK_TX_ID, APP_CONFIG_DM_RIGHT_BACK_RX_ID, APP_CONFIG_DM_RIGHT_DIRECTION};
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_DM_RIGHT_BACK_TX_ID, APP_DM_RIGHT_BACK_RX_ID, APP_DM_RIGHT_DIR};
 
     dmSafe = 1U;
     dmEnable = 0U;
@@ -135,7 +128,7 @@ void Motor_DM_Init(void)
 
 void Motor_DM_UpdateFeedback(app_can_bus_t bus,
                              uint32_t rxId,
-                             const uint8_t data[APP_CONFIG_DM_FRAME_LENGTH])
+                             const uint8_t data[APP_DM_FRAME_LEN])
 {
     uint32_t index;
 
@@ -160,11 +153,20 @@ void Motor_DM_UpdateFeedback(app_can_bus_t bus,
 
         motor->state.state = data[0] >> 4U;
         motor->state.positionRad =
-            Motor_DM_UintToFloat(positionRaw, MOTOR_DM_POSITION_MIN_RAD, MOTOR_DM_POSITION_MAX_RAD, 16U) * direction;
+            Motor_DM_UintToFloat(positionRaw,
+                                 APP_DM_POS_MIN_RAD,
+                                 APP_DM_POS_MAX_RAD,
+                                 16U) * direction;
         motor->state.velocityRadps =
-            Motor_DM_UintToFloat(velocityRaw, MOTOR_DM_VELOCITY_MIN_RADPS, MOTOR_DM_VELOCITY_MAX_RADPS, 12U) * direction;
+            Motor_DM_UintToFloat(velocityRaw,
+                                 APP_DM_VEL_MIN_RADPS,
+                                 APP_DM_VEL_MAX_RADPS,
+                                 12U) * direction;
         motor->state.torqueNm =
-            Motor_DM_UintToFloat(torqueRaw, MOTOR_DM_TORQUE_MIN_NM, MOTOR_DM_TORQUE_MAX_NM, 12U) * direction;
+            Motor_DM_UintToFloat(torqueRaw,
+                                 APP_DM_TORQUE_MIN_NM,
+                                 APP_DM_TORQUE_MAX_NM,
+                                 12U) * direction;
         motor->state.mosTemperature = data[6];
         motor->state.rotorTemperature = data[7];
         motor->state.feedbackCount++;
@@ -235,7 +237,7 @@ uint8_t Motor_DM_IsOnline(motor_dm_index_t index, uint32_t nowTick)
         return 0U;
     }
 
-    return ((nowTick - dmMotors[index].state.lastUpdateTick) <= APP_CONFIG_DM_ONLINE_TIMEOUT_TICKS) ? 1U : 0U;
+    return ((nowTick - dmMotors[index].state.lastUpdateTick) <= APP_DM_TIMEOUT_TICKS) ? 1U : 0U;
 }
 
 void Motor_DM_ZeroAll(void)
@@ -261,7 +263,7 @@ void Motor_DM_UpdateTxFrames(void)
 
     for (index = 0U; index < MOTOR_DM_COUNT; index++)
     {
-        uint8_t data[APP_CONFIG_DM_FRAME_LENGTH] = {0};
+        uint8_t data[APP_DM_FRAME_LEN] = {0};
         motor_dm_object_t *motor = &dmMotors[index];
         motor_dm_command_t command = motor->command;
         FDCAN_HandleTypeDef *handle = Motor_DM_GetCanHandle(motor->config.bus);
@@ -283,13 +285,13 @@ void Motor_DM_UpdateTxFrames(void)
          * 这表示当前固件只使用 DM MIT 的力矩通道，不在发送帧中下发位置、速度、KP、KD。
          */
         uint16_t torqueRaw = Motor_DM_FloatToUint(command.torqueNm * direction,
-                                                  MOTOR_DM_TORQUE_MIN_NM,
-                                                  MOTOR_DM_TORQUE_MAX_NM,
-                                                  12U);
+                                                   APP_DM_TORQUE_MIN_NM,
+                                                   APP_DM_TORQUE_MAX_NM,
+                                                   12U);
 
         data[6] = (uint8_t)(torqueRaw >> 8U);
         data[7] = (uint8_t)torqueRaw;
 
-        CAN_Task_UpdateTxFrame(handle, motor->config.txId, data, APP_CONFIG_DM_FRAME_LENGTH);
+        CAN_Task_UpdateTxFrame(handle, motor->config.txId, data, APP_DM_FRAME_LEN);
     }
 }

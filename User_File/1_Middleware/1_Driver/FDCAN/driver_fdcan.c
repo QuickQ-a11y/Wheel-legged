@@ -1,4 +1,4 @@
-﻿#include "driver_fdcan.h"
+#include "driver_fdcan.h"
 
 #include <string.h>
 
@@ -35,7 +35,7 @@ static driver_fdcan_object_t *Driver_FDCAN_GetObject(FDCAN_HandleTypeDef *handle
  */
 static uint32_t Driver_FDCAN_LengthToDlc(uint8_t length)
 {
-    static const uint32_t dlcTable[APP_CONFIG_CAN_MAX_DATA_LENGTH + 1U] = {
+    static const uint32_t dlcTable[APP_CAN_DATA_MAX_BYTES + 1U] = {
         FDCAN_DLC_BYTES_0,
         FDCAN_DLC_BYTES_1,
         FDCAN_DLC_BYTES_2,
@@ -147,19 +147,45 @@ void Driver_FDCAN_SendData(FDCAN_HandleTypeDef *handle,
                            uint8_t length)
 {
     FDCAN_TxHeaderTypeDef txHeader = {0};
-    uint8_t emptyData[APP_CONFIG_CAN_MAX_DATA_LENGTH] = {0};
+    FDCAN_ProtocolStatusTypeDef protocolStatus = {0};
+    uint8_t emptyData[APP_CAN_DATA_MAX_BYTES] = {0};
     const uint8_t *txData = data;
+    uint32_t pendingTxRequests;
 
     if ((handle == NULL) ||
-        (identifier > APP_CONFIG_CAN_STD_ID_MAX) ||
-        (length > APP_CONFIG_CAN_MAX_DATA_LENGTH) ||
+        (identifier > APP_CAN_STD_ID_MAX) ||
+        (length > APP_CAN_DATA_MAX_BYTES) ||
         ((data == NULL) && (length > 0U)))
     {
         return;
     }
 
+    (void)HAL_FDCAN_GetProtocolStatus(handle, &protocolStatus);
+    if (protocolStatus.BusOff != 0U)
+    {
+        /*
+         * 无 ACK 或总线错误可能让控制器进入 BusOff。
+         * 当前帧直接丢弃，只恢复外设，下一周期继续发送最新命令。
+         */
+        (void)HAL_FDCAN_Stop(handle);
+        (void)HAL_FDCAN_Start(handle);
+        (void)HAL_FDCAN_ActivateNotification(handle,
+                                             FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
+                                             0U);
+        return;
+    }
+
     if (HAL_FDCAN_GetTxFifoFreeLevel(handle) == 0U)
     {
+        /*
+         * 旧发送请求可能因为无 ACK 或错误帧占住 Tx FIFO。
+         * 取消 pending 请求后丢弃当前帧，避免旧帧阻塞后续控制命令。
+         */
+        pendingTxRequests = handle->Instance->TXBRP;
+        if (pendingTxRequests != 0U)
+        {
+            (void)HAL_FDCAN_AbortTxRequest(handle, pendingTxRequests);
+        }
         return;
     }
 
@@ -178,7 +204,14 @@ void Driver_FDCAN_SendData(FDCAN_HandleTypeDef *handle,
     txHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
     txHeader.MessageMarker = 0U;
 
-    (void)HAL_FDCAN_AddMessageToTxFifoQ(handle, &txHeader, (uint8_t *)txData);
+    if (HAL_FDCAN_AddMessageToTxFifoQ(handle, &txHeader, (uint8_t *)txData) != HAL_OK)
+    {
+        pendingTxRequests = handle->Instance->TXBRP;
+        if (pendingTxRequests != 0U)
+        {
+            (void)HAL_FDCAN_AbortTxRequest(handle, pendingTxRequests);
+        }
+    }
 }
 
 uint8_t Driver_FDCAN_DlcToLength(uint32_t dataLength)
