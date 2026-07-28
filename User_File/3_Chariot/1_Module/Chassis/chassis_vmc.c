@@ -5,6 +5,35 @@
 
 #define CHASSIS_VMC_EPSILON 1.0e-6f
 
+static float vmc_limit_float(float value, float min_value, float max_value)
+{
+    if (value < min_value)
+    {
+        return min_value;
+    }
+    if (value > max_value)
+    {
+        return max_value;
+    }
+    return value;
+}
+
+/**
+ * @brief 将逆解角调整到最接近当前反馈的等价角，避免跨越正负 pi 时目标跳变。
+ */
+static float vmc_nearest_equivalent_angle(float target_rad, float current_rad)
+{
+    while ((target_rad - current_rad) > CHASSIS_PI)
+    {
+        target_rad -= 2.0f * CHASSIS_PI;
+    }
+    while ((target_rad - current_rad) < -CHASSIS_PI)
+    {
+        target_rad += 2.0f * CHASSIS_PI;
+    }
+    return target_rad;
+}
+
 void vmc_calc_state(const chassis_leg_config_t *config,
                     float front_position_rad,
                     float back_position_rad,
@@ -153,6 +182,97 @@ void vmc_calc_state(const chassis_leg_config_t *config,
     leg->phi0_speed_radps =
         (point_c_x * point_c_speed_y - point_c_y * point_c_speed_x) /
         length_squared;
+}
+
+uint8_t vmc_calc_joint_target(const chassis_leg_config_t *config,
+                              const chassis_vmc_state_t *current_leg,
+                              float target_length_m,
+                              float target_phi0_rad,
+                              chassis_vmc_joint_target_t *target)
+{
+    const chassis_geometry_config_t *geometry;
+    float point_c_x;
+    float point_c_y;
+    float front_vector_x;
+    float back_vector_x;
+    float front_distance;
+    float back_distance;
+    float front_cosine;
+    float back_cosine;
+    float front_base_angle;
+    float back_base_angle;
+
+    if (target != NULL)
+    {
+        memset(target, 0, sizeof(*target));
+    }
+    if ((config == NULL) || (current_leg == NULL) || (target == NULL) ||
+        (!isfinite(target_length_m)) || (!isfinite(target_phi0_rad)))
+    {
+        return 0U;
+    }
+
+    geometry = &config->geometry;
+    if ((geometry->link1_m <= 0.0f) ||
+        (geometry->link2_m <= 0.0f) ||
+        (geometry->link3_m <= 0.0f) ||
+        (geometry->link4_m <= 0.0f) ||
+        (target_length_m <= geometry->min_leg_length_m))
+    {
+        return 0U;
+    }
+
+    point_c_x = target_length_m * cosf(target_phi0_rad);
+    point_c_y = target_length_m * sinf(target_phi0_rad);
+    front_vector_x = point_c_x + geometry->frame_joint_distance_m * 0.5f;
+    back_vector_x = point_c_x - geometry->frame_joint_distance_m * 0.5f;
+    front_distance = sqrtf(front_vector_x * front_vector_x +
+                           point_c_y * point_c_y);
+    back_distance = sqrtf(back_vector_x * back_vector_x +
+                          point_c_y * point_c_y);
+    if ((front_distance <= CHASSIS_VMC_EPSILON) ||
+        (back_distance <= CHASSIS_VMC_EPSILON) ||
+        (front_distance > geometry->link1_m + geometry->link2_m +
+                              CHASSIS_VMC_EPSILON) ||
+        (front_distance < fabsf(geometry->link1_m - geometry->link2_m) -
+                              CHASSIS_VMC_EPSILON) ||
+        (back_distance > geometry->link4_m + geometry->link3_m +
+                             CHASSIS_VMC_EPSILON) ||
+        (back_distance < fabsf(geometry->link4_m - geometry->link3_m) -
+                             CHASSIS_VMC_EPSILON))
+    {
+        return 0U;
+    }
+
+    front_cosine =
+        (geometry->link1_m * geometry->link1_m +
+         front_distance * front_distance -
+         geometry->link2_m * geometry->link2_m) /
+        (2.0f * geometry->link1_m * front_distance);
+    back_cosine =
+        (geometry->link4_m * geometry->link4_m +
+         back_distance * back_distance -
+         geometry->link3_m * geometry->link3_m) /
+        (2.0f * geometry->link4_m * back_distance);
+    front_base_angle = atan2f(point_c_y, front_vector_x);
+    back_base_angle = atan2f(point_c_y, back_vector_x);
+
+    /* 当前实机装配对应前链上分支、后链下分支。 */
+    target->phi1_rad = front_base_angle +
+                       acosf(vmc_limit_float(front_cosine, -1.0f, 1.0f));
+    target->phi4_rad = back_base_angle -
+                       acosf(vmc_limit_float(back_cosine, -1.0f, 1.0f));
+    target->phi1_rad = vmc_nearest_equivalent_angle(target->phi1_rad,
+                                                     current_leg->phi1_rad);
+    target->phi4_rad = vmc_nearest_equivalent_angle(target->phi4_rad,
+                                                     current_leg->phi4_rad);
+
+    if ((!isfinite(target->phi1_rad)) || (!isfinite(target->phi4_rad)))
+    {
+        memset(target, 0, sizeof(*target));
+        return 0U;
+    }
+    return 1U;
 }
 
 void vmc_calc_torque(const chassis_leg_config_t *config,

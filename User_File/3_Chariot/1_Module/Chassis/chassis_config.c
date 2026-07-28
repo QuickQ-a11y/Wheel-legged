@@ -118,6 +118,48 @@ const chassis_config_t chassis_config = {
         .integralLimit = 30.0f,
         .outputLimit = 300.0f,
     },
+    .recovery = {
+        /*
+         * 动作阶段参考 SPR，两端腿长改为本工程当前 0.15~0.35 m 工作范围。
+         * 串级 PID 和 1 N*m 请求限幅是输出封锁阶段的保守调试初值，后续按实机修改。
+         */
+        .bench_leg_length_m = 0.15f,
+        .extended_leg_length_m = 0.35f,
+        .bench_phi0_rad = CHASSIS_HALF_PI,
+        .rotate_offset_rad = 0.30f,
+        .lagging_rotate_offset_rad = 0.60f,
+        .leg_difference_threshold_rad = 0.80f,
+        .ready_theta_min_rad = 0.50f,
+        .ready_theta_max_rad = 1.40f,
+        .direct_prepare_pitch_rad = 0.80f,
+        .ready_pitch_rad = 0.30f,
+        .direct_phi0_min_rad = 0.70f,
+        .direct_phi0_max_rad = 3.00f,
+        .leg_length_tolerance_m = 0.02f,
+        .leg_angle_tolerance_rad = 0.10f,
+        .stable_time_s = 0.10f,
+        .fallen_timeout_s = 5.0f,
+        .prepare_timeout_s = 3.0f,
+        .standing_length_rate_mps = 0.10f,
+        .standing_pitch_limit_rad = 1.60f,
+        .standing_phi0_min_rad = 0.40f,
+        .standing_phi0_max_rad = 2.80f,
+        .joint_torque_limit_nm = 1.0f,
+        .joint_angle_pid = {
+            .kp = 4.0f,
+            .ki = 0.0f,
+            .kd = 0.0f,
+            .integralLimit = 0.0f,
+            .outputLimit = 1.0f,
+        },
+        .joint_speed_pid = {
+            .kp = 1.0f,
+            .ki = 0.0f,
+            .kd = 0.0f,
+            .integralLimit = 0.0f,
+            .outputLimit = 1.0f,
+        },
+    },
     .lqr = {
         .enabled = 1U,
         .length_source = CHASSIS_K_LENGTH_FIXED,

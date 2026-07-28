@@ -64,51 +64,6 @@ static void chassis_feedback_update(void)
 }
 
 /**
- * @brief 按使能和外层模式选择本轮控制状态。
- */
-static void chassis_state_update(void)
-{
-    if (chassis.enabled == 0U)
-    {
-        chassis.state = CHASSIS_ZERO_FORCE;
-        return;
-    }
-
-    switch (chassis.mode)
-    {
-    case CHASSIS_MODE_ZERO_FORCE:
-        chassis.state = CHASSIS_ZERO_FORCE;
-        break;
-
-    case CHASSIS_MODE_FOLLOW:
-    case CHASSIS_MODE_TOP:
-        if ((chassis.state == CHASSIS_ZERO_FORCE) ||
-            (chassis.state == CHASSIS_FALLEN) ||
-            (chassis.state == CHASSIS_BENCH))
-        {
-            chassis.state = CHASSIS_STANDING;
-        }
-        break;
-
-    case CHASSIS_MODE_SELF_SAVE:
-        if ((chassis.state != CHASSIS_FALLEN) &&
-            (chassis.state != CHASSIS_FALLING_TO_STAND))
-        {
-            chassis.state = CHASSIS_FALLEN;
-        }
-        break;
-
-    case CHASSIS_MODE_BENCH:
-        chassis.state = CHASSIS_BENCH;
-        break;
-
-    default:
-        chassis.state = CHASSIS_ZERO_FORCE;
-        break;
-    }
-}
-
-/**
  * @brief 将底盘最终命令写入 DM 设备层和 DJI CAN 发送缓存。
  */
 static void chassis_cmd_send(void)
@@ -169,7 +124,8 @@ static void chassis_task(void *argument)
 
         /* 反馈 -> 状态选择 -> 控制 -> 电机命令，保持单向数据流。 */
         chassis_feedback_update();
-        chassis_state_update();
+        chassis_control_update_leg_state();
+        chassis_control_update_state();
 
         switch (chassis.state)
         {
@@ -177,16 +133,18 @@ static void chassis_task(void *argument)
             chassis_control_loop();
             break;
 
-        case CHASSIS_ZERO_FORCE:
         case CHASSIS_FALLEN:
         case CHASSIS_FALLING_TO_STAND:
+            chassis_recovery_control_loop();
+            break;
+
         case CHASSIS_BENCH:
+            chassis_bench_control_loop();
+            break;
+
+        case CHASSIS_ZERO_FORCE:
         default:
             chassis_zero_output();
-            if (chassis.enabled == 0U)
-            {
-                chassis.fault_flags = CHASSIS_FAULT_DISABLED;
-            }
             break;
         }
 

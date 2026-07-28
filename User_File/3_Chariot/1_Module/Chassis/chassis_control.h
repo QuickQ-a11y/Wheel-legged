@@ -18,6 +18,8 @@ extern "C" {
 #define CHASSIS_FAULT_DJI_MOTOR 0x00000008UL
 #define CHASSIS_FAULT_CAN 0x00000010UL
 #define CHASSIS_FAULT_CONTROL 0x00000020UL
+#define CHASSIS_FAULT_KINEMATICS 0x00000040UL
+#define CHASSIS_FAULT_RECOVERY_TIMEOUT 0x00000080UL
 
 typedef enum
 {
@@ -68,6 +70,7 @@ typedef struct
 {
     uint8_t enabled;
     chassis_mode_t mode;
+    chassis_mode_t last_mode;
     chassis_control_state_t state;
 
     chassis_imu_t imu;
@@ -77,7 +80,9 @@ typedef struct
     float control_dt_s;            /* 底盘控制本轮实际周期，单位 s。 */
 
     chassis_vmc_state_t leg[CHASSIS_LEG_COUNT];
+    uint8_t leg_state_valid;
     float lqr_state[CHASSIS_STATE_COUNT];
+    float target_state[CHASSIS_STATE_COUNT];
     float lqr_k[CHASSIS_OUTPUT_COUNT][CHASSIS_STATE_COUNT];
     float lqr_output[CHASSIS_OUTPUT_COUNT];
     float support_force_n[CHASSIS_LEG_COUNT];
@@ -90,6 +95,14 @@ typedef struct
     float forward_accel_fused_mps2;
     float forward_position_m;
 
+    float state_elapsed_s;
+    float state_stable_s;
+    float target_leg_length_m[CHASSIS_LEG_COUNT];
+    float target_leg_phi0_rad[CHASSIS_LEG_COUNT];
+    float target_joint_angle_rad[APP_DM_COUNT];
+    float target_joint_speed_radps[APP_DM_COUNT];
+    float joint_torque_request_nm[APP_DM_COUNT];
+
     float joint_torque_nm[APP_DM_COUNT];
     int16_t wheel_current[APP_WHEEL_COUNT];
     uint8_t safe_output;
@@ -101,6 +114,8 @@ typedef struct
     algorithm_kalman_t speed_kalman;
     algorithm_pid_state_t leg_length_pid[CHASSIS_LEG_COUNT];
     algorithm_pid_state_t roll_pid;
+    algorithm_pid_state_t joint_angle_pid[APP_DM_COUNT];
+    algorithm_pid_state_t joint_speed_pid[APP_DM_COUNT];
 } chassis_t;
 
 /* 底盘唯一实际状态，也是 Watch 窗口的长期调试入口。 */
@@ -117,9 +132,29 @@ void chassis_control_init(void);
 void chassis_control_reset(void);
 
 /**
+ * @brief 由本轮原始关节反馈更新左右五连杆状态。
+ */
+void chassis_control_update_leg_state(void);
+
+/**
+ * @brief 根据使能、模式边沿和当前姿态选择控制状态。
+ */
+void chassis_control_update_state(void);
+
+/**
  * @brief 执行一轮十维 LQR、支撑力和 VMC 控制计算。
  */
 void chassis_control_loop(void);
+
+/**
+ * @brief 执行倒地转腿和小板凳准备两段式重新站立控制。
+ */
+void chassis_recovery_control_loop(void);
+
+/**
+ * @brief 使用关节位置控制保持独立小板凳姿态，双轮始终清零。
+ */
+void chassis_bench_control_loop(void);
 
 /**
  * @brief 将底盘电机命令清零并重置运动融合状态。

@@ -119,6 +119,34 @@ typedef struct
     float joint_torque_limit_nm;
 } chassis_motor_output_config_t;
 
+typedef struct
+{
+    float bench_leg_length_m;             /* 小板凳目标腿长，单位 m。 */
+    float extended_leg_length_m;          /* 倒地转腿阶段目标腿长，单位 m。 */
+    float bench_phi0_rad;                  /* 小板凳虚拟腿目标角，单位 rad。 */
+    float rotate_offset_rad;               /* 基础转腿目标相对当前腿角的偏移，单位 rad。 */
+    float lagging_rotate_offset_rad;       /* 左右差异过大时滞后腿的转腿偏移，单位 rad。 */
+    float leg_difference_threshold_rad;   /* 启用滞后腿加速的 theta 差阈值，单位 rad。 */
+    float ready_theta_min_rad;             /* 转腿完成时 theta 下限，单位 rad。 */
+    float ready_theta_max_rad;             /* 转腿完成时 theta 上限，单位 rad。 */
+    float direct_prepare_pitch_rad;        /* 允许直接进入小板凳准备的 pitch 上限，单位 rad。 */
+    float ready_pitch_rad;                 /* 阶段完成时 pitch 上限，单位 rad。 */
+    float direct_phi0_min_rad;             /* 允许直接进入准备阶段的 phi0 下限，单位 rad。 */
+    float direct_phi0_max_rad;             /* 允许直接进入准备阶段的 phi0 上限，单位 rad。 */
+    float leg_length_tolerance_m;          /* 小板凳腿长完成误差，单位 m。 */
+    float leg_angle_tolerance_rad;         /* 小板凳腿角完成误差，单位 rad。 */
+    float stable_time_s;                   /* 完成条件必须连续保持的时间，单位 s。 */
+    float fallen_timeout_s;                /* 倒地转腿阶段超时，单位 s。 */
+    float prepare_timeout_s;               /* 小板凳准备阶段超时，单位 s。 */
+    float standing_length_rate_mps;        /* 进入站立后腿长目标恢复斜率，单位 m/s。 */
+    float standing_pitch_limit_rad;        /* 站立状态 pitch 保护阈值，单位 rad。 */
+    float standing_phi0_min_rad;           /* 站立状态 phi0 保护下限，单位 rad。 */
+    float standing_phi0_max_rad;           /* 站立状态 phi0 保护上限，单位 rad。 */
+    float joint_torque_limit_nm;           /* 恢复与板凳模式关节力矩请求限幅，单位 N*m。 */
+    algorithm_pid_config_t joint_angle_pid; /* 关节角度到目标速度控制器。 */
+    algorithm_pid_config_t joint_speed_pid; /* 关节速度到几何力矩控制器。 */
+} chassis_recovery_config_t;
+
 typedef enum
 {
     CHASSIS_K_LENGTH_FIXED = 0,
@@ -145,6 +173,7 @@ typedef struct
     chassis_kalman_config_t speed_kalman;
     algorithm_pid_config_t leg_length_pid;
     algorithm_pid_config_t roll_pid;
+    chassis_recovery_config_t recovery;
     chassis_lqr_config_t lqr;
     chassis_motor_output_config_t output;
     float leg_vertical_offset_rad;
