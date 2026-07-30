@@ -15,6 +15,7 @@
 
 chassis_t chassis;
 
+/** @brief 按给定绝对值对称限制标量，非正限幅直接返回零。 */
 static float Chassis_LimitSymmetric(float value, float limit)
 {
     float positive_limit = fabsf(limit);
@@ -34,6 +35,7 @@ static float Chassis_LimitSymmetric(float value, float limit)
     return value;
 }
 
+/** @brief 让目标量每周期最多移动maximum_step，避免腿长目标阶跃。 */
 static float Chassis_MoveToward(float value, float target, float maximum_step)
 {
     float positive_step = fabsf(maximum_step);
@@ -49,6 +51,7 @@ static float Chassis_MoveToward(float value, float target, float maximum_step)
     return target;
 }
 
+/** @brief 判断周期角是否存在落在指定连续区间内的等价角。 */
 static uint8_t Chassis_IsAngleInIntervalRad(float angle_rad,
                                         float minimum_rad,
                                         float maximum_rad)
@@ -61,6 +64,7 @@ static uint8_t Chassis_IsAngleInIntervalRad(float angle_rad,
             (equivalent_rad <= maximum_rad)) ? 1U : 0U;
 }
 
+/** @brief 读取左右腿前后关节的DM数组索引并检查数组边界。 */
 static uint8_t Chassis_GetJointIndices(
     uint8_t indices[CHASSIS_LEG_COUNT][CHASSIS_JOINT_COUNT])
 {
@@ -82,6 +86,12 @@ static uint8_t Chassis_GetJointIndices(
     return 1U;
 }
 
+/**
+ * @brief 汇总只影响最终电机输出许可的故障位。
+ *
+ * 这些故障不会阻断VMC、PID或LQR中间量计算；真正的几何和控制计算
+ * 故障由对应控制流程另外追加到fault_flags。
+ */
 static uint32_t Chassis_GetOutputFaults(void)
 {
     uint32_t fault_flags = CHASSIS_FAULT_NONE;
@@ -120,6 +130,7 @@ static uint32_t Chassis_GetOutputFaults(void)
     return fault_flags;
 }
 
+/** @brief 清空四个关节串级PID状态、目标和调试请求量。 */
 static void Chassis_ResetJointControl(void)
 {
     uint32_t index;
@@ -140,6 +151,9 @@ static void Chassis_ResetJointControl(void)
            sizeof(chassis.joint_torque_request_nm));
 }
 
+/**
+ * @brief 在输出故障清除前重置所有可能积累陈旧反馈的动态状态。
+ */
 static void Chassis_ResetDynamicControl(void)
 {
     Algorithm_PID_Init(&chassis.leg_length_pid[CHASSIS_LEFT]);
@@ -149,6 +163,11 @@ static void Chassis_ResetDynamicControl(void)
     Chassis_ControlReset();
 }
 
+/**
+ * @brief 切换内部控制状态并初始化该状态所需目标和控制器。
+ *
+ * 相同状态不重复进入，避免每周期清空计时器、PID和目标斜坡。
+ */
 static void Chassis_EnterState(chassis_control_state_t state)
 {
     uint32_t side;
@@ -196,6 +215,7 @@ static void Chassis_EnterState(chassis_control_state_t state)
     }
 }
 
+/** @brief 重新初始化速度Kalman、前进速度、加速度和位移状态。 */
 void Chassis_ControlReset(void)
 {
     Algorithm_Kalman_Init(&chassis.speed_kalman, 2U, 2U);
@@ -225,6 +245,9 @@ void Chassis_ControlReset(void)
     chassis.forward_accel_fused_mps2 = 0.0f;
 }
 
+/**
+ * @brief 清空实际发送量和请求量，用于主动零力或计算失败状态。
+ */
 void Chassis_ZeroOutput(void)
 {
     memset(chassis.joint_torque_nm, 0, sizeof(chassis.joint_torque_nm));
@@ -243,6 +266,7 @@ void Chassis_ZeroOutput(void)
     Chassis_ControlReset();
 }
 
+/** @brief 初始化唯一底盘状态、目标、PID和速度融合器。 */
 void Chassis_ControlInit(void)
 {
     uint32_t index;
@@ -271,6 +295,12 @@ void Chassis_ControlInit(void)
     Chassis_ControlReset();
 }
 
+/**
+ * @brief 使用任务层保存的四个DM反馈更新左右腿五连杆状态。
+ *
+ * 本函数不检查电机online标志，离线调试时仍使用最后一次反馈计算；
+ * 只有几何无效时才令leg_state_valid为0。
+ */
 void Chassis_ControlUpdateLegState(void)
 {
     uint8_t indices[CHASSIS_LEG_COUNT][CHASSIS_JOINT_COUNT];
@@ -279,6 +309,7 @@ void Chassis_ControlUpdateLegState(void)
     uint8_t previous_state_valid = chassis.leg_state_valid;
     uint32_t side;
 
+    /* 先保留上周期连续腿角，全部新状态有效后再整体提交。 */
     memcpy(previous_leg, chassis.leg, sizeof(previous_leg));
     chassis.leg_state_valid = 0U;
     if (Chassis_GetJointIndices(indices) == 0U)
@@ -286,6 +317,7 @@ void Chassis_ControlUpdateLegState(void)
         return;
     }
 
+    /* 左右腿必须同时有效，避免十维状态混用不同时刻的腿部数据。 */
     for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
     {
         VMC_CalcState(&chassis_config.leg[side],
@@ -307,6 +339,7 @@ void Chassis_ControlUpdateLegState(void)
         }
         if (previous_state_valid != 0U)
         {
+            /* phi0主值跨过+-pi时选择距离上一周期最近的等价角。 */
             next_leg[side].phi0_total_rad =
                 Algorithm_AngleNearestEquivalentRad(
                     next_leg[side].phi0_rad,
@@ -317,6 +350,12 @@ void Chassis_ControlUpdateLegState(void)
     chassis.leg_state_valid = 1U;
 }
 
+/**
+ * @brief 把外部mode转换成内部state，并维护输出故障和站立保护。
+ *
+ * 该函数只选择本周期应执行的控制流程，不计算VMC、PID或LQR。输出
+ * 故障只记录到fault_flags；几何无效和姿态越界才会切入零力状态。
+ */
 void Chassis_ControlUpdateState(void)
 {
     float body_pitch_rad;
@@ -324,6 +363,7 @@ void Chassis_ControlUpdateState(void)
     uint32_t output_faults;
     uint32_t previous_output_faults;
 
+    /* 1. 外部主动零力具有最高优先级，不进入任何闭环控制。 */
     if (chassis.mode == CHASSIS_MODE_ZERO_FORCE)
     {
         Chassis_EnterState(CHASSIS_ZERO_FORCE);
@@ -332,6 +372,7 @@ void Chassis_ControlUpdateState(void)
         return;
     }
 
+    /* 2. 更新输出故障，并在故障全部清除的边沿重置动态控制状态。 */
     body_pitch_rad = chassis.imu.pitch_rad *
                      chassis_config.imu.pitch_angle_scale;
     previous_output_faults =
@@ -349,6 +390,10 @@ void Chassis_ControlUpdateState(void)
         chassis.target_state[CHASSIS_STATE_FAI] =
             chassis.imu.yaw_total_rad * chassis_config.imu.yaw_angle_scale;
     }
+    /*
+     * 3. posture_ready只判断FOLLOW/TOP能否直接进入站立控制：
+     * 左右腿正解有效、pitch较小且两条虚拟腿都位于准备角区间。
+     */
     posture_ready =
         ((chassis.leg_state_valid != 0U) &&
          (fabsf(body_pitch_rad) <=
@@ -362,6 +407,7 @@ void Chassis_ControlUpdateState(void)
               chassis_config.recovery.direct_phi0_min_rad,
               chassis_config.recovery.direct_phi0_max_rad) != 0U)) ? 1U : 0U;
 
+    /* 4. 仅在外部模式变化时选择入口状态，避免每周期重复初始化。 */
     if (chassis.mode != chassis.last_mode)
     {
         chassis.fault_flags = output_faults;
@@ -408,6 +454,7 @@ void Chassis_ControlUpdateState(void)
         chassis.last_mode = chassis.mode;
     }
 
+    /* 5. 站立期间几何失效属于计算故障，立即进入主动零命令状态。 */
     if ((chassis.state == CHASSIS_STANDING) &&
         (chassis.leg_state_valid == 0U))
     {
@@ -416,6 +463,7 @@ void Chassis_ControlUpdateState(void)
         return;
     }
 
+    /* 6. pitch或任一腿角越过站立保护区间时停止站立闭环。 */
     if ((chassis.state == CHASSIS_STANDING) &&
         ((fabsf(body_pitch_rad) >
           chassis_config.recovery.standing_pitch_limit_rad) ||
@@ -432,12 +480,19 @@ void Chassis_ControlUpdateState(void)
         Chassis_EnterState(CHASSIS_ZERO_FORCE);
     }
 
+    /* 活动状态保留输出故障，供末端输出门和Watch共同使用。 */
     if (chassis.state != CHASSIS_ZERO_FORCE)
     {
         chassis.fault_flags = output_faults;
     }
 }
 
+/**
+ * @brief 板凳和恢复模式的关节角度-速度串级控制。
+ *
+ * 逆运动学给出主动关节角目标，角度PID生成速度目标，速度PID生成
+ * 力矩请求。输出故障只阻止请求量复制到最终关节力矩数组。
+ */
 static uint8_t Chassis_JointPositionControl(uint8_t wheel_output_enabled)
 {
     uint8_t indices[CHASSIS_LEG_COUNT][CHASSIS_JOINT_COUNT];
@@ -453,6 +508,7 @@ static uint8_t Chassis_JointPositionControl(uint8_t wheel_output_enabled)
     uint32_t side;
     uint32_t joint;
 
+    /* 1. 每周期先清最终关节命令，防止任何提前返回遗留旧力矩。 */
     memset(chassis.joint_torque_nm, 0, sizeof(chassis.joint_torque_nm));
     memset(chassis.joint_torque_request_nm,
            0,
@@ -463,6 +519,7 @@ static uint8_t Chassis_JointPositionControl(uint8_t wheel_output_enabled)
     chassis.safe_output = 1U;
     chassis.state_valid = 0U;
 
+    /* 2. 输出故障只参与末端许可，当前串级控制仍继续计算请求量。 */
     output_faults = Chassis_GetOutputFaults();
     chassis.fault_flags = output_faults | CHASSIS_FAULT_CONTROL;
     if ((chassis.leg_state_valid == 0U) ||
@@ -477,6 +534,7 @@ static uint8_t Chassis_JointPositionControl(uint8_t wheel_output_enabled)
         dt_s = chassis_config.default_dt_s;
     }
 
+    /* 3. 目标腿长和连续phi0经逆运动学转换为四个关节目标角。 */
     for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
     {
         if (VMC_CalcJointTarget(&chassis_config.leg[side],
@@ -496,6 +554,7 @@ static uint8_t Chassis_JointPositionControl(uint8_t wheel_output_enabled)
                 joint_target[side].phi4_rad;
     }
 
+    /* 4. 关节角度环输出目标速度，速度环输出有方向的力矩请求。 */
     for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
     {
         for (joint = 0U; joint < CHASSIS_JOINT_COUNT; joint++)
@@ -542,6 +601,7 @@ static uint8_t Chassis_JointPositionControl(uint8_t wheel_output_enabled)
         }
     }
 
+    /* 5. 仅在全部输出条件满足时，把调试请求复制到最终命令。 */
     joint_output_enabled =
         ((output_faults == CHASSIS_FAULT_NONE) &&
          (APP_CHASSIS_OUTPUT_ENABLE != 0U) &&
@@ -570,6 +630,9 @@ static uint8_t Chassis_JointPositionControl(uint8_t wheel_output_enabled)
     return 1U;
 }
 
+/**
+ * @brief 执行倒地转腿和小板凳准备两阶段重新站立状态机。
+ */
 void Chassis_RecoveryControlLoop(void)
 {
     const chassis_recovery_config_t *recovery = &chassis_config.recovery;
@@ -794,6 +857,9 @@ void Chassis_RecoveryControlLoop(void)
     }
 }
 
+/**
+ * @brief 设置固定板凳腿长/腿角，再复用主控制环计算轮LQR和关节位置环。
+ */
 void Chassis_BenchControlLoop(void)
 {
     chassis.state_elapsed_s += chassis.control_dt_s;
@@ -816,6 +882,12 @@ void Chassis_BenchControlLoop(void)
     }
 }
 
+/**
+ * @brief 完成速度融合、十维状态、支撑力、LQR和VMC整条控制链。
+ *
+ * 函数开始先清最终命令；输出故障不阻断中间量计算，只在第7阶段
+ * 阻止请求量进入joint_torque_nm和wheel_current。
+ */
 void Chassis_ControlLoop(void)
 {
     chassis_vmc_torque_t left_torque = {0.0f, 0.0f};

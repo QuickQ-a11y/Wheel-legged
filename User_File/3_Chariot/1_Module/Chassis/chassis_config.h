@@ -13,9 +13,10 @@ extern "C" {
 
 #define CHASSIS_PI 3.14159265358979323846f
 #define CHASSIS_HALF_PI 1.57079632679489661923f
-#define CHASSIS_STATE_COUNT 10U
-#define CHASSIS_OUTPUT_COUNT 4U
+#define CHASSIS_STATE_COUNT 10U   /* 十维整车LQR状态数量。 */
+#define CHASSIS_OUTPUT_COUNT 4U   /* 左右轮力矩和左右腿摆力矩。 */
 
+/* 左右腿数组下标，顺序必须与LQR和电机映射保持一致。 */
 typedef enum
 {
     CHASSIS_LEFT = 0,
@@ -23,6 +24,7 @@ typedef enum
     CHASSIS_LEG_COUNT,
 } chassis_leg_side_t;
 
+/* 单腿两根主动杆对应的前、后髋关节下标。 */
 typedef enum
 {
     CHASSIS_JOINT_FRONT = 0,
@@ -52,66 +54,73 @@ typedef enum
     CHASSIS_OUTPUT_RIGHT_LEG,
 } chassis_output_index_t;
 
+/** @brief 单侧五连杆的机械尺寸和最小有效虚拟腿长。 */
 typedef struct
 {
-    float link1_m;
-    float link2_m;
-    float link3_m;
-    float link4_m;
-    float frame_joint_distance_m;
-    float min_leg_length_m;
+    float link1_m;                    /* 前主动杆长度，单位 m。 */
+    float link2_m;                    /* 前从动杆长度，单位 m。 */
+    float link3_m;                    /* 后从动杆长度，单位 m。 */
+    float link4_m;                    /* 后主动杆长度，单位 m。 */
+    float frame_joint_distance_m;     /* 前后髋轴间距，单位 m。 */
+    float min_leg_length_m;           /* 几何计算允许的最小腿长，单位 m。 */
 } chassis_geometry_config_t;
 
+/** @brief 关节电机索引以及电机量到几何量的符号映射。 */
 typedef struct
 {
-    uint8_t motor_index;
-    float angle_offset_rad;
-    float angle_scale;
-    float torque_scale;
+    uint8_t motor_index;              /* 在DM反馈和命令数组中的索引。 */
+    float angle_offset_rad;           /* 电机零位对应的几何角偏置，单位 rad。 */
+    float angle_scale;                /* 电机位置、速度到几何正方向的比例。 */
+    float torque_scale;               /* VMC几何力矩到电机正方向的比例。 */
 } chassis_joint_config_t;
 
+/** @brief 单腿机械、关节映射和正常站立目标腿长。 */
 typedef struct
 {
     chassis_geometry_config_t geometry;
     chassis_joint_config_t joint[CHASSIS_JOINT_COUNT];
-    float target_leg_length_m;
+    float target_leg_length_m;        /* 正常站立目标腿长，单位 m。 */
 } chassis_leg_config_t;
 
+/** @brief IMU任务输出到十维控制模型坐标的轴选择和符号比例。 */
 typedef struct
 {
-    uint8_t pitch_rate_axis;
-    uint8_t roll_rate_axis;
-    uint8_t yaw_rate_axis;
+    uint8_t pitch_rate_axis;          /* pitch角速度在gyro数组中的下标。 */
+    uint8_t roll_rate_axis;           /* roll角速度在gyro数组中的下标。 */
+    uint8_t yaw_rate_axis;            /* yaw角速度在gyro数组中的下标。 */
     float pitch_angle_scale;
     float pitch_rate_scale;
     float roll_angle_scale;
     float roll_rate_scale;
     float yaw_angle_scale;
     float yaw_rate_scale;
-    uint8_t forward_accel_axis;
-    float forward_accel_scale;
+    uint8_t forward_accel_axis;       /* 前向运动加速度数组下标。 */
+    float forward_accel_scale;        /* IMU前向加速度到整车X正方向的比例。 */
 } chassis_imu_config_t;
 
+/** @brief 轮组几何、反馈极性和轮力矩到DJI电流值的换算。 */
 typedef struct
 {
-    float radius_m;
-    float half_track_m;
-    float left_speed_scale;
-    float right_speed_scale;
-    float torque_limit_nm;
-    float torque_to_current;
-    int16_t current_limit;
+    float radius_m;                   /* 轮半径，单位 m。 */
+    float half_track_m;               /* 半轮距，单位 m。 */
+    float left_speed_scale;           /* 左轮反馈到整车前进正方向的比例。 */
+    float right_speed_scale;          /* 右轮反馈到整车前进正方向的比例。 */
+    float torque_limit_nm;            /* 单轮LQR力矩请求限幅，单位 N*m。 */
+    float torque_to_current;          /* 轮力矩到DJI原始电流的比例。 */
+    int16_t current_limit;            /* 单轮原始电流绝对值限幅。 */
 } chassis_wheel_config_t;
 
+/** @brief 前进速度和加速度二维Kalman滤波配置。 */
 typedef struct
 {
     uint8_t enabled;
     float initial_covariance[4];
     float process_noise[4];
     float measurement_noise[4];
-    float position_speed_limit_mps;
+    float position_speed_limit_mps;   /* 允许积分前进位移的速度上限，单位 m/s。 */
 } chassis_kalman_config_t;
 
+/** @brief 分路输出开关和最终关节力矩限幅。 */
 typedef struct
 {
     uint8_t joint_enabled;
@@ -147,24 +156,27 @@ typedef struct
     algorithm_pid_config_t joint_speed_pid; /* 关节速度到几何力矩控制器。 */
 } chassis_recovery_config_t;
 
+/* LQR拟合使用固定调试腿长或当前五连杆实测腿长。 */
 typedef enum
 {
     CHASSIS_K_LENGTH_FIXED = 0,
     CHASSIS_K_LENGTH_MEASURED,
 } chassis_k_length_source_t;
 
+/** @brief 双腿长poly22增益拟合的范围、输入来源和系数表。 */
 typedef struct
 {
-    uint8_t enabled;
+    uint8_t enabled;                 /* 0使用fixed_lqr_k，1使用poly22拟合。 */
     chassis_k_length_source_t length_source;
-    float min_leg_length_m;
-    float max_leg_length_m;
-    float fixed_left_length_m;
-    float fixed_right_length_m;
+    float min_leg_length_m;          /* 拟合有效腿长下限，单位 m。 */
+    float max_leg_length_m;          /* 拟合有效腿长上限，单位 m。 */
+    float fixed_left_length_m;       /* 固定腿长调试时左侧输入，单位 m。 */
+    float fixed_right_length_m;      /* 固定腿长调试时右侧输入，单位 m。 */
     float coefficients[CHASSIS_OUTPUT_COUNT][CHASSIS_STATE_COUNT]
                       [ALGORITHM_LQR_POLY22_COEFFICIENT_COUNT];
 } chassis_lqr_config_t;
 
+/** @brief 底盘控制唯一只读配置，集中保存机械、模型和安全参数。 */
 typedef struct
 {
     chassis_leg_config_t leg[CHASSIS_LEG_COUNT];
@@ -176,16 +188,16 @@ typedef struct
     chassis_recovery_config_t recovery;
     chassis_lqr_config_t lqr;
     chassis_motor_output_config_t output;
-    float leg_vertical_offset_rad;
-    float target_roll_rad;
-    float base_support_force_n;
-    float left_support_feedforward_n;
-    float right_support_feedforward_n;
-    float default_dt_s;
-    float min_dt_s;
-    float max_dt_s;
-    float target_state[CHASSIS_STATE_COUNT];
-    float fixed_lqr_k[CHASSIS_OUTPUT_COUNT][CHASSIS_STATE_COUNT];
+    float leg_vertical_offset_rad;    /* phi0换算LQR腿倾角时的竖直零点。 */
+    float target_roll_rad;            /* 机体横滚目标，单位 rad。 */
+    float base_support_force_n;       /* 两腿公共基础支撑力，单位 N。 */
+    float left_support_feedforward_n; /* 左腿支撑力静态修正，单位 N。 */
+    float right_support_feedforward_n; /* 右腿支撑力静态修正，单位 N。 */
+    float default_dt_s;               /* 控制周期异常时采用的默认dt。 */
+    float min_dt_s;                   /* 接受的最小控制周期，单位 s。 */
+    float max_dt_s;                   /* 接受的最大控制周期，单位 s。 */
+    float target_state[CHASSIS_STATE_COUNT]; /* 十维LQR默认目标状态。 */
+    float fixed_lqr_k[CHASSIS_OUTPUT_COUNT][CHASSIS_STATE_COUNT]; /* 固定K。 */
 } chassis_config_t;
 
 extern const chassis_config_t chassis_config;

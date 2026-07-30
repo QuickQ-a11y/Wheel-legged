@@ -7,6 +7,7 @@
 
 #define CHASSIS_VMC_EPSILON 1.0e-6f
 
+/** @brief 将反三角函数输入限制到浮点误差允许的[-1, 1]范围。 */
 static float VMC_LimitFloat(float value, float min_value, float max_value)
 {
     if (value < min_value)
@@ -20,6 +21,12 @@ static float VMC_LimitFloat(float value, float min_value, float max_value)
     return value;
 }
 
+/**
+ * @brief 根据两个主动关节反馈完成五连杆正运动学和速度解算。
+ *
+ * B、D是前后主动杆端点，C是两根从动杆交点及轮轴位置。任一几何
+ * 无解、腿长过小或速度雅可比奇异时清空输出，由状态层标记无效。
+ */
 void VMC_CalcState(const chassis_leg_config_t *config,
                     float front_position_rad,
                     float back_position_rad,
@@ -70,6 +77,7 @@ void VMC_CalcState(const chassis_leg_config_t *config,
                     config->joint[CHASSIS_JOINT_BACK].angle_scale *
                         back_position_rad;
 
+    /* 以两髋轴中点为原点，先求主动杆端点B和D。 */
     point_b_x = -geometry->frame_joint_distance_m * 0.5f +
                 geometry->link1_m * cosf(leg->phi1_rad);
     point_b_y = geometry->link1_m * sinf(leg->phi1_rad);
@@ -114,6 +122,7 @@ void VMC_CalcState(const chassis_leg_config_t *config,
                 geometry->link2_m * sinf(leg->phi2_rad);
 
     leg->phi3_rad = atan2f(point_c_y - point_d_y, point_c_x - point_d_x);
+    /* 虚拟腿由髋轴中点指向C点，极坐标即腿长和phi0。 */
     leg->length_m = sqrtf(point_c_x * point_c_x + point_c_y * point_c_y);
     if ((leg->length_m <= geometry->min_leg_length_m) ||
         (leg->length_m <= CHASSIS_VMC_EPSILON))
@@ -124,7 +133,7 @@ void VMC_CalcState(const chassis_leg_config_t *config,
     leg->phi0_rad = atan2f(point_c_y, point_c_x);
     leg->phi0_total_rad = leg->phi0_rad;
 
-    /* 对闭链约束求导，得到 C 点速度、腿长速度和 phi0 角速度。 */
+    /* 对闭链约束求导，先由主动杆速度解出从动杆phi2速度。 */
     phi1_speed_radps = config->joint[CHASSIS_JOINT_FRONT].angle_scale *
                        front_speed_radps;
     phi4_speed_radps = config->joint[CHASSIS_JOINT_BACK].angle_scale *
@@ -156,6 +165,7 @@ void VMC_CalcState(const chassis_leg_config_t *config,
     point_c_speed_x = point_b_speed_x + matrix11 * phi2_speed_radps;
     point_c_speed_y = point_b_speed_y + matrix21 * phi2_speed_radps;
 
+    /* 将C点笛卡尔速度投影到虚拟腿径向和切向。 */
     leg->length_speed_mps =
         (point_c_x * point_c_speed_x + point_c_y * point_c_speed_y) /
         leg->length_m;
@@ -171,6 +181,12 @@ void VMC_CalcState(const chassis_leg_config_t *config,
         length_squared;
 }
 
+/**
+ * @brief 由目标C点位置解算前后主动杆目标角。
+ *
+ * 先分别检查前后两组二连杆可达性，再选择当前实机装配分支，并把
+ * 结果转换为距离当前反馈最近的等价角，避免主动关节跨零跳变。
+ */
 uint8_t VMC_CalcJointTarget(const chassis_leg_config_t *config,
                               const chassis_vmc_state_t *current_leg,
                               float target_length_m,
@@ -200,6 +216,7 @@ uint8_t VMC_CalcJointTarget(const chassis_leg_config_t *config,
     }
 
     geometry = &config->geometry;
+    /* 机械尺寸或目标腿长不具备物理意义时不进入三角形求解。 */
     if ((geometry->link1_m <= 0.0f) ||
         (geometry->link2_m <= 0.0f) ||
         (geometry->link3_m <= 0.0f) ||
@@ -211,6 +228,7 @@ uint8_t VMC_CalcJointTarget(const chassis_leg_config_t *config,
 
     point_c_x = target_length_m * cosf(target_phi0_rad);
     point_c_y = target_length_m * sinf(target_phi0_rad);
+    /* C点到前后髋轴的距离必须分别位于对应二连杆可达区间内。 */
     front_vector_x = point_c_x + geometry->frame_joint_distance_m * 0.5f;
     back_vector_x = point_c_x - geometry->frame_joint_distance_m * 0.5f;
     front_distance = sqrtf(front_vector_x * front_vector_x +
@@ -264,6 +282,12 @@ uint8_t VMC_CalcJointTarget(const chassis_leg_config_t *config,
     return 1U;
 }
 
+/**
+ * @brief 使用虚功关系把虚拟腿广义力映射为两个主动关节力矩。
+ *
+ * support_force_n沿虚拟腿方向，swing_torque_nm绕髋轴中点作用；
+ * denominator接近零表示两根从动杆接近奇异，必须保持零输出。
+ */
 void VMC_CalcTorque(const chassis_leg_config_t *config,
                      const chassis_vmc_state_t *leg,
                      float support_force_n,
@@ -283,6 +307,7 @@ void VMC_CalcTorque(const chassis_leg_config_t *config,
         return;
     }
 
+    /* 雅可比转置展开后的前、后主动关节力矩。 */
     front_torque_nm =
         (-config->geometry.link1_m *
          sinf(leg->phi0_rad - leg->phi3_rad) *

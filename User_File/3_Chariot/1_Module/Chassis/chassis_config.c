@@ -6,6 +6,7 @@
  * DM 顺序为左前、左后、右前、右后；DJI 顺序为左轮、右轮。
  */
 const chassis_config_t chassis_config = {
+    /* 左右腿尺寸相同，但电机索引和后续实机标定值分别保存。 */
     .leg = {
         [CHASSIS_LEFT] = {
             .geometry = {
@@ -58,6 +59,7 @@ const chassis_config_t chassis_config = {
             .target_leg_length_m = 0.25f,
         },
     },
+    /* IMU任务已输出整车右手系数据，此处只匹配控制模型的轴和正方向。 */
     .imu = {
         .pitch_rate_axis = 1U,
         .roll_rate_axis = 0U,
@@ -71,6 +73,7 @@ const chassis_config_t chassis_config = {
         .forward_accel_axis = 0U,
         .forward_accel_scale = 1.0f,
     },
+    /* 轮速用于车体速度观测，轮力矩请求最终换算为DJI原始电流。 */
     .wheel = {
         .radius_m = 0.10f,
         .half_track_m = 0.1965f,
@@ -88,6 +91,7 @@ const chassis_config_t chassis_config = {
         .torque_to_current = 40960.0f,
         .current_limit = 8192,
     },
+    /* 状态为前进速度和前进加速度，矩阵按2x2行优先顺序填写。 */
     .speed_kalman = {
         .enabled = 1U,
         .initial_covariance = {
@@ -104,6 +108,7 @@ const chassis_config_t chassis_config = {
         },
         .position_speed_limit_mps = 0.1f,
     },
+    /* 腿长PID输出作为虚拟支撑力修正，反馈速度直接作为阻尼项。 */
     .leg_length_pid = {
         .kp = 400.0f,
         .ki = 2.0f,
@@ -111,6 +116,7 @@ const chassis_config_t chassis_config = {
         .integralLimit = 50.0f,
         .outputLimit = 300.0f,
     },
+    /* roll PID输出以左右腿差动支撑力的形式作用。 */
     .roll_pid = {
         .kp = 3000.0f,
         .ki = 1.0f,
@@ -118,6 +124,7 @@ const chassis_config_t chassis_config = {
         .integralLimit = 30.0f,
         .outputLimit = 300.0f,
     },
+    /* 倒地转腿、小板凳准备和关节串级位置控制参数。 */
     .recovery = {
         /*
          * 动作阶段参考 SPR，两端腿长改为本工程当前 0.15~0.35 m 工作范围。
@@ -160,6 +167,7 @@ const chassis_config_t chassis_config = {
             .outputLimit = 1.0f,
         },
     },
+    /* 四路输出、十个状态分别保存一组双腿长poly22系数。 */
     .lqr = {
         .enabled = 1U,
         .length_source = CHASSIS_K_LENGTH_FIXED,
@@ -222,6 +230,7 @@ const chassis_config_t chassis_config = {
             },
         },
     },
+    /* 最终物理输出开关；关闭不影响请求量和控制中间量计算。 */
     .output = {
         /*
          * 当前髋关节电机：24 V，额定连续转矩 3.5 N*m。
@@ -232,6 +241,7 @@ const chassis_config_t chassis_config = {
         .wheel_enabled = 0U,
         .joint_torque_limit_nm = 3.5f,
     },
+    /* 整车公共目标、支撑力前馈、控制周期边界和固定K备用表。 */
     .leg_vertical_offset_rad = CHASSIS_HALF_PI,
     .target_roll_rad = 0.0f,
     .base_support_force_n = -30.0f,

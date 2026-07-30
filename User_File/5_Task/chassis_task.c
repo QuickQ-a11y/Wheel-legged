@@ -26,6 +26,7 @@ static void Chassis_FeedbackUpdate(void)
     uint32_t now_tick = HAL_GetTick();
     uint32_t index;
 
+    /* IMU任务已经完成传感器坐标到整车右手系的转换。 */
     IMU_Task_GetState(&imu_state);
     chassis.imu.initialized = imu_state.isInitialized;
     chassis.imu.attitude_ready = imu_state.isAttitudeReady;
@@ -41,6 +42,7 @@ static void Chassis_FeedbackUpdate(void)
            imu_state.motionAccMps2,
            sizeof(chassis.imu.motion_accel_mps2));
 
+    /* DM状态保留最后一次反馈值，online只表示本周期是否超时。 */
     for (index = 0U; index < MOTOR_DM_COUNT; index++)
     {
         motor_dm_state_t motor_state = {0};
@@ -53,6 +55,7 @@ static void Chassis_FeedbackUpdate(void)
         chassis.dm_motor[index].torque_nm = motor_state.torqueNm;
     }
 
+    /* DJI轮电机同样分开保存反馈值和在线判定。 */
     for (index = 0U; index < APP_WHEEL_COUNT; index++)
     {
         chassis.wheel_motor[index].online =
@@ -71,6 +74,10 @@ static void Chassis_CommandSend(void)
 {
     uint32_t index;
 
+    /*
+     * safe_output是任务发送前的最后安全门。触发后只清最终命令，
+     * joint_torque_request_nm和wheel_current_request继续供Watch观察。
+     */
     Motor_DM_SetSafe(chassis.safe_output);
     if (chassis.safe_output != 0U)
     {
@@ -83,6 +90,7 @@ static void Chassis_CommandSend(void)
         Motor_DM_ZeroAll();
     }
 
+    /* 最终关节数组逐项写入DM设备层命令缓存。 */
     for (index = 0U; index < MOTOR_DM_COUNT; index++)
     {
         motor_dm_command_t command = {
@@ -92,11 +100,18 @@ static void Chassis_CommandSend(void)
         Motor_DM_SetCommand((motor_dm_index_t)index, &command);
     }
 
+    /* 更新两类发送缓存后只提交最新命令，不等待ACK或重发旧帧。 */
     CAN_Task_SetDjiCurrent(chassis.wheel_current);
     Motor_DM_UpdateTxFrames();
     CAN_Task_RequestTx();
 }
 
+/**
+ * @brief 周期执行底盘反馈、状态选择、控制计算和命令发送。
+ *
+ * DM协议上电使能只用于取得反馈；非零输出仍由底盘输出许可、设备
+ * 状态、分路开关和safe_output共同决定。
+ */
 static void Chassis_TaskEntry(void *argument)
 {
     const float tick_sec = 1.0f / (float)osKernelGetTickFreq();
@@ -140,6 +155,7 @@ static void Chassis_TaskEntry(void *argument)
         Chassis_ControlUpdateLegState();
         Chassis_ControlUpdateState();
 
+        /* 内部state只决定本周期调用哪条控制链，外部mode不会在此修改。 */
         switch (chassis.state)
         {
         case CHASSIS_STANDING:

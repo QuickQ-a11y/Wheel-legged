@@ -14,6 +14,8 @@ void Chassis_Task_Init(void);
 
 /**
  * @brief 设置底盘非零输出许可，关闭时仍允许执行控制计算。
+ *
+ * DM协议使能由底盘任务启动流程维护，本接口只控制最终非零命令。
  */
 void Chassis_SetOutputEnable(uint8_t enable);
 
