@@ -1,5 +1,6 @@
 #include "chassis_control.h"
 
+#include "Angle.h"
 #include "LQR.h"
 #include "PID.h"
 
@@ -8,10 +9,13 @@
 
 #define CHASSIS_RPM_TO_RADPS 0.10471975512f
 #define CHASSIS_CONTROL_EPSILON 1.0e-6f
+#define CHASSIS_OUTPUT_FAULT_MASK                                         \
+    (CHASSIS_FAULT_DISABLED | CHASSIS_FAULT_IMU |                       \
+     CHASSIS_FAULT_DM_MOTOR | CHASSIS_FAULT_DJI_MOTOR | CHASSIS_FAULT_CAN)
 
 chassis_t chassis;
 
-static float limit_symmetric(float value, float limit)
+static float Chassis_LimitSymmetric(float value, float limit)
 {
     float positive_limit = fabsf(limit);
 
@@ -30,7 +34,7 @@ static float limit_symmetric(float value, float limit)
     return value;
 }
 
-static float move_toward(float value, float target, float maximum_step)
+static float Chassis_MoveToward(float value, float target, float maximum_step)
 {
     float positive_step = fabsf(maximum_step);
 
@@ -45,22 +49,19 @@ static float move_toward(float value, float target, float maximum_step)
     return target;
 }
 
-static float angle_error_rad(float target_rad, float feedback_rad)
+static uint8_t Chassis_IsAngleInIntervalRad(float angle_rad,
+                                        float minimum_rad,
+                                        float maximum_rad)
 {
-    float error_rad = target_rad - feedback_rad;
+    float center_rad = (minimum_rad + maximum_rad) * 0.5f;
+    float equivalent_rad =
+        Algorithm_AngleNearestEquivalentRad(angle_rad, center_rad);
 
-    while (error_rad > CHASSIS_PI)
-    {
-        error_rad -= 2.0f * CHASSIS_PI;
-    }
-    while (error_rad < -CHASSIS_PI)
-    {
-        error_rad += 2.0f * CHASSIS_PI;
-    }
-    return error_rad;
+    return ((equivalent_rad >= minimum_rad) &&
+            (equivalent_rad <= maximum_rad)) ? 1U : 0U;
 }
 
-static uint8_t chassis_get_joint_indices(
+static uint8_t Chassis_GetJointIndices(
     uint8_t indices[CHASSIS_LEG_COUNT][CHASSIS_JOINT_COUNT])
 {
     uint32_t side;
@@ -81,7 +82,7 @@ static uint8_t chassis_get_joint_indices(
     return 1U;
 }
 
-static uint32_t chassis_get_feedback_faults(void)
+static uint32_t Chassis_GetOutputFaults(void)
 {
     uint32_t fault_flags = CHASSIS_FAULT_NONE;
     uint32_t index;
@@ -119,7 +120,7 @@ static uint32_t chassis_get_feedback_faults(void)
     return fault_flags;
 }
 
-static void chassis_reset_joint_control(void)
+static void Chassis_ResetJointControl(void)
 {
     uint32_t index;
 
@@ -139,7 +140,16 @@ static void chassis_reset_joint_control(void)
            sizeof(chassis.joint_torque_request_nm));
 }
 
-static void chassis_enter_state(chassis_control_state_t state)
+static void Chassis_ResetDynamicControl(void)
+{
+    Algorithm_PID_Init(&chassis.leg_length_pid[CHASSIS_LEFT]);
+    Algorithm_PID_Init(&chassis.leg_length_pid[CHASSIS_RIGHT]);
+    Algorithm_PID_Init(&chassis.roll_pid);
+    Chassis_ResetJointControl();
+    Chassis_ControlReset();
+}
+
+static void Chassis_EnterState(chassis_control_state_t state)
 {
     uint32_t side;
 
@@ -153,22 +163,29 @@ static void chassis_enter_state(chassis_control_state_t state)
     chassis.state_stable_s = 0.0f;
     memset(chassis.joint_torque_nm, 0, sizeof(chassis.joint_torque_nm));
     memset(chassis.wheel_current, 0, sizeof(chassis.wheel_current));
+    memset(chassis.wheel_current_request,
+           0,
+           sizeof(chassis.wheel_current_request));
     chassis.safe_output = 1U;
     chassis.state_valid = 0U;
-    chassis_reset_joint_control();
+    Chassis_ResetJointControl();
+
+    if ((state == CHASSIS_STANDING) || (state == CHASSIS_BENCH))
+    {
+        Chassis_ControlReset();
+        memcpy(chassis.target_state,
+               chassis_config.target_state,
+               sizeof(chassis.target_state));
+        chassis.target_state[CHASSIS_STATE_S] = 0.0f;
+        chassis.target_state[CHASSIS_STATE_FAI] =
+            chassis.imu.yaw_total_rad * chassis_config.imu.yaw_angle_scale;
+    }
 
     if (state == CHASSIS_STANDING)
     {
         Algorithm_PID_Init(&chassis.leg_length_pid[CHASSIS_LEFT]);
         Algorithm_PID_Init(&chassis.leg_length_pid[CHASSIS_RIGHT]);
         Algorithm_PID_Init(&chassis.roll_pid);
-        chassis_control_reset();
-        memcpy(chassis.target_state,
-               chassis_config.target_state,
-               sizeof(chassis.target_state));
-        chassis.target_state[CHASSIS_STATE_S] = 0.0f;
-        chassis.target_state[CHASSIS_STATE_FAI] =
-            chassis.imu.yaw_rad * chassis_config.imu.yaw_angle_scale;
         for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
         {
             chassis.target_leg_length_m[side] =
@@ -179,7 +196,7 @@ static void chassis_enter_state(chassis_control_state_t state)
     }
 }
 
-void chassis_control_reset(void)
+void Chassis_ControlReset(void)
 {
     Algorithm_Kalman_Init(&chassis.speed_kalman, 2U, 2U);
     memcpy(chassis.speed_kalman.covariance,
@@ -208,10 +225,13 @@ void chassis_control_reset(void)
     chassis.forward_accel_fused_mps2 = 0.0f;
 }
 
-void chassis_zero_output(void)
+void Chassis_ZeroOutput(void)
 {
     memset(chassis.joint_torque_nm, 0, sizeof(chassis.joint_torque_nm));
     memset(chassis.wheel_current, 0, sizeof(chassis.wheel_current));
+    memset(chassis.wheel_current_request,
+           0,
+           sizeof(chassis.wheel_current_request));
     memset(chassis.joint_torque_request_nm,
            0,
            sizeof(chassis.joint_torque_request_nm));
@@ -220,10 +240,10 @@ void chassis_zero_output(void)
            sizeof(chassis.target_joint_speed_radps));
     chassis.safe_output = 1U;
     chassis.state_valid = 0U;
-    chassis_control_reset();
+    Chassis_ControlReset();
 }
 
-void chassis_control_init(void)
+void Chassis_ControlInit(void)
 {
     uint32_t index;
 
@@ -240,7 +260,7 @@ void chassis_control_init(void)
     Algorithm_PID_Init(&chassis.leg_length_pid[CHASSIS_LEFT]);
     Algorithm_PID_Init(&chassis.leg_length_pid[CHASSIS_RIGHT]);
     Algorithm_PID_Init(&chassis.roll_pid);
-    chassis_reset_joint_control();
+    Chassis_ResetJointControl();
     for (index = 0U; index < CHASSIS_LEG_COUNT; index++)
     {
         chassis.target_leg_length_m[index] =
@@ -248,61 +268,65 @@ void chassis_control_init(void)
         chassis.target_leg_phi0_rad[index] =
             chassis_config.recovery.bench_phi0_rad;
     }
-    chassis_control_reset();
+    Chassis_ControlReset();
 }
 
-void chassis_control_update_leg_state(void)
+void Chassis_ControlUpdateLegState(void)
 {
     uint8_t indices[CHASSIS_LEG_COUNT][CHASSIS_JOINT_COUNT];
+    chassis_vmc_state_t next_leg[CHASSIS_LEG_COUNT] = {0};
+    chassis_vmc_state_t previous_leg[CHASSIS_LEG_COUNT];
+    uint8_t previous_state_valid = chassis.leg_state_valid;
     uint32_t side;
 
+    memcpy(previous_leg, chassis.leg, sizeof(previous_leg));
     chassis.leg_state_valid = 0U;
-    memset(chassis.leg, 0, sizeof(chassis.leg));
-    if (chassis_get_joint_indices(indices) == 0U)
+    if (Chassis_GetJointIndices(indices) == 0U)
     {
         return;
     }
 
     for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
     {
-        vmc_calc_state(&chassis_config.leg[side],
+        VMC_CalcState(&chassis_config.leg[side],
                        chassis.dm_motor[indices[side][CHASSIS_JOINT_FRONT]]
                            .position_rad,
                        chassis.dm_motor[indices[side][CHASSIS_JOINT_BACK]]
                            .position_rad,
                        chassis.dm_motor[indices[side][CHASSIS_JOINT_FRONT]]
                            .speed_radps,
-                       chassis.dm_motor[indices[side][CHASSIS_JOINT_BACK]]
-                           .speed_radps,
-                       &chassis.leg[side]);
-        if ((chassis.leg[side].length_m <=
-             chassis_config.leg[side].geometry.min_leg_length_m) ||
-            (!isfinite(chassis.leg[side].length_m)) ||
-            (!isfinite(chassis.leg[side].phi0_rad)))
+                        chassis.dm_motor[indices[side][CHASSIS_JOINT_BACK]]
+                            .speed_radps,
+                        &next_leg[side]);
+        if ((next_leg[side].length_m <=
+              chassis_config.leg[side].geometry.min_leg_length_m) ||
+            (!isfinite(next_leg[side].length_m)) ||
+            (!isfinite(next_leg[side].phi0_rad)))
         {
             return;
         }
+        if (previous_state_valid != 0U)
+        {
+            next_leg[side].phi0_total_rad =
+                Algorithm_AngleNearestEquivalentRad(
+                    next_leg[side].phi0_rad,
+                    previous_leg[side].phi0_total_rad);
+        }
     }
+    memcpy(chassis.leg, next_leg, sizeof(chassis.leg));
     chassis.leg_state_valid = 1U;
 }
 
-void chassis_control_update_state(void)
+void Chassis_ControlUpdateState(void)
 {
     float body_pitch_rad;
     uint8_t posture_ready;
-    uint32_t feedback_faults;
-
-    if (chassis.enabled == 0U)
-    {
-        chassis_enter_state(CHASSIS_ZERO_FORCE);
-        chassis.last_mode = CHASSIS_MODE_ZERO_FORCE;
-        chassis.fault_flags = CHASSIS_FAULT_DISABLED;
-        return;
-    }
+    uint32_t output_faults;
+    uint32_t previous_output_faults;
 
     if (chassis.mode == CHASSIS_MODE_ZERO_FORCE)
     {
-        chassis_enter_state(CHASSIS_ZERO_FORCE);
+        Chassis_EnterState(CHASSIS_ZERO_FORCE);
         chassis.last_mode = CHASSIS_MODE_ZERO_FORCE;
         chassis.fault_flags = CHASSIS_FAULT_NONE;
         return;
@@ -310,24 +334,37 @@ void chassis_control_update_state(void)
 
     body_pitch_rad = chassis.imu.pitch_rad *
                      chassis_config.imu.pitch_angle_scale;
-    feedback_faults = chassis_get_feedback_faults();
+    previous_output_faults =
+        chassis.fault_flags & CHASSIS_OUTPUT_FAULT_MASK;
+    output_faults = Chassis_GetOutputFaults();
+    if ((previous_output_faults != CHASSIS_FAULT_NONE) &&
+        (output_faults == CHASSIS_FAULT_NONE))
+    {
+        /*
+         * 输出重新放行前丢弃故障期间由陈旧反馈积累的动态状态，首个
+         * 完整控制周期从当前姿态重新建立速度、积分和 yaw 平衡点。
+         */
+        Chassis_ResetDynamicControl();
+        chassis.target_state[CHASSIS_STATE_S] = 0.0f;
+        chassis.target_state[CHASSIS_STATE_FAI] =
+            chassis.imu.yaw_total_rad * chassis_config.imu.yaw_angle_scale;
+    }
     posture_ready =
-        ((feedback_faults == CHASSIS_FAULT_NONE) &&
-         (chassis.leg_state_valid != 0U) &&
+        ((chassis.leg_state_valid != 0U) &&
          (fabsf(body_pitch_rad) <=
           chassis_config.recovery.direct_prepare_pitch_rad) &&
-         (chassis.leg[CHASSIS_LEFT].phi0_rad >=
-          chassis_config.recovery.direct_phi0_min_rad) &&
-         (chassis.leg[CHASSIS_LEFT].phi0_rad <=
-          chassis_config.recovery.direct_phi0_max_rad) &&
-         (chassis.leg[CHASSIS_RIGHT].phi0_rad >=
-          chassis_config.recovery.direct_phi0_min_rad) &&
-         (chassis.leg[CHASSIS_RIGHT].phi0_rad <=
-          chassis_config.recovery.direct_phi0_max_rad)) ? 1U : 0U;
+         (Chassis_IsAngleInIntervalRad(
+              chassis.leg[CHASSIS_LEFT].phi0_total_rad,
+              chassis_config.recovery.direct_phi0_min_rad,
+              chassis_config.recovery.direct_phi0_max_rad) != 0U) &&
+         (Chassis_IsAngleInIntervalRad(
+              chassis.leg[CHASSIS_RIGHT].phi0_total_rad,
+              chassis_config.recovery.direct_phi0_min_rad,
+              chassis_config.recovery.direct_phi0_max_rad) != 0U)) ? 1U : 0U;
 
     if (chassis.mode != chassis.last_mode)
     {
-        chassis.fault_flags = CHASSIS_FAULT_NONE;
+        chassis.fault_flags = output_faults;
         switch (chassis.mode)
         {
         case CHASSIS_MODE_FOLLOW:
@@ -336,77 +373,72 @@ void chassis_control_update_state(void)
             {
                 if (posture_ready != 0U)
                 {
-                    chassis_enter_state(CHASSIS_STANDING);
+                    Chassis_EnterState(CHASSIS_STANDING);
                 }
                 else
                 {
-                    if (feedback_faults != CHASSIS_FAULT_NONE)
+                    if (chassis.leg_state_valid == 0U)
                     {
-                        chassis.fault_flags = feedback_faults;
-                    }
-                    else if (chassis.leg_state_valid == 0U)
-                    {
-                        chassis.fault_flags = CHASSIS_FAULT_KINEMATICS;
+                        chassis.fault_flags =
+                            output_faults | CHASSIS_FAULT_KINEMATICS;
                     }
                     else
                     {
-                        chassis.fault_flags = CHASSIS_FAULT_CONTROL;
+                        chassis.fault_flags =
+                            output_faults | CHASSIS_FAULT_CONTROL;
                     }
-                    chassis_enter_state(CHASSIS_ZERO_FORCE);
+                    Chassis_EnterState(CHASSIS_ZERO_FORCE);
                 }
             }
             break;
 
         case CHASSIS_MODE_SELF_SAVE:
-            chassis_enter_state(CHASSIS_FALLEN);
+            Chassis_EnterState(CHASSIS_FALLEN);
             break;
 
         case CHASSIS_MODE_BENCH:
-            chassis_enter_state(CHASSIS_BENCH);
+            Chassis_EnterState(CHASSIS_BENCH);
             break;
 
         case CHASSIS_MODE_ZERO_FORCE:
         default:
-            chassis_enter_state(CHASSIS_ZERO_FORCE);
+            Chassis_EnterState(CHASSIS_ZERO_FORCE);
             break;
         }
         chassis.last_mode = chassis.mode;
     }
 
     if ((chassis.state == CHASSIS_STANDING) &&
-        (feedback_faults != CHASSIS_FAULT_NONE))
-    {
-        chassis.fault_flags = feedback_faults;
-        chassis_enter_state(CHASSIS_ZERO_FORCE);
-        return;
-    }
-
-    if ((chassis.state == CHASSIS_STANDING) &&
         (chassis.leg_state_valid == 0U))
     {
-        chassis.fault_flags = CHASSIS_FAULT_KINEMATICS;
-        chassis_enter_state(CHASSIS_ZERO_FORCE);
+        chassis.fault_flags = output_faults | CHASSIS_FAULT_KINEMATICS;
+        Chassis_EnterState(CHASSIS_ZERO_FORCE);
         return;
     }
 
     if ((chassis.state == CHASSIS_STANDING) &&
         ((fabsf(body_pitch_rad) >
           chassis_config.recovery.standing_pitch_limit_rad) ||
-         (chassis.leg[CHASSIS_LEFT].phi0_rad <
-          chassis_config.recovery.standing_phi0_min_rad) ||
-         (chassis.leg[CHASSIS_LEFT].phi0_rad >
-          chassis_config.recovery.standing_phi0_max_rad) ||
-         (chassis.leg[CHASSIS_RIGHT].phi0_rad <
-          chassis_config.recovery.standing_phi0_min_rad) ||
-         (chassis.leg[CHASSIS_RIGHT].phi0_rad >
-          chassis_config.recovery.standing_phi0_max_rad)))
+          (Chassis_IsAngleInIntervalRad(
+               chassis.leg[CHASSIS_LEFT].phi0_total_rad,
+               chassis_config.recovery.standing_phi0_min_rad,
+               chassis_config.recovery.standing_phi0_max_rad) == 0U) ||
+          (Chassis_IsAngleInIntervalRad(
+               chassis.leg[CHASSIS_RIGHT].phi0_total_rad,
+               chassis_config.recovery.standing_phi0_min_rad,
+               chassis_config.recovery.standing_phi0_max_rad) == 0U)))
     {
-        chassis.fault_flags = CHASSIS_FAULT_CONTROL;
-        chassis_enter_state(CHASSIS_ZERO_FORCE);
+        chassis.fault_flags = output_faults | CHASSIS_FAULT_CONTROL;
+        Chassis_EnterState(CHASSIS_ZERO_FORCE);
+    }
+
+    if (chassis.state != CHASSIS_ZERO_FORCE)
+    {
+        chassis.fault_flags = output_faults;
     }
 }
 
-static uint8_t chassis_joint_position_control(void)
+static uint8_t Chassis_JointPositionControl(uint8_t wheel_output_enabled)
 {
     uint8_t indices[CHASSIS_LEG_COUNT][CHASSIS_JOINT_COUNT];
     chassis_vmc_joint_target_t joint_target[CHASSIS_LEG_COUNT];
@@ -417,12 +449,11 @@ static uint8_t chassis_joint_position_control(void)
     float output_limit_nm;
     float dt_s = chassis.control_dt_s;
     uint8_t joint_output_enabled;
-    uint32_t fault_flags;
+    uint32_t output_faults;
     uint32_t side;
     uint32_t joint;
 
     memset(chassis.joint_torque_nm, 0, sizeof(chassis.joint_torque_nm));
-    memset(chassis.wheel_current, 0, sizeof(chassis.wheel_current));
     memset(chassis.joint_torque_request_nm,
            0,
            sizeof(chassis.joint_torque_request_nm));
@@ -432,16 +463,12 @@ static uint8_t chassis_joint_position_control(void)
     chassis.safe_output = 1U;
     chassis.state_valid = 0U;
 
-    fault_flags = chassis_get_feedback_faults();
-    if (fault_flags != CHASSIS_FAULT_NONE)
-    {
-        chassis.fault_flags = fault_flags;
-        return 0U;
-    }
+    output_faults = Chassis_GetOutputFaults();
+    chassis.fault_flags = output_faults | CHASSIS_FAULT_CONTROL;
     if ((chassis.leg_state_valid == 0U) ||
-        (chassis_get_joint_indices(indices) == 0U))
+        (Chassis_GetJointIndices(indices) == 0U))
     {
-        chassis.fault_flags = CHASSIS_FAULT_KINEMATICS;
+        chassis.fault_flags = output_faults | CHASSIS_FAULT_KINEMATICS;
         return 0U;
     }
     if ((dt_s < chassis_config.min_dt_s) ||
@@ -452,13 +479,13 @@ static uint8_t chassis_joint_position_control(void)
 
     for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
     {
-        if (vmc_calc_joint_target(&chassis_config.leg[side],
+        if (VMC_CalcJointTarget(&chassis_config.leg[side],
                                   &chassis.leg[side],
                                   chassis.target_leg_length_m[side],
                                   chassis.target_leg_phi0_rad[side],
                                   &joint_target[side]) == 0U)
         {
-            chassis.fault_flags = CHASSIS_FAULT_KINEMATICS;
+            chassis.fault_flags = output_faults | CHASSIS_FAULT_KINEMATICS;
             return 0U;
         }
         chassis.target_joint_angle_rad
@@ -508,7 +535,7 @@ static uint8_t chassis_joint_position_control(void)
                 dt_s,
                 &geometric_torque_nm);
             chassis.joint_torque_request_nm[motor_index] =
-                limit_symmetric(
+                Chassis_LimitSymmetric(
                     geometric_torque_nm *
                         chassis_config.leg[side].joint[joint].torque_scale,
                     chassis_config.recovery.joint_torque_limit_nm);
@@ -516,7 +543,8 @@ static uint8_t chassis_joint_position_control(void)
     }
 
     joint_output_enabled =
-        ((APP_CHASSIS_OUTPUT_ENABLE != 0U) &&
+        ((output_faults == CHASSIS_FAULT_NONE) &&
+         (APP_CHASSIS_OUTPUT_ENABLE != 0U) &&
          (chassis_config.output.joint_enabled != 0U) &&
          (chassis_config.output.joint_torque_limit_nm > 0.0f) &&
          (chassis_config.recovery.joint_torque_limit_nm > 0.0f)) ? 1U : 0U;
@@ -530,18 +558,19 @@ static uint8_t chassis_joint_position_control(void)
         for (side = 0U; side < APP_DM_COUNT; side++)
         {
             chassis.joint_torque_nm[side] =
-                limit_symmetric(chassis.joint_torque_request_nm[side],
+                Chassis_LimitSymmetric(chassis.joint_torque_request_nm[side],
                                 output_limit_nm);
         }
     }
 
-    chassis.fault_flags = CHASSIS_FAULT_NONE;
-    chassis.safe_output = (joint_output_enabled == 0U) ? 1U : 0U;
+    chassis.fault_flags = output_faults;
+    chassis.safe_output =
+        ((joint_output_enabled == 0U) && (wheel_output_enabled == 0U)) ? 1U : 0U;
     chassis.state_valid = 1U;
     return 1U;
 }
 
-void chassis_recovery_control_loop(void)
+void Chassis_RecoveryControlLoop(void)
 {
     const chassis_recovery_config_t *recovery = &chassis_config.recovery;
     float body_pitch_rad;
@@ -557,6 +586,13 @@ void chassis_recovery_control_loop(void)
     uint8_t prepare_ready;
     float dt_s = chassis.control_dt_s;
 
+    memset(chassis.wheel_current, 0, sizeof(chassis.wheel_current));
+    memset(chassis.wheel_current_request,
+           0,
+           sizeof(chassis.wheel_current_request));
+    chassis.lqr_output[CHASSIS_OUTPUT_LEFT_WHEEL] = 0.0f;
+    chassis.lqr_output[CHASSIS_OUTPUT_RIGHT_WHEEL] = 0.0f;
+
     if ((dt_s < chassis_config.min_dt_s) ||
         (dt_s > chassis_config.max_dt_s))
     {
@@ -565,42 +601,47 @@ void chassis_recovery_control_loop(void)
     if ((chassis.state != CHASSIS_FALLEN) &&
         (chassis.state != CHASSIS_FALLING_TO_STAND))
     {
-        chassis_zero_output();
+        Chassis_ZeroOutput();
         return;
     }
     if (chassis.leg_state_valid == 0U)
     {
-        chassis_zero_output();
+        Chassis_ZeroOutput();
         chassis.fault_flags = CHASSIS_FAULT_KINEMATICS;
-        chassis_enter_state(CHASSIS_ZERO_FORCE);
+        Chassis_EnterState(CHASSIS_ZERO_FORCE);
         return;
     }
 
     body_pitch_rad = chassis.imu.pitch_rad *
                      chassis_config.imu.pitch_angle_scale;
-    left_theta_rad = chassis.leg[CHASSIS_LEFT].phi0_rad -
-                     chassis_config.leg_vertical_offset_rad -
-                     body_pitch_rad;
-    right_theta_rad = chassis.leg[CHASSIS_RIGHT].phi0_rad -
-                      chassis_config.leg_vertical_offset_rad -
-                      body_pitch_rad;
+    ready_theta_center_rad =
+        (recovery->ready_theta_min_rad +
+         recovery->ready_theta_max_rad) * 0.5f;
+    left_theta_rad = Algorithm_AngleNearestEquivalentRad(
+        chassis.leg[CHASSIS_LEFT].phi0_total_rad -
+            chassis_config.leg_vertical_offset_rad - body_pitch_rad,
+        ready_theta_center_rad);
+    right_theta_rad = Algorithm_AngleNearestEquivalentRad(
+        chassis.leg[CHASSIS_RIGHT].phi0_total_rad -
+            chassis_config.leg_vertical_offset_rad - body_pitch_rad,
+        ready_theta_center_rad);
 
     if (chassis.state == CHASSIS_FALLEN)
     {
         chassis.state_elapsed_s += dt_s;
         direct_prepare =
             ((fabsf(body_pitch_rad) <= recovery->direct_prepare_pitch_rad) &&
-             (chassis.leg[CHASSIS_LEFT].phi0_rad >=
-              recovery->direct_phi0_min_rad) &&
-             (chassis.leg[CHASSIS_LEFT].phi0_rad <=
-              recovery->direct_phi0_max_rad) &&
-             (chassis.leg[CHASSIS_RIGHT].phi0_rad >=
-              recovery->direct_phi0_min_rad) &&
-             (chassis.leg[CHASSIS_RIGHT].phi0_rad <=
-              recovery->direct_phi0_max_rad)) ? 1U : 0U;
+             (Chassis_IsAngleInIntervalRad(
+                  chassis.leg[CHASSIS_LEFT].phi0_total_rad,
+                  recovery->direct_phi0_min_rad,
+                  recovery->direct_phi0_max_rad) != 0U) &&
+             (Chassis_IsAngleInIntervalRad(
+                  chassis.leg[CHASSIS_RIGHT].phi0_total_rad,
+                  recovery->direct_phi0_min_rad,
+                  recovery->direct_phi0_max_rad) != 0U)) ? 1U : 0U;
         if (direct_prepare != 0U)
         {
-            chassis_enter_state(CHASSIS_FALLING_TO_STAND);
+            Chassis_EnterState(CHASSIS_FALLING_TO_STAND);
         }
         else
         {
@@ -610,15 +651,17 @@ void chassis_recovery_control_loop(void)
             right_theta_ready =
                 ((right_theta_rad >= recovery->ready_theta_min_rad) &&
                  (right_theta_rad <= recovery->ready_theta_max_rad)) ? 1U : 0U;
+            /* 机体俯仰方向决定倒地后虚拟腿应向哪一侧翻转。 */
             rotate_direction = (body_pitch_rad < 0.0f) ? 1.0f : -1.0f;
             left_rotate_offset_rad = recovery->rotate_offset_rad;
             right_rotate_offset_rad = recovery->rotate_offset_rad;
-            ready_theta_center_rad =
-                (recovery->ready_theta_min_rad +
-                 recovery->ready_theta_max_rad) * 0.5f;
 
+            /*
+             * 机体仍明显倾斜且双腿进度不一致时，让距离准备区间中心
+             * 更远的一侧使用更大的经验追赶量，避免一条腿提前停住。
+             */
             if ((fabsf(left_theta_rad - right_theta_rad) >
-                 recovery->leg_difference_threshold_rad) &&
+                  recovery->leg_difference_threshold_rad) &&
                 (fabsf(body_pitch_rad) > recovery->ready_pitch_rad))
             {
                 if (fabsf(left_theta_rad - ready_theta_center_rad) >
@@ -638,21 +681,26 @@ void chassis_recovery_control_loop(void)
                 recovery->extended_leg_length_m;
             chassis.target_leg_length_m[CHASSIS_RIGHT] =
                 recovery->extended_leg_length_m;
+            /*
+             * 腿角到位且机体已接近可准备姿态时保持当前连续角；否则继续
+             * 沿恢复方向转动。pitch 门槛防止严重倾斜时过早停止转腿。
+             */
             chassis.target_leg_phi0_rad[CHASSIS_LEFT] =
                 ((left_theta_ready != 0U) &&
-                 (fabsf(body_pitch_rad) <=
-                  recovery->direct_prepare_pitch_rad)) ?
-                    chassis.leg[CHASSIS_LEFT].phi0_rad :
-                    chassis.leg[CHASSIS_LEFT].phi0_rad +
+                  (fabsf(body_pitch_rad) <=
+                   recovery->direct_prepare_pitch_rad)) ?
+                    chassis.leg[CHASSIS_LEFT].phi0_total_rad :
+                    chassis.leg[CHASSIS_LEFT].phi0_total_rad +
                         rotate_direction * left_rotate_offset_rad;
             chassis.target_leg_phi0_rad[CHASSIS_RIGHT] =
                 ((right_theta_ready != 0U) &&
-                 (fabsf(body_pitch_rad) <=
-                  recovery->direct_prepare_pitch_rad)) ?
-                    chassis.leg[CHASSIS_RIGHT].phi0_rad :
-                    chassis.leg[CHASSIS_RIGHT].phi0_rad +
+                  (fabsf(body_pitch_rad) <=
+                   recovery->direct_prepare_pitch_rad)) ?
+                    chassis.leg[CHASSIS_RIGHT].phi0_total_rad :
+                    chassis.leg[CHASSIS_RIGHT].phi0_total_rad +
                         rotate_direction * right_rotate_offset_rad;
 
+            /* 双腿到位且 pitch 足够小并持续稳定后才进入板凳准备阶段。 */
             if ((left_theta_ready != 0U) &&
                 (right_theta_ready != 0U) &&
                 (fabsf(body_pitch_rad) <= recovery->ready_pitch_rad))
@@ -666,20 +714,20 @@ void chassis_recovery_control_loop(void)
 
             if (chassis.state_stable_s >= recovery->stable_time_s)
             {
-                chassis_enter_state(CHASSIS_FALLING_TO_STAND);
+                Chassis_EnterState(CHASSIS_FALLING_TO_STAND);
             }
             else if (chassis.state_elapsed_s >= recovery->fallen_timeout_s)
             {
-                chassis_zero_output();
+                Chassis_ZeroOutput();
                 chassis.fault_flags = CHASSIS_FAULT_RECOVERY_TIMEOUT;
-                chassis_enter_state(CHASSIS_ZERO_FORCE);
+                Chassis_EnterState(CHASSIS_ZERO_FORCE);
                 return;
             }
             else
             {
-                if (chassis_joint_position_control() == 0U)
+                if (Chassis_JointPositionControl(0U) == 0U)
                 {
-                    chassis_enter_state(CHASSIS_ZERO_FORCE);
+                    Chassis_EnterState(CHASSIS_ZERO_FORCE);
                 }
                 return;
             }
@@ -694,9 +742,13 @@ void chassis_recovery_control_loop(void)
         chassis.target_leg_length_m[CHASSIS_RIGHT] =
             recovery->bench_leg_length_m;
         chassis.target_leg_phi0_rad[CHASSIS_LEFT] =
-            recovery->bench_phi0_rad;
+            Algorithm_AngleNearestEquivalentRad(
+                recovery->bench_phi0_rad,
+                chassis.leg[CHASSIS_LEFT].phi0_total_rad);
         chassis.target_leg_phi0_rad[CHASSIS_RIGHT] =
-            recovery->bench_phi0_rad;
+            Algorithm_AngleNearestEquivalentRad(
+                recovery->bench_phi0_rad,
+                chassis.leg[CHASSIS_RIGHT].phi0_total_rad);
 
         prepare_ready =
             ((fabsf(chassis.leg[CHASSIS_LEFT].length_m -
@@ -705,11 +757,13 @@ void chassis_recovery_control_loop(void)
              (fabsf(chassis.leg[CHASSIS_RIGHT].length_m -
                     recovery->bench_leg_length_m) <=
               recovery->leg_length_tolerance_m) &&
-             (fabsf(angle_error_rad(recovery->bench_phi0_rad,
-                                    chassis.leg[CHASSIS_LEFT].phi0_rad)) <=
+             (fabsf(Algorithm_AngleNormalizeRad(
+                  recovery->bench_phi0_rad -
+                  chassis.leg[CHASSIS_LEFT].phi0_total_rad)) <=
               recovery->leg_angle_tolerance_rad) &&
-             (fabsf(angle_error_rad(recovery->bench_phi0_rad,
-                                    chassis.leg[CHASSIS_RIGHT].phi0_rad)) <=
+             (fabsf(Algorithm_AngleNormalizeRad(
+                  recovery->bench_phi0_rad -
+                  chassis.leg[CHASSIS_RIGHT].phi0_total_rad)) <=
               recovery->leg_angle_tolerance_rad) &&
              (fabsf(body_pitch_rad) <= recovery->ready_pitch_rad)) ? 1U : 0U;
         if (prepare_ready != 0U)
@@ -723,24 +777,24 @@ void chassis_recovery_control_loop(void)
 
         if (chassis.state_stable_s >= recovery->stable_time_s)
         {
-            chassis_enter_state(CHASSIS_STANDING);
+            Chassis_EnterState(CHASSIS_STANDING);
             return;
         }
         if (chassis.state_elapsed_s >= recovery->prepare_timeout_s)
         {
-            chassis_zero_output();
+            Chassis_ZeroOutput();
             chassis.fault_flags = CHASSIS_FAULT_RECOVERY_TIMEOUT;
-            chassis_enter_state(CHASSIS_ZERO_FORCE);
+            Chassis_EnterState(CHASSIS_ZERO_FORCE);
             return;
         }
-        if (chassis_joint_position_control() == 0U)
+        if (Chassis_JointPositionControl(0U) == 0U)
         {
-            chassis_enter_state(CHASSIS_ZERO_FORCE);
+            Chassis_EnterState(CHASSIS_ZERO_FORCE);
         }
     }
 }
 
-void chassis_bench_control_loop(void)
+void Chassis_BenchControlLoop(void)
 {
     chassis.state_elapsed_s += chassis.control_dt_s;
     chassis.target_leg_length_m[CHASSIS_LEFT] =
@@ -748,16 +802,21 @@ void chassis_bench_control_loop(void)
     chassis.target_leg_length_m[CHASSIS_RIGHT] =
         chassis_config.recovery.bench_leg_length_m;
     chassis.target_leg_phi0_rad[CHASSIS_LEFT] =
-        chassis_config.recovery.bench_phi0_rad;
+        Algorithm_AngleNearestEquivalentRad(
+            chassis_config.recovery.bench_phi0_rad,
+            chassis.leg[CHASSIS_LEFT].phi0_total_rad);
     chassis.target_leg_phi0_rad[CHASSIS_RIGHT] =
-        chassis_config.recovery.bench_phi0_rad;
-    if (chassis_joint_position_control() == 0U)
+        Algorithm_AngleNearestEquivalentRad(
+            chassis_config.recovery.bench_phi0_rad,
+            chassis.leg[CHASSIS_RIGHT].phi0_total_rad);
+    Chassis_ControlLoop();
+    if ((chassis.state == CHASSIS_BENCH) && (chassis.state_valid == 0U))
     {
-        chassis_enter_state(CHASSIS_ZERO_FORCE);
+        Chassis_EnterState(CHASSIS_ZERO_FORCE);
     }
 }
 
-void chassis_control_loop(void)
+void Chassis_ControlLoop(void)
 {
     chassis_vmc_torque_t left_torque = {0.0f, 0.0f};
     chassis_vmc_torque_t right_torque = {0.0f, 0.0f};
@@ -782,29 +841,29 @@ void chassis_control_loop(void)
     uint8_t right_front_index;
     uint8_t right_back_index;
     uint8_t k_input_limited = 0U;
+    uint8_t bench_mode;
     uint8_t joint_output_enabled;
     uint8_t wheel_output_enabled;
-    uint32_t fault_flags = CHASSIS_FAULT_NONE;
+    uint8_t wheel_request_valid;
+    uint32_t output_faults;
 
     memset(chassis.joint_torque_nm, 0, sizeof(chassis.joint_torque_nm));
     memset(chassis.wheel_current, 0, sizeof(chassis.wheel_current));
+    memset(chassis.wheel_current_request,
+           0,
+           sizeof(chassis.wheel_current_request));
     memset(chassis.joint_torque_request_nm,
            0,
            sizeof(chassis.joint_torque_request_nm));
     chassis.safe_output = 1U;
-    chassis.fault_flags = CHASSIS_FAULT_CONTROL;
     chassis.state_valid = 0U;
     chassis.k_fit_enabled = 0U;
     chassis.k_length_limited = 0U;
+    bench_mode = (chassis.state == CHASSIS_BENCH) ? 1U : 0U;
 
-    /* 1. 输入来自任务层反馈；设备异常时保持本轮零命令并清空运动融合。 */
-    fault_flags = chassis_get_feedback_faults();
-    if (fault_flags != CHASSIS_FAULT_NONE)
-    {
-        chassis.fault_flags = fault_flags;
-        chassis_control_reset();
-        return;
-    }
+    /* 1. 输出故障只封锁最终命令，中间控制量继续使用最新反馈计算。 */
+    output_faults = Chassis_GetOutputFaults();
+    chassis.fault_flags = output_faults | CHASSIS_FAULT_CONTROL;
 
     /* 配置边界属于实机安全底线，运行期不再封装额外的状态查询函数。 */
     if ((chassis_config.imu.pitch_rate_axis >= APP_IMU_AXIS_COUNT) ||
@@ -861,19 +920,22 @@ void chassis_control_loop(void)
     /* 2. 任务反馈阶段已统一更新五连杆状态，所有控制模式共用同一份结果。 */
     if (chassis.leg_state_valid == 0U)
     {
-        chassis.fault_flags = CHASSIS_FAULT_KINEMATICS;
+        chassis.fault_flags = output_faults | CHASSIS_FAULT_KINEMATICS;
         return;
     }
 
     dt_s = chassis.control_dt_s;
-    chassis.target_leg_length_m[CHASSIS_LEFT] =
-        move_toward(chassis.target_leg_length_m[CHASSIS_LEFT],
-                    chassis_config.leg[CHASSIS_LEFT].target_leg_length_m,
-                    chassis_config.recovery.standing_length_rate_mps * dt_s);
-    chassis.target_leg_length_m[CHASSIS_RIGHT] =
-        move_toward(chassis.target_leg_length_m[CHASSIS_RIGHT],
-                    chassis_config.leg[CHASSIS_RIGHT].target_leg_length_m,
-                    chassis_config.recovery.standing_length_rate_mps * dt_s);
+    if (bench_mode == 0U)
+    {
+        chassis.target_leg_length_m[CHASSIS_LEFT] =
+            Chassis_MoveToward(chassis.target_leg_length_m[CHASSIS_LEFT],
+                        chassis_config.leg[CHASSIS_LEFT].target_leg_length_m,
+                        chassis_config.recovery.standing_length_rate_mps * dt_s);
+        chassis.target_leg_length_m[CHASSIS_RIGHT] =
+            Chassis_MoveToward(chassis.target_leg_length_m[CHASSIS_RIGHT],
+                        chassis_config.leg[CHASSIS_RIGHT].target_leg_length_m,
+                        chassis_config.recovery.standing_length_rate_mps * dt_s);
+    }
 
     /* 轮速、IMU 和腿部状态组成速度融合的两个测量量。 */
     chassis.wheel_speed_radps[CHASSIS_LEFT] =
@@ -889,16 +951,21 @@ void chassis_control_loop(void)
         chassis.imu.gyro_radps[chassis_config.imu.pitch_rate_axis] *
         chassis_config.imu.pitch_rate_scale;
 
-    /* theta = phi0 - pi/2 - pitch，与当前十维模型离线求 K 定义一致。 */
-    left_leg_angle_rad = chassis.leg[CHASSIS_LEFT].phi0_rad -
-                         chassis_config.leg_vertical_offset_rad -
-                         body_pitch_rad;
+    /*
+     * theta = phi0 - pi/2 - pitch，与离线模型一致。多圈 phi0 只用于
+     * 保持几何连续，送入线性 LQR 前选择目标平衡点附近的等价角。
+     */
+    left_leg_angle_rad = Algorithm_AngleNearestEquivalentRad(
+        chassis.leg[CHASSIS_LEFT].phi0_total_rad -
+            chassis_config.leg_vertical_offset_rad - body_pitch_rad,
+        chassis.target_state[CHASSIS_STATE_THETA_L]);
     left_leg_angle_rate_radps =
         chassis.leg[CHASSIS_LEFT].phi0_speed_radps -
         body_pitch_rate_radps;
-    right_leg_angle_rad = chassis.leg[CHASSIS_RIGHT].phi0_rad -
-                          chassis_config.leg_vertical_offset_rad -
-                          body_pitch_rad;
+    right_leg_angle_rad = Algorithm_AngleNearestEquivalentRad(
+        chassis.leg[CHASSIS_RIGHT].phi0_total_rad -
+            chassis_config.leg_vertical_offset_rad - body_pitch_rad,
+        chassis.target_state[CHASSIS_STATE_THETA_R]);
     right_leg_angle_rate_radps =
         chassis.leg[CHASSIS_RIGHT].phi0_speed_radps -
         body_pitch_rate_radps;
@@ -957,7 +1024,7 @@ void chassis_control_loop(void)
     chassis.lqr_state[CHASSIS_STATE_S] = chassis.forward_position_m;
     chassis.lqr_state[CHASSIS_STATE_DOT_S] = chassis.forward_speed_mps;
     chassis.lqr_state[CHASSIS_STATE_FAI] =
-        chassis.imu.yaw_rad * chassis_config.imu.yaw_angle_scale;
+        chassis.imu.yaw_total_rad * chassis_config.imu.yaw_angle_scale;
     chassis.lqr_state[CHASSIS_STATE_DOT_FAI] =
         chassis.imu.gyro_radps[chassis_config.imu.yaw_rate_axis] *
         chassis_config.imu.yaw_rate_scale;
@@ -970,46 +1037,54 @@ void chassis_control_loop(void)
     chassis.lqr_state[CHASSIS_STATE_THETA_B] = body_pitch_rad;
     chassis.lqr_state[CHASSIS_STATE_DOT_THETA_B] = body_pitch_rate_radps;
 
-    /* 3. 腿长 PID、支撑力前馈和横滚补偿输出左右腿虚拟支撑力。 */
-    roll_rad = chassis.imu.roll_rad * chassis_config.imu.roll_angle_scale;
-    roll_rate_radps =
-        chassis.imu.gyro_radps[chassis_config.imu.roll_rate_axis] *
-        chassis_config.imu.roll_rate_scale;
-    Algorithm_PID_UpdateByFeedbackRate(
-        &chassis_config.leg_length_pid,
-        &chassis.leg_length_pid[CHASSIS_LEFT],
-        chassis.target_leg_length_m[CHASSIS_LEFT],
-        chassis.leg[CHASSIS_LEFT].length_m,
-        chassis.leg[CHASSIS_LEFT].length_speed_mps,
-        dt_s,
-        &left_length_pid);
-    Algorithm_PID_UpdateByFeedbackRate(
-        &chassis_config.leg_length_pid,
-        &chassis.leg_length_pid[CHASSIS_RIGHT],
-        chassis.target_leg_length_m[CHASSIS_RIGHT],
-        chassis.leg[CHASSIS_RIGHT].length_m,
-        chassis.leg[CHASSIS_RIGHT].length_speed_mps,
-        dt_s,
-        &right_length_pid);
-    Algorithm_PID_UpdateByFeedbackRate(&chassis_config.roll_pid,
-                                       &chassis.roll_pid,
-                                       chassis_config.target_roll_rad,
-                                       roll_rad,
-                                       roll_rate_radps,
-                                       dt_s,
-                                       &roll_pid);
+    /* 3. 小板凳由关节位置环保持腿姿态，不再叠加腿长和横滚支撑力。 */
+    if (bench_mode != 0U)
+    {
+        chassis.support_force_n[CHASSIS_LEFT] = 0.0f;
+        chassis.support_force_n[CHASSIS_RIGHT] = 0.0f;
+    }
+    else
+    {
+        roll_rad = chassis.imu.roll_rad * chassis_config.imu.roll_angle_scale;
+        roll_rate_radps =
+            chassis.imu.gyro_radps[chassis_config.imu.roll_rate_axis] *
+            chassis_config.imu.roll_rate_scale;
+        Algorithm_PID_UpdateByFeedbackRate(
+            &chassis_config.leg_length_pid,
+            &chassis.leg_length_pid[CHASSIS_LEFT],
+            chassis.target_leg_length_m[CHASSIS_LEFT],
+            chassis.leg[CHASSIS_LEFT].length_m,
+            chassis.leg[CHASSIS_LEFT].length_speed_mps,
+            dt_s,
+            &left_length_pid);
+        Algorithm_PID_UpdateByFeedbackRate(
+            &chassis_config.leg_length_pid,
+            &chassis.leg_length_pid[CHASSIS_RIGHT],
+            chassis.target_leg_length_m[CHASSIS_RIGHT],
+            chassis.leg[CHASSIS_RIGHT].length_m,
+            chassis.leg[CHASSIS_RIGHT].length_speed_mps,
+            dt_s,
+            &right_length_pid);
+        Algorithm_PID_UpdateByFeedbackRate(&chassis_config.roll_pid,
+                                           &chassis.roll_pid,
+                                           chassis_config.target_roll_rad,
+                                           roll_rad,
+                                           roll_rate_radps,
+                                           dt_s,
+                                           &roll_pid);
 
-    left_length_force_n = -left_length_pid;
-    right_length_force_n = -right_length_pid;
-    roll_force_n = -roll_pid;
-    chassis.support_force_n[CHASSIS_LEFT] =
-        -roll_force_n + left_length_force_n +
-        chassis_config.base_support_force_n +
-        chassis_config.left_support_feedforward_n;
-    chassis.support_force_n[CHASSIS_RIGHT] =
-        roll_force_n + right_length_force_n +
-        chassis_config.base_support_force_n -
-        chassis_config.right_support_feedforward_n;
+        left_length_force_n = -left_length_pid;
+        right_length_force_n = -right_length_pid;
+        roll_force_n = -roll_pid;
+        chassis.support_force_n[CHASSIS_LEFT] =
+            -roll_force_n + left_length_force_n +
+            chassis_config.base_support_force_n +
+            chassis_config.left_support_feedforward_n;
+        chassis.support_force_n[CHASSIS_RIGHT] =
+            roll_force_n + right_length_force_n +
+            chassis_config.base_support_force_n -
+            chassis_config.right_support_feedforward_n;
+    }
 
     /* 4. 固定腿长调试和实时变腿长共用同一套双腿长 K 矩阵拟合。 */
     if (chassis_config.lqr.enabled == 0U)
@@ -1100,49 +1175,96 @@ void chassis_control_loop(void)
         chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_WHEEL][CHASSIS_STATE_DOT_THETA_B] *
             (chassis.target_state[CHASSIS_STATE_DOT_THETA_B] - chassis.lqr_state[CHASSIS_STATE_DOT_THETA_B]);
 
-    chassis.lqr_output[CHASSIS_OUTPUT_LEFT_LEG] =
-        chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_S] *
-            (chassis.target_state[CHASSIS_STATE_S] - chassis.lqr_state[CHASSIS_STATE_S]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_DOT_S] *
-            (chassis.target_state[CHASSIS_STATE_DOT_S] - chassis.lqr_state[CHASSIS_STATE_DOT_S]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_FAI] *
-            (chassis.target_state[CHASSIS_STATE_FAI] - chassis.lqr_state[CHASSIS_STATE_FAI]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_DOT_FAI] *
-            (chassis.target_state[CHASSIS_STATE_DOT_FAI] - chassis.lqr_state[CHASSIS_STATE_DOT_FAI]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_THETA_L] *
-            (chassis.target_state[CHASSIS_STATE_THETA_L] - chassis.lqr_state[CHASSIS_STATE_THETA_L]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_DOT_THETA_L] *
-            (chassis.target_state[CHASSIS_STATE_DOT_THETA_L] - chassis.lqr_state[CHASSIS_STATE_DOT_THETA_L]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_THETA_R] *
-            (chassis.target_state[CHASSIS_STATE_THETA_R] - chassis.lqr_state[CHASSIS_STATE_THETA_R]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_DOT_THETA_R] *
-            (chassis.target_state[CHASSIS_STATE_DOT_THETA_R] - chassis.lqr_state[CHASSIS_STATE_DOT_THETA_R]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_THETA_B] *
-            (chassis.target_state[CHASSIS_STATE_THETA_B] - chassis.lqr_state[CHASSIS_STATE_THETA_B]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_DOT_THETA_B] *
-            (chassis.target_state[CHASSIS_STATE_DOT_THETA_B] - chassis.lqr_state[CHASSIS_STATE_DOT_THETA_B]);
+    if (bench_mode != 0U)
+    {
+        chassis.lqr_output[CHASSIS_OUTPUT_LEFT_LEG] = 0.0f;
+        chassis.lqr_output[CHASSIS_OUTPUT_RIGHT_LEG] = 0.0f;
+    }
+    else
+    {
+        chassis.lqr_output[CHASSIS_OUTPUT_LEFT_LEG] =
+            chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_S] *
+                (chassis.target_state[CHASSIS_STATE_S] - chassis.lqr_state[CHASSIS_STATE_S]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_DOT_S] *
+                (chassis.target_state[CHASSIS_STATE_DOT_S] - chassis.lqr_state[CHASSIS_STATE_DOT_S]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_FAI] *
+                (chassis.target_state[CHASSIS_STATE_FAI] - chassis.lqr_state[CHASSIS_STATE_FAI]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_DOT_FAI] *
+                (chassis.target_state[CHASSIS_STATE_DOT_FAI] - chassis.lqr_state[CHASSIS_STATE_DOT_FAI]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_THETA_L] *
+                (chassis.target_state[CHASSIS_STATE_THETA_L] - chassis.lqr_state[CHASSIS_STATE_THETA_L]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_DOT_THETA_L] *
+                (chassis.target_state[CHASSIS_STATE_DOT_THETA_L] - chassis.lqr_state[CHASSIS_STATE_DOT_THETA_L]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_THETA_R] *
+                (chassis.target_state[CHASSIS_STATE_THETA_R] - chassis.lqr_state[CHASSIS_STATE_THETA_R]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_DOT_THETA_R] *
+                (chassis.target_state[CHASSIS_STATE_DOT_THETA_R] - chassis.lqr_state[CHASSIS_STATE_DOT_THETA_R]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_THETA_B] *
+                (chassis.target_state[CHASSIS_STATE_THETA_B] - chassis.lqr_state[CHASSIS_STATE_THETA_B]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_LEFT_LEG][CHASSIS_STATE_DOT_THETA_B] *
+                (chassis.target_state[CHASSIS_STATE_DOT_THETA_B] - chassis.lqr_state[CHASSIS_STATE_DOT_THETA_B]);
 
-    chassis.lqr_output[CHASSIS_OUTPUT_RIGHT_LEG] =
-        chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_S] *
-            (chassis.target_state[CHASSIS_STATE_S] - chassis.lqr_state[CHASSIS_STATE_S]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_DOT_S] *
-            (chassis.target_state[CHASSIS_STATE_DOT_S] - chassis.lqr_state[CHASSIS_STATE_DOT_S]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_FAI] *
-            (chassis.target_state[CHASSIS_STATE_FAI] - chassis.lqr_state[CHASSIS_STATE_FAI]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_DOT_FAI] *
-            (chassis.target_state[CHASSIS_STATE_DOT_FAI] - chassis.lqr_state[CHASSIS_STATE_DOT_FAI]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_THETA_L] *
-            (chassis.target_state[CHASSIS_STATE_THETA_L] - chassis.lqr_state[CHASSIS_STATE_THETA_L]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_DOT_THETA_L] *
-            (chassis.target_state[CHASSIS_STATE_DOT_THETA_L] - chassis.lqr_state[CHASSIS_STATE_DOT_THETA_L]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_THETA_R] *
-            (chassis.target_state[CHASSIS_STATE_THETA_R] - chassis.lqr_state[CHASSIS_STATE_THETA_R]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_DOT_THETA_R] *
-            (chassis.target_state[CHASSIS_STATE_DOT_THETA_R] - chassis.lqr_state[CHASSIS_STATE_DOT_THETA_R]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_THETA_B] *
-            (chassis.target_state[CHASSIS_STATE_THETA_B] - chassis.lqr_state[CHASSIS_STATE_THETA_B]) +
-        chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_DOT_THETA_B] *
-            (chassis.target_state[CHASSIS_STATE_DOT_THETA_B] - chassis.lqr_state[CHASSIS_STATE_DOT_THETA_B]);
+        chassis.lqr_output[CHASSIS_OUTPUT_RIGHT_LEG] =
+            chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_S] *
+                (chassis.target_state[CHASSIS_STATE_S] - chassis.lqr_state[CHASSIS_STATE_S]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_DOT_S] *
+                (chassis.target_state[CHASSIS_STATE_DOT_S] - chassis.lqr_state[CHASSIS_STATE_DOT_S]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_FAI] *
+                (chassis.target_state[CHASSIS_STATE_FAI] - chassis.lqr_state[CHASSIS_STATE_FAI]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_DOT_FAI] *
+                (chassis.target_state[CHASSIS_STATE_DOT_FAI] - chassis.lqr_state[CHASSIS_STATE_DOT_FAI]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_THETA_L] *
+                (chassis.target_state[CHASSIS_STATE_THETA_L] - chassis.lqr_state[CHASSIS_STATE_THETA_L]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_DOT_THETA_L] *
+                (chassis.target_state[CHASSIS_STATE_DOT_THETA_L] - chassis.lqr_state[CHASSIS_STATE_DOT_THETA_L]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_THETA_R] *
+                (chassis.target_state[CHASSIS_STATE_THETA_R] - chassis.lqr_state[CHASSIS_STATE_THETA_R]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_DOT_THETA_R] *
+                (chassis.target_state[CHASSIS_STATE_DOT_THETA_R] - chassis.lqr_state[CHASSIS_STATE_DOT_THETA_R]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_THETA_B] *
+                (chassis.target_state[CHASSIS_STATE_THETA_B] - chassis.lqr_state[CHASSIS_STATE_THETA_B]) +
+            chassis.lqr_k[CHASSIS_OUTPUT_RIGHT_LEG][CHASSIS_STATE_DOT_THETA_B] *
+                (chassis.target_state[CHASSIS_STATE_DOT_THETA_B] - chassis.lqr_state[CHASSIS_STATE_DOT_THETA_B]);
+    }
+
+    wheel_request_valid =
+        ((chassis_config.wheel.torque_limit_nm > 0.0f) &&
+         (chassis_config.wheel.torque_to_current != 0.0f) &&
+         (chassis_config.wheel.current_limit > 0)) ? 1U : 0U;
+    wheel_output_enabled =
+        ((output_faults == CHASSIS_FAULT_NONE) &&
+         (APP_CHASSIS_OUTPUT_ENABLE != 0U) &&
+         (chassis_config.output.wheel_enabled != 0U) &&
+         (wheel_request_valid != 0U)) ? 1U : 0U;
+    if (wheel_request_valid != 0U)
+    {
+        chassis.wheel_current_request[CHASSIS_LEFT] =
+            (int16_t)Chassis_LimitSymmetric(
+                Chassis_LimitSymmetric(chassis.lqr_output[CHASSIS_OUTPUT_LEFT_WHEEL],
+                                chassis_config.wheel.torque_limit_nm) *
+                    chassis_config.wheel.torque_to_current,
+                (float)chassis_config.wheel.current_limit);
+        chassis.wheel_current_request[CHASSIS_RIGHT] =
+            (int16_t)Chassis_LimitSymmetric(
+                Chassis_LimitSymmetric(chassis.lqr_output[CHASSIS_OUTPUT_RIGHT_WHEEL],
+                                chassis_config.wheel.torque_limit_nm) *
+                    chassis_config.wheel.torque_to_current,
+                (float)chassis_config.wheel.current_limit);
+    }
+    if (bench_mode != 0U)
+    {
+        if (Chassis_JointPositionControl(wheel_output_enabled) == 0U)
+        {
+            Chassis_EnterState(CHASSIS_ZERO_FORCE);
+        }
+        else if (wheel_output_enabled != 0U)
+        {
+            memcpy(chassis.wheel_current,
+                   chassis.wheel_current_request,
+                   sizeof(chassis.wheel_current));
+        }
+        return;
+    }
 
     /* 6. 左右腿支撑力和摆力矩经 VMC 映射为四个 DM 关节力矩。 */
     if ((fabsf(chassis.leg[CHASSIS_LEFT].length_m) <= CHASSIS_CONTROL_EPSILON) ||
@@ -1155,12 +1277,12 @@ void chassis_control_loop(void)
         return;
     }
 
-    vmc_calc_torque(&chassis_config.leg[CHASSIS_LEFT],
+    VMC_CalcTorque(&chassis_config.leg[CHASSIS_LEFT],
                     &chassis.leg[CHASSIS_LEFT],
                     chassis.support_force_n[CHASSIS_LEFT],
                     chassis.lqr_output[CHASSIS_OUTPUT_LEFT_LEG],
                     &left_torque);
-    vmc_calc_torque(&chassis_config.leg[CHASSIS_RIGHT],
+    VMC_CalcTorque(&chassis_config.leg[CHASSIS_RIGHT],
                     &chassis.leg[CHASSIS_RIGHT],
                     chassis.support_force_n[CHASSIS_RIGHT],
                     chassis.lqr_output[CHASSIS_OUTPUT_RIGHT_LEG],
@@ -1175,49 +1297,35 @@ void chassis_control_loop(void)
     chassis.joint_torque_request_nm[right_back_index] =
         right_torque.back_nm;
 
-    /* 7. 物理力矩经方向、限幅和换算后写入任务层实际发送的命令数组。 */
+    /* 7. 物理力矩经方向和限幅后写入任务层实际发送的关节命令。 */
     joint_output_enabled =
-        ((APP_CHASSIS_OUTPUT_ENABLE != 0U) &&
+        ((output_faults == CHASSIS_FAULT_NONE) &&
+         (APP_CHASSIS_OUTPUT_ENABLE != 0U) &&
          (chassis_config.output.joint_enabled != 0U) &&
          (chassis_config.output.joint_torque_limit_nm > 0.0f)) ? 1U : 0U;
-    wheel_output_enabled =
-        ((APP_CHASSIS_OUTPUT_ENABLE != 0U) &&
-         (chassis_config.output.wheel_enabled != 0U) &&
-         (chassis_config.wheel.torque_limit_nm > 0.0f) &&
-         (chassis_config.wheel.torque_to_current != 0.0f) &&
-         (chassis_config.wheel.current_limit > 0)) ? 1U : 0U;
-
     if (joint_output_enabled != 0U)
     {
         chassis.joint_torque_nm[left_front_index] =
-            limit_symmetric(left_torque.front_nm,
+            Chassis_LimitSymmetric(left_torque.front_nm,
                             chassis_config.output.joint_torque_limit_nm);
         chassis.joint_torque_nm[left_back_index] =
-            limit_symmetric(left_torque.back_nm,
+            Chassis_LimitSymmetric(left_torque.back_nm,
                             chassis_config.output.joint_torque_limit_nm);
         chassis.joint_torque_nm[right_front_index] =
-            limit_symmetric(right_torque.front_nm,
+            Chassis_LimitSymmetric(right_torque.front_nm,
                             chassis_config.output.joint_torque_limit_nm);
         chassis.joint_torque_nm[right_back_index] =
-            limit_symmetric(right_torque.back_nm,
+            Chassis_LimitSymmetric(right_torque.back_nm,
                             chassis_config.output.joint_torque_limit_nm);
     }
-
     if (wheel_output_enabled != 0U)
     {
-        chassis.wheel_current[CHASSIS_LEFT] = (int16_t)limit_symmetric(
-            limit_symmetric(chassis.lqr_output[CHASSIS_OUTPUT_LEFT_WHEEL],
-                            chassis_config.wheel.torque_limit_nm) *
-                chassis_config.wheel.torque_to_current,
-            (float)chassis_config.wheel.current_limit);
-        chassis.wheel_current[CHASSIS_RIGHT] = (int16_t)limit_symmetric(
-            limit_symmetric(chassis.lqr_output[CHASSIS_OUTPUT_RIGHT_WHEEL],
-                            chassis_config.wheel.torque_limit_nm) *
-                chassis_config.wheel.torque_to_current,
-            (float)chassis_config.wheel.current_limit);
+        memcpy(chassis.wheel_current,
+               chassis.wheel_current_request,
+               sizeof(chassis.wheel_current));
     }
 
-    chassis.fault_flags = CHASSIS_FAULT_NONE;
+    chassis.fault_flags = output_faults;
     chassis.safe_output =
         ((joint_output_enabled == 0U) && (wheel_output_enabled == 0U)) ? 1U : 0U;
     chassis.state_valid = 1U;

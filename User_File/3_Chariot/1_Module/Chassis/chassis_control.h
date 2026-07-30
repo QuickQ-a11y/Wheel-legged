@@ -47,6 +47,7 @@ typedef struct
     float roll_rad;
     float pitch_rad;
     float yaw_rad;
+    float yaw_total_rad;         /* 本次上电期间连续偏航角，单位 rad。 */
     float gyro_radps[APP_IMU_AXIS_COUNT];
     float motion_accel_mps2[APP_IMU_AXIS_COUNT];
 } chassis_imu_t;
@@ -68,7 +69,7 @@ typedef struct
 
 typedef struct
 {
-    uint8_t enabled;
+    uint8_t enabled;               /* 非零电机输出许可，不控制 DM 协议使能。 */
     chassis_mode_t mode;
     chassis_mode_t last_mode;
     chassis_control_state_t state;
@@ -101,7 +102,8 @@ typedef struct
     float target_leg_phi0_rad[CHASSIS_LEG_COUNT];
     float target_joint_angle_rad[APP_DM_COUNT];
     float target_joint_speed_radps[APP_DM_COUNT];
-    float joint_torque_request_nm[APP_DM_COUNT];
+    float joint_torque_request_nm[APP_DM_COUNT]; /* 输出封锁时仍保留的关节请求。 */
+    int16_t wheel_current_request[APP_WHEEL_COUNT]; /* LQR限幅后的轮电流请求。 */
 
     float joint_torque_nm[APP_DM_COUNT];
     int16_t wheel_current[APP_WHEEL_COUNT];
@@ -109,7 +111,7 @@ typedef struct
     uint32_t fault_flags;
     uint8_t k_fit_enabled;
     uint8_t k_length_limited;
-    uint8_t state_valid;
+    uint8_t state_valid;           /* 本轮控制计算完整，不代表设备均在线。 */
 
     algorithm_kalman_t speed_kalman;
     algorithm_pid_state_t leg_length_pid[CHASSIS_LEG_COUNT];
@@ -124,42 +126,42 @@ extern chassis_t chassis;
 /**
  * @brief 初始化底盘控制状态、PID 和速度卡尔曼滤波器。
  */
-void chassis_control_init(void);
+void Chassis_ControlInit(void);
 
 /**
  * @brief 清空速度融合和前进位移状态。
  */
-void chassis_control_reset(void);
+void Chassis_ControlReset(void);
 
 /**
  * @brief 由本轮原始关节反馈更新左右五连杆状态。
  */
-void chassis_control_update_leg_state(void);
+void Chassis_ControlUpdateLegState(void);
 
 /**
- * @brief 根据使能、模式边沿和当前姿态选择控制状态。
+ * @brief 根据模式边沿和当前姿态选择控制状态并维护输出故障。
  */
-void chassis_control_update_state(void);
+void Chassis_ControlUpdateState(void);
 
 /**
  * @brief 执行一轮十维 LQR、支撑力和 VMC 控制计算。
  */
-void chassis_control_loop(void);
+void Chassis_ControlLoop(void);
 
 /**
  * @brief 执行倒地转腿和小板凳准备两段式重新站立控制。
  */
-void chassis_recovery_control_loop(void);
+void Chassis_RecoveryControlLoop(void);
 
 /**
- * @brief 使用关节位置控制保持独立小板凳姿态，双轮始终清零。
+ * @brief 使用关节位置控制保持小板凳姿态，并由当前十维 LQR 控制双轮。
  */
-void chassis_bench_control_loop(void);
+void Chassis_BenchControlLoop(void);
 
 /**
  * @brief 将底盘电机命令清零并重置运动融合状态。
  */
-void chassis_zero_output(void);
+void Chassis_ZeroOutput(void);
 
 #ifdef __cplusplus
 }

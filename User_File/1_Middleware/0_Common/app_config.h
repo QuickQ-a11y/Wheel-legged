@@ -24,25 +24,28 @@ extern "C" {
 #define APP_DJI_LEFT_RX_ID 0x201U
 #define APP_DJI_RIGHT_RX_ID 0x202U
 
-#define APP_DM_LEFT_FRONT_TX_ID 0x002U
-#define APP_DM_LEFT_FRONT_RX_ID 0x002U
-#define APP_DM_LEFT_BACK_TX_ID 0x001U
-#define APP_DM_LEFT_BACK_RX_ID 0x001U
-#define APP_DM_RIGHT_FRONT_TX_ID 0x004U
-#define APP_DM_RIGHT_FRONT_RX_ID 0x004U
-#define APP_DM_RIGHT_BACK_TX_ID 0x003U
-#define APP_DM_RIGHT_BACK_RX_ID 0x003U
+#define APP_DM_FB_MASTER 0x000U
+#define APP_DM_LF_ID 0x002U
+#define APP_DM_LB_ID 0x001U
+#define APP_DM_RF_ID 0x004U
+#define APP_DM_RB_ID 0x003U
 
-#define APP_DM_LEFT_DIR 1
-#define APP_DM_RIGHT_DIR (-1)
+#define APP_DM_L_DIR 1
+#define APP_DM_R_DIR (-1)
 
-/* 当前髋关节电机 MIT 协议的线性映射量程，不是机械安全限幅。 */
-#define APP_DM_POS_MIN_RAD (-12.5f)
-#define APP_DM_POS_MAX_RAD 12.5f
-#define APP_DM_VEL_MIN_RADPS (-45.0f)
-#define APP_DM_VEL_MAX_RADPS 45.0f
-#define APP_DM_TORQUE_MIN_NM (-40.0f)
-#define APP_DM_TORQUE_MAX_NM 40.0f
+/* DM MIT 控制帧的位置给定范围，PMAX 使用电机默认值 12.5 rad。 */
+#define APP_DM_CMD_PMIN (-12.5f)
+#define APP_DM_CMD_PMAX 12.5f
+
+/* DM MIT 反馈帧的位置解码范围，与控制帧 PMAX 独立。 */
+#define APP_DM_FB_PMIN (-3.14159265358979323846f)
+#define APP_DM_FB_PMAX 3.14159265358979323846f
+
+/* 速度单位 rad/s，力矩单位 N*m；范围按当前 J4310 协议配置。 */
+#define APP_DM_VEL_MIN (-30.0f)
+#define APP_DM_VEL_MAX 30.0f
+#define APP_DM_TOR_MIN (-10.0f)
+#define APP_DM_TOR_MAX 10.0f
 
 #define APP_CAN_PERIOD_TICKS 1U
 /* IMU和底盘控制统一按1 kHz运行，延迟时由各任务使用实际dt补偿。 */

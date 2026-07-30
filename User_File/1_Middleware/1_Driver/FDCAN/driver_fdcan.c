@@ -61,6 +61,7 @@ static void Driver_FDCAN_ConfigStdFilter(FDCAN_HandleTypeDef *handle)
     filter.FilterIndex = 0U;
     filter.FilterType = FDCAN_FILTER_MASK;
     filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+    /* 掩码为 0 表示不比较任何 ID 位，由应用层按总线和协议分发。 */
     filter.FilterID1 = 0x000U;
     filter.FilterID2 = 0x000U;
 

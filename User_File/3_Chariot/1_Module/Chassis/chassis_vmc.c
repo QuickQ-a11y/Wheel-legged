@@ -1,11 +1,13 @@
 #include "chassis_vmc.h"
 
+#include "Angle.h"
+
 #include <math.h>
 #include <string.h>
 
 #define CHASSIS_VMC_EPSILON 1.0e-6f
 
-static float vmc_limit_float(float value, float min_value, float max_value)
+static float VMC_LimitFloat(float value, float min_value, float max_value)
 {
     if (value < min_value)
     {
@@ -18,23 +20,7 @@ static float vmc_limit_float(float value, float min_value, float max_value)
     return value;
 }
 
-/**
- * @brief 将逆解角调整到最接近当前反馈的等价角，避免跨越正负 pi 时目标跳变。
- */
-static float vmc_nearest_equivalent_angle(float target_rad, float current_rad)
-{
-    while ((target_rad - current_rad) > CHASSIS_PI)
-    {
-        target_rad -= 2.0f * CHASSIS_PI;
-    }
-    while ((target_rad - current_rad) < -CHASSIS_PI)
-    {
-        target_rad += 2.0f * CHASSIS_PI;
-    }
-    return target_rad;
-}
-
-void vmc_calc_state(const chassis_leg_config_t *config,
+void VMC_CalcState(const chassis_leg_config_t *config,
                     float front_position_rad,
                     float back_position_rad,
                     float front_speed_radps,
@@ -136,6 +122,7 @@ void vmc_calc_state(const chassis_leg_config_t *config,
         return;
     }
     leg->phi0_rad = atan2f(point_c_y, point_c_x);
+    leg->phi0_total_rad = leg->phi0_rad;
 
     /* 对闭链约束求导，得到 C 点速度、腿长速度和 phi0 角速度。 */
     phi1_speed_radps = config->joint[CHASSIS_JOINT_FRONT].angle_scale *
@@ -184,7 +171,7 @@ void vmc_calc_state(const chassis_leg_config_t *config,
         length_squared;
 }
 
-uint8_t vmc_calc_joint_target(const chassis_leg_config_t *config,
+uint8_t VMC_CalcJointTarget(const chassis_leg_config_t *config,
                               const chassis_vmc_state_t *current_leg,
                               float target_length_m,
                               float target_phi0_rad,
@@ -259,13 +246,15 @@ uint8_t vmc_calc_joint_target(const chassis_leg_config_t *config,
 
     /* 当前实机装配对应前链上分支、后链下分支。 */
     target->phi1_rad = front_base_angle +
-                       acosf(vmc_limit_float(front_cosine, -1.0f, 1.0f));
+                       acosf(VMC_LimitFloat(front_cosine, -1.0f, 1.0f));
     target->phi4_rad = back_base_angle -
-                       acosf(vmc_limit_float(back_cosine, -1.0f, 1.0f));
-    target->phi1_rad = vmc_nearest_equivalent_angle(target->phi1_rad,
-                                                     current_leg->phi1_rad);
-    target->phi4_rad = vmc_nearest_equivalent_angle(target->phi4_rad,
-                                                     current_leg->phi4_rad);
+                       acosf(VMC_LimitFloat(back_cosine, -1.0f, 1.0f));
+    target->phi1_rad =
+        Algorithm_AngleNearestEquivalentRad(target->phi1_rad,
+                                            current_leg->phi1_rad);
+    target->phi4_rad =
+        Algorithm_AngleNearestEquivalentRad(target->phi4_rad,
+                                            current_leg->phi4_rad);
 
     if ((!isfinite(target->phi1_rad)) || (!isfinite(target->phi4_rad)))
     {
@@ -275,7 +264,7 @@ uint8_t vmc_calc_joint_target(const chassis_leg_config_t *config,
     return 1U;
 }
 
-void vmc_calc_torque(const chassis_leg_config_t *config,
+void VMC_CalcTorque(const chassis_leg_config_t *config,
                      const chassis_vmc_state_t *leg,
                      float support_force_n,
                      float swing_torque_nm,

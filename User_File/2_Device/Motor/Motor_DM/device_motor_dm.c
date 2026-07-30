@@ -1,5 +1,6 @@
 #include "device_motor_dm.h"
 
+#include "Angle.h"
 #include "task_can.h"
 #include "fdcan.h"
 
@@ -101,7 +102,7 @@ static void Motor_DM_UpdateModeFrames(void)
         if (handle != NULL)
         {
             CAN_Task_UpdateTxFrame(handle,
-                                   dmMotors[index].config.txId,
+                                   dmMotors[index].config.motorId,
                                    data,
                                    APP_DM_FRAME_LEN);
         }
@@ -113,13 +114,13 @@ void Motor_DM_Init(void)
     memset(dmMotors, 0, sizeof(dmMotors));
 
     dmMotors[MOTOR_DM_LEFT_FRONT].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_DM_LEFT_FRONT_TX_ID, APP_DM_LEFT_FRONT_RX_ID, APP_DM_LEFT_DIR};
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_DM_LF_ID, APP_DM_L_DIR};
     dmMotors[MOTOR_DM_LEFT_BACK].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_DM_LEFT_BACK_TX_ID, APP_DM_LEFT_BACK_RX_ID, APP_DM_LEFT_DIR};
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_DM_LB_ID, APP_DM_L_DIR};
     dmMotors[MOTOR_DM_RIGHT_FRONT].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_DM_RIGHT_FRONT_TX_ID, APP_DM_RIGHT_FRONT_RX_ID, APP_DM_RIGHT_DIR};
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_DM_RF_ID, APP_DM_R_DIR};
     dmMotors[MOTOR_DM_RIGHT_BACK].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_DM_RIGHT_BACK_TX_ID, APP_DM_RIGHT_BACK_RX_ID, APP_DM_RIGHT_DIR};
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_DM_RB_ID, APP_DM_R_DIR};
 
     dmSafe = 1U;
     dmEnable = 0U;
@@ -127,21 +128,26 @@ void Motor_DM_Init(void)
 }
 
 void Motor_DM_UpdateFeedback(app_can_bus_t bus,
-                             uint32_t rxId,
+                             uint32_t identifier,
                              const uint8_t data[APP_DM_FRAME_LEN])
 {
+    uint8_t feedback_motor_id;
+    uint32_t now_tick;
     uint32_t index;
 
-    if (data == NULL)
+    if ((data == NULL) || (identifier != APP_DM_FB_MASTER))
     {
         return;
     }
 
+    feedback_motor_id = data[0] & 0x0FU;
+    now_tick = HAL_GetTick();
     for (index = 0U; index < MOTOR_DM_COUNT; index++)
     {
         motor_dm_object_t *motor = &dmMotors[index];
 
-        if ((motor->config.bus != bus) || (motor->config.rxId != rxId))
+        if ((motor->config.bus != bus) ||
+            ((motor->config.motorId & 0x0FU) != feedback_motor_id))
         {
             continue;
         }
@@ -150,27 +156,40 @@ void Motor_DM_UpdateFeedback(app_can_bus_t bus,
         uint16_t velocityRaw = ((uint16_t)data[3] << 4U) | ((uint16_t)data[4] >> 4U);
         uint16_t torqueRaw = (((uint16_t)data[4] & 0x0FU) << 8U) | (uint16_t)data[5];
         float direction = (float)motor->config.direction;
+        float wrapped_position_rad =
+            Motor_DM_UintToFloat(positionRaw,
+                                 APP_DM_FB_PMIN,
+                                 APP_DM_FB_PMAX,
+                                 16U) * direction;
 
         motor->state.state = data[0] >> 4U;
-        motor->state.positionRad =
-            Motor_DM_UintToFloat(positionRaw,
-                                 APP_DM_POS_MIN_RAD,
-                                 APP_DM_POS_MAX_RAD,
-                                 16U) * direction;
+        if ((motor->state.feedbackCount == 0U) ||
+            ((now_tick - motor->state.lastUpdateTick) > APP_DM_TIMEOUT_TICKS))
+        {
+            motor->state.positionRad = wrapped_position_rad;
+        }
+        else
+        {
+            motor->state.positionRad =
+                Algorithm_AngleUnwrapRad(motor->state.positionWrappedRad,
+                                         motor->state.positionRad,
+                                         wrapped_position_rad);
+        }
+        motor->state.positionWrappedRad = wrapped_position_rad;
         motor->state.velocityRadps =
             Motor_DM_UintToFloat(velocityRaw,
-                                 APP_DM_VEL_MIN_RADPS,
-                                 APP_DM_VEL_MAX_RADPS,
+                                 APP_DM_VEL_MIN,
+                                 APP_DM_VEL_MAX,
                                  12U) * direction;
         motor->state.torqueNm =
             Motor_DM_UintToFloat(torqueRaw,
-                                 APP_DM_TORQUE_MIN_NM,
-                                 APP_DM_TORQUE_MAX_NM,
+                                 APP_DM_TOR_MIN,
+                                 APP_DM_TOR_MAX,
                                  12U) * direction;
         motor->state.mosTemperature = data[6];
         motor->state.rotorTemperature = data[7];
         motor->state.feedbackCount++;
-        motor->state.lastUpdateTick = HAL_GetTick();
+        motor->state.lastUpdateTick = now_tick;
         motor->state.isOnline = 1U;
 
         return;
@@ -285,13 +304,16 @@ void Motor_DM_UpdateTxFrames(void)
          * 这表示当前固件只使用 DM MIT 的力矩通道，不在发送帧中下发位置、速度、KP、KD。
          */
         uint16_t torqueRaw = Motor_DM_FloatToUint(command.torqueNm * direction,
-                                                   APP_DM_TORQUE_MIN_NM,
-                                                   APP_DM_TORQUE_MAX_NM,
+                                                   APP_DM_TOR_MIN,
+                                                   APP_DM_TOR_MAX,
                                                    12U);
 
         data[6] = (uint8_t)(torqueRaw >> 8U);
         data[7] = (uint8_t)torqueRaw;
 
-        CAN_Task_UpdateTxFrame(handle, motor->config.txId, data, APP_DM_FRAME_LEN);
+        CAN_Task_UpdateTxFrame(handle,
+                               motor->config.motorId,
+                               data,
+                               APP_DM_FRAME_LEN);
     }
 }

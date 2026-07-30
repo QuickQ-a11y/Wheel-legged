@@ -21,14 +21,14 @@ typedef enum
 typedef struct
 {
     app_can_bus_t bus;           /* 电机所在 CAN 总线。 */
-    uint32_t txId;               /* MIT 控制帧发送标准 ID。 */
-    uint32_t rxId;               /* MIT 反馈帧接收标准 ID。 */
+    uint32_t motorId;            /* 控制帧 ID，也是反馈 D[0] 中的电机 ID。 */
     int8_t direction;            /* 机械安装方向，1 或 -1。 */
 } motor_dm_config_t;
 
 typedef struct
 {
-    float positionRad;           /* 反馈位置，单位 rad。 */
+    float positionWrappedRad;    /* 单圈反馈位置，范围 [-pi, pi]，单位 rad。 */
+    float positionRad;           /* 本次在线期间连续展开的位置，单位 rad。 */
     float velocityRadps;         /* 反馈速度，单位 rad/s。 */
     float torqueNm;              /* 反馈力矩，单位 N*m。 */
     uint8_t state;               /* DM 反馈状态高 4 位。 */
@@ -53,7 +53,7 @@ void Motor_DM_Init(void);
  * @brief 解析一帧 DM MIT 反馈。
  */
 void Motor_DM_UpdateFeedback(app_can_bus_t bus,
-                             uint32_t rxId,
+                             uint32_t identifier,
                              const uint8_t data[APP_DM_FRAME_LEN]);
 
 /**

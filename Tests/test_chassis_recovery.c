@@ -6,7 +6,7 @@
 
 #define TEST_TOLERANCE 2.0e-5f
 
-static void set_online_feedback(void)
+static void setOnlineFeedback(void)
 {
     uint32_t index;
 
@@ -28,7 +28,7 @@ static void set_online_feedback(void)
     }
 }
 
-static void set_leg_pose(chassis_leg_side_t side,
+static void setLegPose(chassis_leg_side_t side,
                          float length_m,
                          float phi0_rad)
 {
@@ -41,7 +41,7 @@ static void set_leg_pose(chassis_leg_side_t side,
     uint8_t front_index = config->joint[CHASSIS_JOINT_FRONT].motor_index;
     uint8_t back_index = config->joint[CHASSIS_JOINT_BACK].motor_index;
 
-    assert(vmc_calc_joint_target(config,
+    assert(VMC_CalcJointTarget(config,
                                  &current_leg,
                                  length_m,
                                  phi0_rad,
@@ -56,15 +56,15 @@ static void set_leg_pose(chassis_leg_side_t side,
         config->joint[CHASSIS_JOINT_BACK].angle_scale;
 }
 
-static void set_symmetric_leg_pose(float length_m, float phi0_rad)
+static void setSymmetricLegPose(float length_m, float phi0_rad)
 {
-    set_leg_pose(CHASSIS_LEFT, length_m, phi0_rad);
-    set_leg_pose(CHASSIS_RIGHT, length_m, phi0_rad);
-    chassis_control_update_leg_state();
+    setLegPose(CHASSIS_LEFT, length_m, phi0_rad);
+    setLegPose(CHASSIS_RIGHT, length_m, phi0_rad);
+    Chassis_ControlUpdateLegState();
     assert(chassis.leg_state_valid == 1U);
 }
 
-static void assert_zero_final_output(void)
+static void assertZeroFinalOutput(void)
 {
     uint32_t index;
 
@@ -79,25 +79,77 @@ static void assert_zero_final_output(void)
     assert(chassis.safe_output == 1U);
 }
 
-static void test_bench_control(void)
+static void assertZeroWheelRequest(void)
 {
-    float maximum_request_nm = 0.0f;
     uint32_t index;
 
-    chassis_control_init();
-    set_online_feedback();
-    set_symmetric_leg_pose(0.25f, CHASSIS_HALF_PI);
+    for (index = 0U; index < APP_WHEEL_COUNT; index++)
+    {
+        assert(chassis.wheel_current_request[index] == 0);
+    }
+}
+
+static void assertControlRequestsCalculated(void)
+{
+    float maximum_joint_request_nm = 0.0f;
+    int32_t maximum_wheel_request = 0;
+    uint32_t index;
+
+    for (index = 0U; index < APP_DM_COUNT; index++)
+    {
+        float request_nm = fabsf(chassis.joint_torque_request_nm[index]);
+
+        if (request_nm > maximum_joint_request_nm)
+        {
+            maximum_joint_request_nm = request_nm;
+        }
+    }
+    for (index = 0U; index < APP_WHEEL_COUNT; index++)
+    {
+        int32_t request = chassis.wheel_current_request[index];
+
+        if (request < 0)
+        {
+            request = -request;
+        }
+        if (request > maximum_wheel_request)
+        {
+            maximum_wheel_request = request;
+        }
+    }
+    assert(maximum_joint_request_nm > 0.0f);
+    assert(maximum_wheel_request > 0);
+}
+
+static void testBenchControl(void)
+{
+    float maximum_request_nm = 0.0f;
+    int32_t maximum_wheel_current_request = 0;
+    uint32_t index;
+
+    Chassis_ControlInit();
+    setOnlineFeedback();
+    chassis.imu.pitch_rad = 0.05f;
+    chassis.imu.yaw_rad = 0.70f;
+    chassis.imu.yaw_total_rad = 0.70f;
+    setSymmetricLegPose(0.25f, CHASSIS_HALF_PI);
     chassis.mode = CHASSIS_MODE_BENCH;
-    chassis_control_update_state();
+    Chassis_ControlUpdateState();
     assert(chassis.state == CHASSIS_BENCH);
 
-    chassis_bench_control_loop();
+    Chassis_BenchControlLoop();
     assert(chassis.state == CHASSIS_BENCH);
     assert(chassis.state_valid == 1U);
     assert(fabsf(chassis.target_leg_length_m[CHASSIS_LEFT] - 0.15f) <
            TEST_TOLERANCE);
     assert(fabsf(chassis.target_leg_length_m[CHASSIS_RIGHT] - 0.15f) <
            TEST_TOLERANCE);
+    assert(fabsf(chassis.target_state[CHASSIS_STATE_FAI] - 0.70f) <
+           TEST_TOLERANCE);
+    assert(chassis.lqr_output[CHASSIS_OUTPUT_LEFT_LEG] == 0.0f);
+    assert(chassis.lqr_output[CHASSIS_OUTPUT_RIGHT_LEG] == 0.0f);
+    assert(chassis.support_force_n[CHASSIS_LEFT] == 0.0f);
+    assert(chassis.support_force_n[CHASSIS_RIGHT] == 0.0f);
     for (index = 0U; index < APP_DM_COUNT; index++)
     {
         float request_nm = fabsf(chassis.joint_torque_request_nm[index]);
@@ -111,32 +163,48 @@ static void test_bench_control(void)
         }
     }
     assert(maximum_request_nm > 0.0f);
-    assert_zero_final_output();
+    for (index = 0U; index < APP_WHEEL_COUNT; index++)
+    {
+        int32_t current_request = chassis.wheel_current_request[index];
+
+        if (current_request < 0)
+        {
+            current_request = -current_request;
+        }
+        assert(current_request <= chassis_config.wheel.current_limit);
+        if (current_request > maximum_wheel_current_request)
+        {
+            maximum_wheel_current_request = current_request;
+        }
+    }
+    assert(maximum_wheel_current_request > 0);
+    assertZeroFinalOutput();
 }
 
-static void test_recovery_handoff(void)
+static void testRecoveryHandoff(void)
 {
     uint32_t iteration;
 
-    chassis_control_init();
-    set_online_feedback();
+    Chassis_ControlInit();
+    setOnlineFeedback();
     chassis.imu.pitch_rad = 0.0f;
     chassis.imu.yaw_rad = 0.70f;
-    set_symmetric_leg_pose(chassis_config.recovery.bench_leg_length_m,
+    chassis.imu.yaw_total_rad = 0.70f;
+    setSymmetricLegPose(chassis_config.recovery.bench_leg_length_m,
                            chassis_config.recovery.bench_phi0_rad);
     chassis.mode = CHASSIS_MODE_SELF_SAVE;
-    chassis_control_update_state();
+    Chassis_ControlUpdateState();
     assert(chassis.state == CHASSIS_FALLEN);
 
     for (iteration = 0U; iteration < 150U; iteration++)
     {
         chassis.joint_torque_nm[0] = 0.5f;
-        chassis_control_update_leg_state();
-        chassis_control_update_state();
+        Chassis_ControlUpdateLegState();
+        Chassis_ControlUpdateState();
         if ((chassis.state == CHASSIS_FALLEN) ||
             (chassis.state == CHASSIS_FALLING_TO_STAND))
         {
-            chassis_recovery_control_loop();
+            Chassis_RecoveryControlLoop();
         }
         if (chassis.state == CHASSIS_STANDING)
         {
@@ -145,86 +213,88 @@ static void test_recovery_handoff(void)
     }
 
     assert(chassis.state == CHASSIS_STANDING);
-    assert_zero_final_output();
+    assertZeroFinalOutput();
     assert(fabsf(chassis.target_state[CHASSIS_STATE_FAI] - 0.70f) <
            TEST_TOLERANCE);
     assert(fabsf(chassis.target_leg_length_m[CHASSIS_LEFT] -
                  chassis_config.recovery.bench_leg_length_m) <
            TEST_TOLERANCE);
-    chassis_control_update_state();
+    Chassis_ControlUpdateState();
     assert(chassis.state == CHASSIS_STANDING);
 
-    chassis_control_loop();
+    Chassis_ControlLoop();
     assert(chassis.state_valid == 1U);
     assert(chassis.target_leg_length_m[CHASSIS_LEFT] >
            chassis_config.recovery.bench_leg_length_m);
-    assert_zero_final_output();
+    assertZeroFinalOutput();
 }
 
-static void test_fallen_timeout(void)
+static void testFallenTimeout(void)
 {
     float left_phi0_rad;
 
-    chassis_control_init();
-    set_online_feedback();
+    Chassis_ControlInit();
+    setOnlineFeedback();
     chassis.imu.pitch_rad = 1.20f;
-    set_symmetric_leg_pose(0.30f, CHASSIS_HALF_PI);
+    setSymmetricLegPose(0.30f, CHASSIS_HALF_PI);
     chassis.mode = CHASSIS_MODE_SELF_SAVE;
-    chassis_control_update_state();
+    Chassis_ControlUpdateState();
     assert(chassis.state == CHASSIS_FALLEN);
 
     left_phi0_rad = chassis.leg[CHASSIS_LEFT].phi0_rad;
-    chassis_recovery_control_loop();
+    Chassis_RecoveryControlLoop();
     assert(chassis.state == CHASSIS_FALLEN);
     assert(fabsf(chassis.target_leg_length_m[CHASSIS_LEFT] -
                  chassis_config.recovery.extended_leg_length_m) <
            TEST_TOLERANCE);
     assert(chassis.target_leg_phi0_rad[CHASSIS_LEFT] < left_phi0_rad);
-    assert_zero_final_output();
+    assertZeroWheelRequest();
+    assertZeroFinalOutput();
 
     chassis.state_elapsed_s =
         chassis_config.recovery.fallen_timeout_s -
         chassis.control_dt_s * 0.5f;
-    chassis_recovery_control_loop();
+    Chassis_RecoveryControlLoop();
     assert(chassis.state == CHASSIS_ZERO_FORCE);
     assert(chassis.fault_flags == CHASSIS_FAULT_RECOVERY_TIMEOUT);
-    assert_zero_final_output();
+    assertZeroFinalOutput();
 
-    chassis_control_update_state();
+    Chassis_ControlUpdateState();
     assert(chassis.state == CHASSIS_ZERO_FORCE);
     assert(chassis.fault_flags == CHASSIS_FAULT_RECOVERY_TIMEOUT);
 }
 
-static void test_prepare_timeout(void)
+static void testPrepareTimeout(void)
 {
-    chassis_control_init();
-    set_online_feedback();
+    Chassis_ControlInit();
+    setOnlineFeedback();
     chassis.imu.pitch_rad = 0.0f;
-    set_symmetric_leg_pose(0.25f, CHASSIS_HALF_PI);
+    setSymmetricLegPose(0.25f, CHASSIS_HALF_PI);
     chassis.mode = CHASSIS_MODE_SELF_SAVE;
-    chassis_control_update_state();
+    Chassis_ControlUpdateState();
     assert(chassis.state == CHASSIS_FALLEN);
 
-    chassis_recovery_control_loop();
+    Chassis_RecoveryControlLoop();
     assert(chassis.state == CHASSIS_FALLING_TO_STAND);
+    assertZeroWheelRequest();
     chassis.state_elapsed_s =
         chassis_config.recovery.prepare_timeout_s -
         chassis.control_dt_s * 0.5f;
-    chassis_recovery_control_loop();
+    Chassis_RecoveryControlLoop();
     assert(chassis.state == CHASSIS_ZERO_FORCE);
     assert(chassis.fault_flags == CHASSIS_FAULT_RECOVERY_TIMEOUT);
-    assert_zero_final_output();
+    assertZeroFinalOutput();
 }
 
-static void test_invalid_leg_feedback(void)
+static void testInvalidLegFeedback(void)
 {
     uint8_t left_front_index;
     uint8_t left_back_index;
     uint8_t right_front_index;
     uint8_t right_back_index;
 
-    chassis_control_init();
-    set_online_feedback();
+    Chassis_ControlInit();
+    setOnlineFeedback();
     left_front_index = chassis_config.leg[CHASSIS_LEFT]
                            .joint[CHASSIS_JOINT_FRONT]
                            .motor_index;
@@ -243,51 +313,134 @@ static void test_invalid_leg_feedback(void)
     chassis.dm_motor[left_back_index].position_rad = 0.0f;
     chassis.dm_motor[right_front_index].position_rad = CHASSIS_PI;
     chassis.dm_motor[right_back_index].position_rad = 0.0f;
-    chassis_control_update_leg_state();
+    Chassis_ControlUpdateLegState();
     assert(chassis.leg_state_valid == 0U);
 
     chassis.mode = CHASSIS_MODE_BENCH;
-    chassis_control_update_state();
+    Chassis_ControlUpdateState();
     assert(chassis.state == CHASSIS_BENCH);
-    chassis_bench_control_loop();
+    Chassis_BenchControlLoop();
     assert(chassis.state == CHASSIS_ZERO_FORCE);
     assert(chassis.fault_flags == CHASSIS_FAULT_KINEMATICS);
-    assert_zero_final_output();
+    assertZeroFinalOutput();
 }
 
-static void test_standing_fault_latches_zero_force(void)
+static void testOutputFaultsKeepCalculation(void)
 {
     uint8_t left_front_index;
+    uint32_t output_faults;
 
-    chassis_control_init();
-    set_online_feedback();
-    set_symmetric_leg_pose(0.25f, CHASSIS_HALF_PI);
-    chassis.mode = CHASSIS_MODE_FOLLOW;
-    chassis_control_update_state();
-    assert(chassis.state == CHASSIS_STANDING);
-
+    Chassis_ControlInit();
+    setOnlineFeedback();
+    chassis.imu.pitch_rad = 0.05f;
+    chassis.imu.yaw_total_rad = 0.70f;
+    setSymmetricLegPose(0.25f, CHASSIS_HALF_PI);
     left_front_index = chassis_config.leg[CHASSIS_LEFT]
                            .joint[CHASSIS_JOINT_FRONT]
                            .motor_index;
+    chassis.enabled = 0U;
+    chassis.imu.initialized = 0U;
+    chassis.imu.attitude_ready = 0U;
+    chassis.imu.error_code = 1U;
     chassis.dm_motor[left_front_index].online = 0U;
-    chassis_control_update_state();
-    assert(chassis.state == CHASSIS_ZERO_FORCE);
-    assert((chassis.fault_flags & CHASSIS_FAULT_DM_MOTOR) != 0U);
-    assert_zero_final_output();
+    chassis.wheel_motor[CHASSIS_LEFT].online = 0U;
+    chassis.can_tx_error_count = APP_CAN_TX_ERROR_MAX + 1U;
+    chassis.mode = CHASSIS_MODE_FOLLOW;
+    Chassis_ControlUpdateState();
+    assert(chassis.state == CHASSIS_STANDING);
 
+    Chassis_ControlLoop();
+    output_faults = CHASSIS_FAULT_DISABLED |
+                    CHASSIS_FAULT_IMU |
+                    CHASSIS_FAULT_DM_MOTOR |
+                    CHASSIS_FAULT_DJI_MOTOR |
+                    CHASSIS_FAULT_CAN;
+    assert((chassis.fault_flags & output_faults) == output_faults);
+    assert(chassis.state_valid == 1U);
+    assert(fabsf(chassis.leg[CHASSIS_LEFT].length_m - 0.25f) <
+           TEST_TOLERANCE);
+    assert(fabsf(chassis.lqr_state[CHASSIS_STATE_THETA_B] - 0.05f) <
+           TEST_TOLERANCE);
+    assertControlRequestsCalculated();
+    assertZeroFinalOutput();
+
+    chassis.leg_length_pid[CHASSIS_LEFT].integral = 1.0f;
+    chassis.roll_pid.integral = 2.0f;
+    chassis.joint_angle_pid[left_front_index].integral = 3.0f;
+    chassis.speed_kalman.state[0] = 4.0f;
+    chassis.forward_position_m = 5.0f;
+    chassis.imu.yaw_total_rad = 0.90f;
+    chassis.enabled = 1U;
+    chassis.imu.initialized = 1U;
+    chassis.imu.attitude_ready = 1U;
+    chassis.imu.error_code = 0U;
     chassis.dm_motor[left_front_index].online = 1U;
-    chassis_control_update_state();
-    assert(chassis.state == CHASSIS_ZERO_FORCE);
-    assert((chassis.fault_flags & CHASSIS_FAULT_DM_MOTOR) != 0U);
+    chassis.wheel_motor[CHASSIS_LEFT].online = 1U;
+    chassis.can_tx_error_count = 0U;
+    Chassis_ControlUpdateState();
+    assert(chassis.state == CHASSIS_STANDING);
+    assert(chassis.fault_flags == CHASSIS_FAULT_NONE);
+    assert(chassis.leg_length_pid[CHASSIS_LEFT].integral == 0.0f);
+    assert(chassis.roll_pid.integral == 0.0f);
+    assert(chassis.joint_angle_pid[left_front_index].integral == 0.0f);
+    assert(chassis.speed_kalman.state[0] == 0.0f);
+    assert(chassis.forward_position_m == 0.0f);
+    assert(fabsf(chassis.target_state[CHASSIS_STATE_FAI] - 0.90f) <
+           TEST_TOLERANCE);
+
+    Chassis_ControlLoop();
+    assert(chassis.state_valid == 1U);
+    assert(chassis.fault_flags == CHASSIS_FAULT_NONE);
+    assertControlRequestsCalculated();
+    assertZeroFinalOutput();
+}
+
+static void testContinuousPhi0AndYaw(void)
+{
+    float previous_phi0_total_rad;
+    uint32_t side;
+
+    Chassis_ControlInit();
+    setOnlineFeedback();
+    setSymmetricLegPose(0.25f, CHASSIS_PI - 0.02f);
+    previous_phi0_total_rad =
+        chassis.leg[CHASSIS_LEFT].phi0_total_rad;
+    setSymmetricLegPose(0.25f, -CHASSIS_PI + 0.03f);
+    assert(chassis.leg[CHASSIS_LEFT].phi0_rad < 0.0f);
+    assert(chassis.leg[CHASSIS_LEFT].phi0_total_rad > CHASSIS_PI);
+    assert(fabsf(chassis.leg[CHASSIS_LEFT].phi0_total_rad -
+                  previous_phi0_total_rad - 0.05f) < TEST_TOLERANCE);
+
+    chassis.imu.yaw_rad = -CHASSIS_PI + 0.04f;
+    chassis.imu.yaw_total_rad = CHASSIS_PI + 0.04f;
+    chassis.mode = CHASSIS_MODE_BENCH;
+    Chassis_ControlUpdateState();
+    assert(chassis.state == CHASSIS_BENCH);
+    assert(fabsf(chassis.target_state[CHASSIS_STATE_FAI] -
+                  (CHASSIS_PI + 0.04f)) < TEST_TOLERANCE);
+    Chassis_BenchControlLoop();
+    assert(fabsf(chassis.lqr_state[CHASSIS_STATE_FAI] -
+                  (CHASSIS_PI + 0.04f)) < TEST_TOLERANCE);
+
+    for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+    {
+        chassis.leg[side].phi0_total_rad += 2.0f * CHASSIS_PI;
+    }
+    Chassis_ControlLoop();
+    assert(chassis.lqr_state[CHASSIS_STATE_THETA_L] >= -CHASSIS_PI);
+    assert(chassis.lqr_state[CHASSIS_STATE_THETA_L] < CHASSIS_PI);
+    assert(chassis.lqr_state[CHASSIS_STATE_THETA_R] >= -CHASSIS_PI);
+    assert(chassis.lqr_state[CHASSIS_STATE_THETA_R] < CHASSIS_PI);
 }
 
 int main(void)
 {
-    test_bench_control();
-    test_recovery_handoff();
-    test_fallen_timeout();
-    test_prepare_timeout();
-    test_invalid_leg_feedback();
-    test_standing_fault_latches_zero_force();
+    testBenchControl();
+    testRecoveryHandoff();
+    testFallenTimeout();
+    testPrepareTimeout();
+    testInvalidLegFeedback();
+    testOutputFaultsKeepCalculation();
+    testContinuousPhi0AndYaw();
     return 0;
 }

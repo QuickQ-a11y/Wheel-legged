@@ -104,7 +104,7 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_THREADS */
   CAN_Task_Init();
-  chassis_task_init();
+  Chassis_Task_Init();
   IMU_Task_Init();
   USB_Task_Init();
   /* USER CODE END RTOS_THREADS */

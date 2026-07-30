@@ -10,17 +10,17 @@ extern "C" {
 /**
  * @brief 初始化底盘控制状态并创建底盘任务。
  */
-void chassis_task_init(void);
+void Chassis_Task_Init(void);
 
 /**
- * @brief 设置底盘使能，未使能时持续输出零力矩和零电流。
+ * @brief 设置底盘非零输出许可，关闭时仍允许执行控制计算。
  */
-void chassis_set_enable(uint8_t enable);
+void Chassis_SetOutputEnable(uint8_t enable);
 
 /**
  * @brief 设置底盘外层模式，由任务主循环转换为控制状态。
  */
-void chassis_set_mode(chassis_mode_t mode);
+void Chassis_SetMode(chassis_mode_t mode);
 
 #ifdef __cplusplus
 }

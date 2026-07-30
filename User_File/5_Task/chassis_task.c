@@ -20,7 +20,7 @@ static const osThreadAttr_t chassis_task_attributes = {
 /**
  * @brief 从 IMU、DM、DJI 和 CAN 任务读取本轮底盘反馈。
  */
-static void chassis_feedback_update(void)
+static void Chassis_FeedbackUpdate(void)
 {
     task_imu_state_t imu_state = {0};
     uint32_t now_tick = HAL_GetTick();
@@ -33,6 +33,7 @@ static void chassis_feedback_update(void)
     chassis.imu.roll_rad = imu_state.rollRad;
     chassis.imu.pitch_rad = imu_state.pitchRad;
     chassis.imu.yaw_rad = imu_state.yawRad;
+    chassis.imu.yaw_total_rad = imu_state.yawTotalRad;
     memcpy(chassis.imu.gyro_radps,
            imu_state.filteredGyroRadps,
            sizeof(chassis.imu.gyro_radps));
@@ -66,13 +67,19 @@ static void chassis_feedback_update(void)
 /**
  * @brief 将底盘最终命令写入 DM 设备层和 DJI CAN 发送缓存。
  */
-static void chassis_cmd_send(void)
+static void Chassis_CommandSend(void)
 {
     uint32_t index;
 
     Motor_DM_SetSafe(chassis.safe_output);
     if (chassis.safe_output != 0U)
     {
+        memset(chassis.joint_torque_nm,
+               0,
+               sizeof(chassis.joint_torque_nm));
+        memset(chassis.wheel_current,
+               0,
+               sizeof(chassis.wheel_current));
         Motor_DM_ZeroAll();
     }
 
@@ -90,7 +97,7 @@ static void chassis_cmd_send(void)
     CAN_Task_RequestTx();
 }
 
-static void chassis_task(void *argument)
+static void Chassis_TaskEntry(void *argument)
 {
     const float tick_sec = 1.0f / (float)osKernelGetTickFreq();
     uint32_t control_last_tick = 0U;
@@ -99,7 +106,13 @@ static void chassis_task(void *argument)
     (void)argument;
 
     Motor_DM_Init();
-    Motor_DM_SetEnable(0U);
+    Motor_DM_SetSafe(1U);
+    Motor_DM_ZeroAll();
+    /*
+     * DM 必须进入协议使能状态才会持续反馈。协议使能后仍由 safe 和
+     * 底盘最终输出数组双重保证零力矩，不等同于开放底盘动力输出。
+     */
+    Motor_DM_SetEnable(1U);
 
     for (;;)
     {
@@ -123,32 +136,32 @@ static void chassis_task(void *argument)
         control_last_tick = control_tick;
 
         /* 反馈 -> 状态选择 -> 控制 -> 电机命令，保持单向数据流。 */
-        chassis_feedback_update();
-        chassis_control_update_leg_state();
-        chassis_control_update_state();
+        Chassis_FeedbackUpdate();
+        Chassis_ControlUpdateLegState();
+        Chassis_ControlUpdateState();
 
         switch (chassis.state)
         {
         case CHASSIS_STANDING:
-            chassis_control_loop();
+            Chassis_ControlLoop();
             break;
 
         case CHASSIS_FALLEN:
         case CHASSIS_FALLING_TO_STAND:
-            chassis_recovery_control_loop();
+            Chassis_RecoveryControlLoop();
             break;
 
         case CHASSIS_BENCH:
-            chassis_bench_control_loop();
+            Chassis_BenchControlLoop();
             break;
 
         case CHASSIS_ZERO_FORCE:
         default:
-            chassis_zero_output();
+            Chassis_ZeroOutput();
             break;
         }
 
-        chassis_cmd_send();
+        Chassis_CommandSend();
 
         wake_tick += APP_CTRL_TICKS;
         if ((int32_t)(osKernelGetTickCount() - wake_tick) >= 0)
@@ -159,19 +172,18 @@ static void chassis_task(void *argument)
     }
 }
 
-void chassis_task_init(void)
+void Chassis_Task_Init(void)
 {
-    chassis_control_init();
-    (void)osThreadNew(chassis_task, NULL, &chassis_task_attributes);
+    Chassis_ControlInit();
+    (void)osThreadNew(Chassis_TaskEntry, NULL, &chassis_task_attributes);
 }
 
-void chassis_set_enable(uint8_t enable)
+void Chassis_SetOutputEnable(uint8_t enable)
 {
     chassis.enabled = (enable != 0U) ? 1U : 0U;
-    Motor_DM_SetEnable(chassis.enabled);
 }
 
-void chassis_set_mode(chassis_mode_t mode)
+void Chassis_SetMode(chassis_mode_t mode)
 {
     if (mode <= CHASSIS_MODE_BENCH)
     {
