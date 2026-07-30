@@ -15,7 +15,6 @@ const chassis_config_t chassis_config = {
                 .link3_m = 0.258f,
                 .link4_m = 0.215f,
                 .frame_joint_distance_m = 0.0f,
-                .min_leg_length_m = 0.05f,
             },
             .joint = {
                 [CHASSIS_JOINT_FRONT] = {
@@ -40,7 +39,6 @@ const chassis_config_t chassis_config = {
                 .link3_m = 0.258f,
                 .link4_m = 0.215f,
                 .frame_joint_distance_m = 0.0f,
-                .min_leg_length_m = 0.05f,
             },
             .joint = {
                 [CHASSIS_JOINT_FRONT] = {

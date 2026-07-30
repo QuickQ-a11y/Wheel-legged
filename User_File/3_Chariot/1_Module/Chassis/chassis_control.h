@@ -18,7 +18,7 @@ extern "C" {
 #define CHASSIS_FAULT_DJI_MOTOR 0x00000008UL      /* 至少一个轮电机离线。 */
 #define CHASSIS_FAULT_CAN 0x00000010UL            /* CAN发送错误超过阈值。 */
 #define CHASSIS_FAULT_CONTROL 0x00000020UL        /* 姿态、配置或计算保护。 */
-#define CHASSIS_FAULT_KINEMATICS 0x00000040UL     /* 五连杆正逆解无效。 */
+#define CHASSIS_FAULT_KINEMATICS 0x00000040UL     /* 五连杆状态、逆解或力映射无效。 */
 #define CHASSIS_FAULT_RECOVERY_TIMEOUT 0x00000080UL /* 恢复动作阶段超时。 */
 
 /* 外部请求模式：表示操作者想让底盘执行的行为。 */
@@ -86,7 +86,6 @@ typedef struct
 
     /* 五连杆、十维状态、LQR增益和运动融合中间量。 */
     chassis_vmc_state_t leg[CHASSIS_LEG_COUNT];
-    uint8_t leg_state_valid;       /* 左右腿正运动学和速度解算均有效。 */
     float lqr_state[CHASSIS_STATE_COUNT];
     float target_state[CHASSIS_STATE_COUNT];
     float lqr_k[CHASSIS_OUTPUT_COUNT][CHASSIS_STATE_COUNT];
@@ -118,7 +117,7 @@ typedef struct
     uint32_t fault_flags;
     uint8_t k_fit_enabled;
     uint8_t k_length_limited;
-    uint8_t state_valid;           /* 本轮控制计算完整，不代表设备均在线。 */
+    uint8_t state_valid;           /* 本轮控制链已执行到末端，不代表输出已放行。 */
 
     /* 需要跨控制周期保存的滤波器和PID状态。 */
     algorithm_kalman_t speed_kalman;

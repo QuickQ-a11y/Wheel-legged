@@ -8,10 +8,10 @@
 #include <string.h>
 
 #define CHASSIS_RPM_TO_RADPS 0.10471975512f
-#define CHASSIS_CONTROL_EPSILON 1.0e-6f
 #define CHASSIS_OUTPUT_FAULT_MASK                                         \
     (CHASSIS_FAULT_DISABLED | CHASSIS_FAULT_IMU |                       \
-     CHASSIS_FAULT_DM_MOTOR | CHASSIS_FAULT_DJI_MOTOR | CHASSIS_FAULT_CAN)
+     CHASSIS_FAULT_DM_MOTOR | CHASSIS_FAULT_DJI_MOTOR | CHASSIS_FAULT_CAN | \
+     CHASSIS_FAULT_KINEMATICS)
 
 chassis_t chassis;
 
@@ -20,7 +20,8 @@ static float Chassis_LimitSymmetric(float value, float limit)
 {
     float positive_limit = fabsf(limit);
 
-    if (positive_limit <= 0.0f)
+    if ((!isfinite(value)) || (!isfinite(positive_limit)) ||
+        (positive_limit <= 0.0f))
     {
         return 0.0f;
     }
@@ -84,6 +85,13 @@ static uint8_t Chassis_GetJointIndices(
         }
     }
     return 1U;
+}
+
+/** @brief 判断左右腿本轮位置和速度解算是否都具有数学定义。 */
+static uint8_t Chassis_AreLegStatesValid(void)
+{
+    return ((chassis.leg[CHASSIS_LEFT].valid != 0U) &&
+            (chassis.leg[CHASSIS_RIGHT].valid != 0U)) ? 1U : 0U;
 }
 
 /**
@@ -208,7 +216,7 @@ static void Chassis_EnterState(chassis_control_state_t state)
         for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
         {
             chassis.target_leg_length_m[side] =
-                (chassis.leg_state_valid != 0U) ?
+                (Chassis_AreLegStatesValid() != 0U) ?
                     chassis.leg[side].length_m :
                     chassis_config.leg[side].target_leg_length_m;
         }
@@ -298,26 +306,26 @@ void Chassis_ControlInit(void)
 /**
  * @brief 使用任务层保存的四个DM反馈更新左右腿五连杆状态。
  *
- * 本函数不检查电机online标志，离线调试时仍使用最后一次反馈计算；
- * 只有几何无效时才令leg_state_valid为0。
+ * 本函数不检查电机online标志，离线调试时仍使用最后一次反馈计算。
+ * 左右腿分别提交本轮已经定义的中间量，valid只描述数学完整性。
  */
 void Chassis_ControlUpdateLegState(void)
 {
     uint8_t indices[CHASSIS_LEG_COUNT][CHASSIS_JOINT_COUNT];
     chassis_vmc_state_t next_leg[CHASSIS_LEG_COUNT] = {0};
     chassis_vmc_state_t previous_leg[CHASSIS_LEG_COUNT];
-    uint8_t previous_state_valid = chassis.leg_state_valid;
     uint32_t side;
 
-    /* 先保留上周期连续腿角，全部新状态有效后再整体提交。 */
+    /* 连续腿角属于跨周期状态；瞬时几何量始终使用本周期反馈重算。 */
     memcpy(previous_leg, chassis.leg, sizeof(previous_leg));
-    chassis.leg_state_valid = 0U;
     if (Chassis_GetJointIndices(indices) == 0U)
     {
+        chassis.leg[CHASSIS_LEFT].valid = 0U;
+        chassis.leg[CHASSIS_RIGHT].valid = 0U;
         return;
     }
 
-    /* 左右腿必须同时有效，避免十维状态混用不同时刻的腿部数据。 */
+    /* 每条腿独立提交，便于Watch区分是哪一侧的数学计算不完整。 */
     for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
     {
         VMC_CalcState(&chassis_config.leg[side],
@@ -330,37 +338,41 @@ void Chassis_ControlUpdateLegState(void)
                         chassis.dm_motor[indices[side][CHASSIS_JOINT_BACK]]
                             .speed_radps,
                         &next_leg[side]);
-        if ((next_leg[side].length_m <=
-              chassis_config.leg[side].geometry.min_leg_length_m) ||
-            (!isfinite(next_leg[side].length_m)) ||
-            (!isfinite(next_leg[side].phi0_rad)))
+        if ((next_leg[side].length_m > 0.0f) &&
+            isfinite(next_leg[side].phi0_rad))
         {
-            return;
+            if (isfinite(previous_leg[side].phi0_total_rad))
+            {
+                /* phi0主值跨过+-pi时选择距离上一有效角最近的等价角。 */
+                next_leg[side].phi0_total_rad =
+                    Algorithm_AngleNearestEquivalentRad(
+                        next_leg[side].phi0_rad,
+                        previous_leg[side].phi0_total_rad);
+            }
         }
-        if (previous_state_valid != 0U)
+        else
         {
-            /* phi0主值跨过+-pi时选择距离上一周期最近的等价角。 */
+            /* 当前phi0无定义时保留上次连续角，避免恢复后丢失圈数。 */
             next_leg[side].phi0_total_rad =
-                Algorithm_AngleNearestEquivalentRad(
-                    next_leg[side].phi0_rad,
-                    previous_leg[side].phi0_total_rad);
+                previous_leg[side].phi0_total_rad;
         }
+        chassis.leg[side] = next_leg[side];
     }
-    memcpy(chassis.leg, next_leg, sizeof(chassis.leg));
-    chassis.leg_state_valid = 1U;
 }
 
 /**
  * @brief 把外部mode转换成内部state，并维护输出故障和站立保护。
  *
- * 该函数只选择本周期应执行的控制流程，不计算VMC、PID或LQR。输出
- * 故障只记录到fault_flags；几何无效和姿态越界才会切入零力状态。
+ * 该函数只选择本周期应执行的控制流程，不计算VMC、PID或LQR。设备
+ * 和数学故障只封锁最终输出；姿态越界仍会切入零力状态。
  */
 void Chassis_ControlUpdateState(void)
 {
     float body_pitch_rad;
     uint8_t posture_ready;
+    uint8_t leg_states_valid;
     uint32_t output_faults;
+    uint32_t active_faults;
     uint32_t previous_output_faults;
 
     /* 1. 外部主动零力具有最高优先级，不进入任何闭环控制。 */
@@ -375,11 +387,17 @@ void Chassis_ControlUpdateState(void)
     /* 2. 更新输出故障，并在故障全部清除的边沿重置动态控制状态。 */
     body_pitch_rad = chassis.imu.pitch_rad *
                      chassis_config.imu.pitch_angle_scale;
+    leg_states_valid = Chassis_AreLegStatesValid();
+    output_faults = Chassis_GetOutputFaults();
+    active_faults = output_faults;
+    if (leg_states_valid == 0U)
+    {
+        active_faults |= CHASSIS_FAULT_KINEMATICS;
+    }
     previous_output_faults =
         chassis.fault_flags & CHASSIS_OUTPUT_FAULT_MASK;
-    output_faults = Chassis_GetOutputFaults();
     if ((previous_output_faults != CHASSIS_FAULT_NONE) &&
-        (output_faults == CHASSIS_FAULT_NONE))
+        (active_faults == CHASSIS_FAULT_NONE))
     {
         /*
          * 输出重新放行前丢弃故障期间由陈旧反馈积累的动态状态，首个
@@ -395,7 +413,7 @@ void Chassis_ControlUpdateState(void)
      * 左右腿正解有效、pitch较小且两条虚拟腿都位于准备角区间。
      */
     posture_ready =
-        ((chassis.leg_state_valid != 0U) &&
+        ((leg_states_valid != 0U) &&
          (fabsf(body_pitch_rad) <=
           chassis_config.recovery.direct_prepare_pitch_rad) &&
          (Chassis_IsAngleInIntervalRad(
@@ -410,29 +428,22 @@ void Chassis_ControlUpdateState(void)
     /* 4. 仅在外部模式变化时选择入口状态，避免每周期重复初始化。 */
     if (chassis.mode != chassis.last_mode)
     {
-        chassis.fault_flags = output_faults;
+        chassis.fault_flags = active_faults;
         switch (chassis.mode)
         {
         case CHASSIS_MODE_FOLLOW:
         case CHASSIS_MODE_TOP:
             if (chassis.state != CHASSIS_STANDING)
             {
-                if (posture_ready != 0U)
+                if ((posture_ready != 0U) || (leg_states_valid == 0U))
                 {
+                    /* 数学无效时仍进入站立计算链，但最终输出保持封锁。 */
                     Chassis_EnterState(CHASSIS_STANDING);
                 }
                 else
                 {
-                    if (chassis.leg_state_valid == 0U)
-                    {
-                        chassis.fault_flags =
-                            output_faults | CHASSIS_FAULT_KINEMATICS;
-                    }
-                    else
-                    {
-                        chassis.fault_flags =
-                            output_faults | CHASSIS_FAULT_CONTROL;
-                    }
+                    chassis.fault_flags =
+                        output_faults | CHASSIS_FAULT_CONTROL;
                     Chassis_EnterState(CHASSIS_ZERO_FORCE);
                 }
             }
@@ -454,17 +465,9 @@ void Chassis_ControlUpdateState(void)
         chassis.last_mode = chassis.mode;
     }
 
-    /* 5. 站立期间几何失效属于计算故障，立即进入主动零命令状态。 */
+    /* 5. 数学有效时才用当前腿角执行站立姿态保护。 */
     if ((chassis.state == CHASSIS_STANDING) &&
-        (chassis.leg_state_valid == 0U))
-    {
-        chassis.fault_flags = output_faults | CHASSIS_FAULT_KINEMATICS;
-        Chassis_EnterState(CHASSIS_ZERO_FORCE);
-        return;
-    }
-
-    /* 6. pitch或任一腿角越过站立保护区间时停止站立闭环。 */
-    if ((chassis.state == CHASSIS_STANDING) &&
+        (leg_states_valid != 0U) &&
         ((fabsf(body_pitch_rad) >
           chassis_config.recovery.standing_pitch_limit_rad) ||
           (Chassis_IsAngleInIntervalRad(
@@ -480,10 +483,10 @@ void Chassis_ControlUpdateState(void)
         Chassis_EnterState(CHASSIS_ZERO_FORCE);
     }
 
-    /* 活动状态保留输出故障，供末端输出门和Watch共同使用。 */
+    /* 活动状态保留设备和数学故障，供末端输出门和Watch共同使用。 */
     if (chassis.state != CHASSIS_ZERO_FORCE)
     {
-        chassis.fault_flags = output_faults;
+        chassis.fault_flags = active_faults;
     }
 }
 
@@ -504,7 +507,9 @@ static uint8_t Chassis_JointPositionControl(uint8_t wheel_output_enabled)
     float output_limit_nm;
     float dt_s = chassis.control_dt_s;
     uint8_t joint_output_enabled;
+    uint8_t leg_states_valid;
     uint32_t output_faults;
+    uint32_t active_faults;
     uint32_t side;
     uint32_t joint;
 
@@ -521,9 +526,15 @@ static uint8_t Chassis_JointPositionControl(uint8_t wheel_output_enabled)
 
     /* 2. 输出故障只参与末端许可，当前串级控制仍继续计算请求量。 */
     output_faults = Chassis_GetOutputFaults();
-    chassis.fault_flags = output_faults | CHASSIS_FAULT_CONTROL;
-    if ((chassis.leg_state_valid == 0U) ||
-        (Chassis_GetJointIndices(indices) == 0U))
+    leg_states_valid = Chassis_AreLegStatesValid();
+    active_faults = output_faults;
+    if (leg_states_valid == 0U)
+    {
+        active_faults |= CHASSIS_FAULT_KINEMATICS;
+        wheel_output_enabled = 0U;
+    }
+    chassis.fault_flags = active_faults | CHASSIS_FAULT_CONTROL;
+    if (Chassis_GetJointIndices(indices) == 0U)
     {
         chassis.fault_flags = output_faults | CHASSIS_FAULT_KINEMATICS;
         return 0U;
@@ -572,6 +583,10 @@ static uint8_t Chassis_JointPositionControl(uint8_t wheel_output_enabled)
             feedback_speed_radps =
                 chassis_config.leg[side].joint[joint].angle_scale *
                 chassis.dm_motor[motor_index].speed_radps;
+            if (!isfinite(feedback_speed_radps))
+            {
+                feedback_speed_radps = 0.0f;
+            }
             target_speed_radps = 0.0f;
             Algorithm_PID_UpdateByFeedbackRate(
                 &chassis_config.recovery.joint_angle_pid,
@@ -603,7 +618,7 @@ static uint8_t Chassis_JointPositionControl(uint8_t wheel_output_enabled)
 
     /* 5. 仅在全部输出条件满足时，把调试请求复制到最终命令。 */
     joint_output_enabled =
-        ((output_faults == CHASSIS_FAULT_NONE) &&
+        ((active_faults == CHASSIS_FAULT_NONE) &&
          (APP_CHASSIS_OUTPUT_ENABLE != 0U) &&
          (chassis_config.output.joint_enabled != 0U) &&
          (chassis_config.output.joint_torque_limit_nm > 0.0f) &&
@@ -623,7 +638,7 @@ static uint8_t Chassis_JointPositionControl(uint8_t wheel_output_enabled)
         }
     }
 
-    chassis.fault_flags = output_faults;
+    chassis.fault_flags = active_faults;
     chassis.safe_output =
         ((joint_output_enabled == 0U) && (wheel_output_enabled == 0U)) ? 1U : 0U;
     chassis.state_valid = 1U;
@@ -647,6 +662,7 @@ void Chassis_RecoveryControlLoop(void)
     uint8_t right_theta_ready;
     uint8_t direct_prepare;
     uint8_t prepare_ready;
+    uint8_t leg_states_valid;
     float dt_s = chassis.control_dt_s;
 
     memset(chassis.wheel_current, 0, sizeof(chassis.wheel_current));
@@ -667,11 +683,17 @@ void Chassis_RecoveryControlLoop(void)
         Chassis_ZeroOutput();
         return;
     }
-    if (chassis.leg_state_valid == 0U)
+    leg_states_valid = Chassis_AreLegStatesValid();
+    if (leg_states_valid == 0U)
     {
-        Chassis_ZeroOutput();
-        chassis.fault_flags = CHASSIS_FAULT_KINEMATICS;
-        Chassis_EnterState(CHASSIS_ZERO_FORCE);
+        /*
+         * 当前腿姿态不足以推进恢复阶段时冻结计时和跳转，但仍运行已有
+         * 目标下的关节串级控制，保留可定义请求量供Watch观察。
+         */
+        if (Chassis_JointPositionControl(0U) == 0U)
+        {
+            Chassis_EnterState(CHASSIS_ZERO_FORCE);
+        }
         return;
     }
 
@@ -917,7 +939,11 @@ void Chassis_ControlLoop(void)
     uint8_t joint_output_enabled;
     uint8_t wheel_output_enabled;
     uint8_t wheel_request_valid;
+    uint8_t leg_states_valid;
+    uint8_t left_torque_valid;
+    uint8_t right_torque_valid;
     uint32_t output_faults;
+    uint32_t active_faults;
 
     memset(chassis.joint_torque_nm, 0, sizeof(chassis.joint_torque_nm));
     memset(chassis.wheel_current, 0, sizeof(chassis.wheel_current));
@@ -935,7 +961,13 @@ void Chassis_ControlLoop(void)
 
     /* 1. 输出故障只封锁最终命令，中间控制量继续使用最新反馈计算。 */
     output_faults = Chassis_GetOutputFaults();
-    chassis.fault_flags = output_faults | CHASSIS_FAULT_CONTROL;
+    leg_states_valid = Chassis_AreLegStatesValid();
+    active_faults = output_faults;
+    if (leg_states_valid == 0U)
+    {
+        active_faults |= CHASSIS_FAULT_KINEMATICS;
+    }
+    chassis.fault_flags = active_faults | CHASSIS_FAULT_CONTROL;
 
     /* 配置边界属于实机安全底线，运行期不再封装额外的状态查询函数。 */
     if ((chassis_config.imu.pitch_rate_axis >= APP_IMU_AXIS_COUNT) ||
@@ -946,12 +978,10 @@ void Chassis_ControlLoop(void)
         (chassis_config.leg[CHASSIS_LEFT].geometry.link2_m <= 0.0f) ||
         (chassis_config.leg[CHASSIS_LEFT].geometry.link3_m <= 0.0f) ||
         (chassis_config.leg[CHASSIS_LEFT].geometry.link4_m <= 0.0f) ||
-        (chassis_config.leg[CHASSIS_LEFT].geometry.min_leg_length_m <= 0.0f) ||
         (chassis_config.leg[CHASSIS_RIGHT].geometry.link1_m <= 0.0f) ||
         (chassis_config.leg[CHASSIS_RIGHT].geometry.link2_m <= 0.0f) ||
         (chassis_config.leg[CHASSIS_RIGHT].geometry.link3_m <= 0.0f) ||
-        (chassis_config.leg[CHASSIS_RIGHT].geometry.link4_m <= 0.0f) ||
-        (chassis_config.leg[CHASSIS_RIGHT].geometry.min_leg_length_m <= 0.0f))
+        (chassis_config.leg[CHASSIS_RIGHT].geometry.link4_m <= 0.0f))
     {
         return;
     }
@@ -986,13 +1016,6 @@ void Chassis_ControlLoop(void)
           ((chassis_config.lqr.fixed_left_length_m <= 0.0f) ||
            (chassis_config.lqr.fixed_right_length_m <= 0.0f)))))
     {
-        return;
-    }
-
-    /* 2. 任务反馈阶段已统一更新五连杆状态，所有控制模式共用同一份结果。 */
-    if (chassis.leg_state_valid == 0U)
-    {
-        chassis.fault_flags = output_faults | CHASSIS_FAULT_KINEMATICS;
         return;
     }
 
@@ -1304,7 +1327,7 @@ void Chassis_ControlLoop(void)
          (chassis_config.wheel.torque_to_current != 0.0f) &&
          (chassis_config.wheel.current_limit > 0)) ? 1U : 0U;
     wheel_output_enabled =
-        ((output_faults == CHASSIS_FAULT_NONE) &&
+        ((active_faults == CHASSIS_FAULT_NONE) &&
          (APP_CHASSIS_OUTPUT_ENABLE != 0U) &&
          (chassis_config.output.wheel_enabled != 0U) &&
          (wheel_request_valid != 0U)) ? 1U : 0U;
@@ -1339,26 +1362,23 @@ void Chassis_ControlLoop(void)
     }
 
     /* 6. 左右腿支撑力和摆力矩经 VMC 映射为四个 DM 关节力矩。 */
-    if ((fabsf(chassis.leg[CHASSIS_LEFT].length_m) <= CHASSIS_CONTROL_EPSILON) ||
-        (fabsf(chassis.leg[CHASSIS_RIGHT].length_m) <= CHASSIS_CONTROL_EPSILON) ||
-        (fabsf(sinf(chassis.leg[CHASSIS_LEFT].phi2_rad -
-                    chassis.leg[CHASSIS_LEFT].phi3_rad)) <= CHASSIS_CONTROL_EPSILON) ||
-        (fabsf(sinf(chassis.leg[CHASSIS_RIGHT].phi2_rad -
-                    chassis.leg[CHASSIS_RIGHT].phi3_rad)) <= CHASSIS_CONTROL_EPSILON))
+    left_torque_valid =
+        VMC_CalcTorque(&chassis_config.leg[CHASSIS_LEFT],
+                       &chassis.leg[CHASSIS_LEFT],
+                       chassis.support_force_n[CHASSIS_LEFT],
+                       chassis.lqr_output[CHASSIS_OUTPUT_LEFT_LEG],
+                       &left_torque);
+    right_torque_valid =
+        VMC_CalcTorque(&chassis_config.leg[CHASSIS_RIGHT],
+                       &chassis.leg[CHASSIS_RIGHT],
+                       chassis.support_force_n[CHASSIS_RIGHT],
+                       chassis.lqr_output[CHASSIS_OUTPUT_RIGHT_LEG],
+                       &right_torque);
+    if ((left_torque_valid == 0U) || (right_torque_valid == 0U))
     {
-        return;
+        active_faults |= CHASSIS_FAULT_KINEMATICS;
+        wheel_output_enabled = 0U;
     }
-
-    VMC_CalcTorque(&chassis_config.leg[CHASSIS_LEFT],
-                    &chassis.leg[CHASSIS_LEFT],
-                    chassis.support_force_n[CHASSIS_LEFT],
-                    chassis.lqr_output[CHASSIS_OUTPUT_LEFT_LEG],
-                    &left_torque);
-    VMC_CalcTorque(&chassis_config.leg[CHASSIS_RIGHT],
-                    &chassis.leg[CHASSIS_RIGHT],
-                    chassis.support_force_n[CHASSIS_RIGHT],
-                    chassis.lqr_output[CHASSIS_OUTPUT_RIGHT_LEG],
-                    &right_torque);
 
     chassis.joint_torque_request_nm[left_front_index] =
         left_torque.front_nm;
@@ -1371,7 +1391,7 @@ void Chassis_ControlLoop(void)
 
     /* 7. 物理力矩经方向和限幅后写入任务层实际发送的关节命令。 */
     joint_output_enabled =
-        ((output_faults == CHASSIS_FAULT_NONE) &&
+        ((active_faults == CHASSIS_FAULT_NONE) &&
          (APP_CHASSIS_OUTPUT_ENABLE != 0U) &&
          (chassis_config.output.joint_enabled != 0U) &&
          (chassis_config.output.joint_torque_limit_nm > 0.0f)) ? 1U : 0U;
@@ -1397,7 +1417,7 @@ void Chassis_ControlLoop(void)
                sizeof(chassis.wheel_current));
     }
 
-    chassis.fault_flags = output_faults;
+    chassis.fault_flags = active_faults;
     chassis.safe_output =
         ((joint_output_enabled == 0U) && (wheel_output_enabled == 0U)) ? 1U : 0U;
     chassis.state_valid = 1U;

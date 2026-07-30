@@ -54,7 +54,7 @@ typedef enum
     CHASSIS_OUTPUT_RIGHT_LEG,
 } chassis_output_index_t;
 
-/** @brief 单侧五连杆的机械尺寸和最小有效虚拟腿长。 */
+/** @brief 单侧五连杆的机械尺寸。 */
 typedef struct
 {
     float link1_m;                    /* 前主动杆长度，单位 m。 */
@@ -62,7 +62,6 @@ typedef struct
     float link3_m;                    /* 后从动杆长度，单位 m。 */
     float link4_m;                    /* 后主动杆长度，单位 m。 */
     float frame_joint_distance_m;     /* 前后髋轴间距，单位 m。 */
-    float min_leg_length_m;           /* 几何计算允许的最小腿长，单位 m。 */
 } chassis_geometry_config_t;
 
 /** @brief 关节电机索引以及电机量到几何量的符号映射。 */

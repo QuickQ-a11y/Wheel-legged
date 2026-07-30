@@ -2,10 +2,30 @@
 
 #include "Angle.h"
 
+#include <float.h>
 #include <math.h>
 #include <string.h>
 
-#define CHASSIS_VMC_EPSILON 1.0e-6f
+#define VMC_LEN_EPS 1.0e-6f
+#define VMC_DET_EPS 1.0e-6f
+#define VMC_SIN_EPS 1.0e-6f
+#define VMC_SQ_REL (16.0f * FLT_EPSILON)
+
+/** @brief 检查五连杆尺寸是否可用于几何运算。 */
+static uint8_t VMC_IsGeometryValid(const chassis_geometry_config_t *geometry)
+{
+    return ((geometry != NULL) &&
+            isfinite(geometry->link1_m) &&
+            isfinite(geometry->link2_m) &&
+            isfinite(geometry->link3_m) &&
+            isfinite(geometry->link4_m) &&
+            isfinite(geometry->frame_joint_distance_m) &&
+            (geometry->link1_m > 0.0f) &&
+            (geometry->link2_m > 0.0f) &&
+            (geometry->link3_m > 0.0f) &&
+            (geometry->link4_m > 0.0f) &&
+            (geometry->frame_joint_distance_m >= 0.0f)) ? 1U : 0U;
+}
 
 /** @brief 将反三角函数输入限制到浮点误差允许的[-1, 1]范围。 */
 static float VMC_LimitFloat(float value, float min_value, float max_value)
@@ -24,8 +44,8 @@ static float VMC_LimitFloat(float value, float min_value, float max_value)
 /**
  * @brief 根据两个主动关节反馈完成五连杆正运动学和速度解算。
  *
- * B、D是前后主动杆端点，C是两根从动杆交点及轮轴位置。任一几何
- * 无解、腿长过小或速度雅可比奇异时清空输出，由状态层标记无效。
+ * B、D是前后主动杆端点，C是两根从动杆交点及轮轴位置。任一运算
+ * 无定义时停止后续计算，但保留此前已经得到的有限中间量供Watch观察。
  */
 void VMC_CalcState(const chassis_leg_config_t *config,
                     float front_position_rad,
@@ -34,7 +54,7 @@ void VMC_CalcState(const chassis_leg_config_t *config,
                     float back_speed_radps,
                     chassis_vmc_state_t *leg)
 {
-    const chassis_geometry_config_t *geometry = &config->geometry;
+    const chassis_geometry_config_t *geometry;
     float point_b_x;
     float point_b_y;
     float point_c_x;
@@ -48,6 +68,8 @@ void VMC_CalcState(const chassis_leg_config_t *config,
     float equation_b;
     float equation_c;
     float sqrt_argument;
+    float sqrt_scale;
+    float sqrt_tolerance;
     float sqrt_value;
     float phi1_speed_radps;
     float phi4_speed_radps;
@@ -66,8 +88,29 @@ void VMC_CalcState(const chassis_leg_config_t *config,
     float point_c_speed_x;
     float point_c_speed_y;
     float length_squared;
+    float length_speed_mps;
+    float phi0_speed_radps;
 
+    if (leg == NULL)
+    {
+        return;
+    }
     memset(leg, 0, sizeof(*leg));
+    if (config == NULL)
+    {
+        return;
+    }
+    geometry = &config->geometry;
+    if ((VMC_IsGeometryValid(geometry) == 0U) ||
+        (!isfinite(front_position_rad)) ||
+        (!isfinite(back_position_rad)) ||
+        (!isfinite(config->joint[CHASSIS_JOINT_FRONT].angle_offset_rad)) ||
+        (!isfinite(config->joint[CHASSIS_JOINT_FRONT].angle_scale)) ||
+        (!isfinite(config->joint[CHASSIS_JOINT_BACK].angle_offset_rad)) ||
+        (!isfinite(config->joint[CHASSIS_JOINT_BACK].angle_scale)))
+    {
+        return;
+    }
 
     /* 电机角度先按零位和极性转换成五连杆几何角。 */
     leg->phi1_rad = config->joint[CHASSIS_JOINT_FRONT].angle_offset_rad +
@@ -76,6 +119,12 @@ void VMC_CalcState(const chassis_leg_config_t *config,
     leg->phi4_rad = config->joint[CHASSIS_JOINT_BACK].angle_offset_rad +
                     config->joint[CHASSIS_JOINT_BACK].angle_scale *
                         back_position_rad;
+    if ((!isfinite(leg->phi1_rad)) || (!isfinite(leg->phi4_rad)))
+    {
+        leg->phi1_rad = 0.0f;
+        leg->phi4_rad = 0.0f;
+        return;
+    }
 
     /* 以两髋轴中点为原点，先求主动杆端点B和D。 */
     point_b_x = -geometry->frame_joint_distance_m * 0.5f +
@@ -88,9 +137,8 @@ void VMC_CalcState(const chassis_leg_config_t *config,
     point_bd_x = point_d_x - point_b_x;
     point_bd_y = point_d_y - point_b_y;
     point_bd_length = sqrtf(point_bd_x * point_bd_x + point_bd_y * point_bd_y);
-    if (point_bd_length <= CHASSIS_VMC_EPSILON)
+    if ((!isfinite(point_bd_length)) || (point_bd_length <= VMC_LEN_EPS))
     {
-        memset(leg, 0, sizeof(*leg));
         return;
     }
 
@@ -102,9 +150,12 @@ void VMC_CalcState(const chassis_leg_config_t *config,
                  geometry->link3_m * geometry->link3_m;
     sqrt_argument = equation_a * equation_a + equation_b * equation_b -
                     equation_c * equation_c;
-    if (sqrt_argument < -CHASSIS_VMC_EPSILON)
+    sqrt_scale = equation_a * equation_a + equation_b * equation_b +
+                 equation_c * equation_c;
+    sqrt_tolerance = VMC_SQ_REL * sqrt_scale;
+    if ((!isfinite(sqrt_argument)) || (!isfinite(sqrt_tolerance)) ||
+        (sqrt_argument < -sqrt_tolerance))
     {
-        memset(leg, 0, sizeof(*leg));
         return;
     }
     if (sqrt_argument < 0.0f)
@@ -120,20 +171,34 @@ void VMC_CalcState(const chassis_leg_config_t *config,
                 geometry->link2_m * cosf(leg->phi2_rad);
     point_c_y = geometry->link1_m * sinf(leg->phi1_rad) +
                 geometry->link2_m * sinf(leg->phi2_rad);
+    if ((!isfinite(leg->phi2_rad)) || (!isfinite(point_c_x)) ||
+        (!isfinite(point_c_y)))
+    {
+        leg->phi2_rad = 0.0f;
+        return;
+    }
 
     leg->phi3_rad = atan2f(point_c_y - point_d_y, point_c_x - point_d_x);
     /* 虚拟腿由髋轴中点指向C点，极坐标即腿长和phi0。 */
     leg->length_m = sqrtf(point_c_x * point_c_x + point_c_y * point_c_y);
-    if ((leg->length_m <= geometry->min_leg_length_m) ||
-        (leg->length_m <= CHASSIS_VMC_EPSILON))
+    if ((!isfinite(leg->phi3_rad)) || (!isfinite(leg->length_m)) ||
+        (leg->length_m <= VMC_LEN_EPS))
     {
-        memset(leg, 0, sizeof(*leg));
         return;
     }
     leg->phi0_rad = atan2f(point_c_y, point_c_x);
+    if (!isfinite(leg->phi0_rad))
+    {
+        leg->phi0_rad = 0.0f;
+        return;
+    }
     leg->phi0_total_rad = leg->phi0_rad;
 
     /* 对闭链约束求导，先由主动杆速度解出从动杆phi2速度。 */
+    if ((!isfinite(front_speed_radps)) || (!isfinite(back_speed_radps)))
+    {
+        return;
+    }
     phi1_speed_radps = config->joint[CHASSIS_JOINT_FRONT].angle_scale *
                        front_speed_radps;
     phi4_speed_radps = config->joint[CHASSIS_JOINT_BACK].angle_scale *
@@ -152,9 +217,8 @@ void VMC_CalcState(const chassis_leg_config_t *config,
     matrix12 = geometry->link3_m * sinf(leg->phi3_rad);
     matrix22 = -geometry->link3_m * cosf(leg->phi3_rad);
     determinant = matrix11 * matrix22 - matrix12 * matrix21;
-    if (fabsf(determinant) <= CHASSIS_VMC_EPSILON)
+    if ((!isfinite(determinant)) || (fabsf(determinant) <= VMC_DET_EPS))
     {
-        memset(leg, 0, sizeof(*leg));
         return;
     }
 
@@ -162,23 +226,29 @@ void VMC_CalcState(const chassis_leg_config_t *config,
     right_y = point_d_speed_y - point_b_speed_y;
     phi2_speed_radps = (right_x * matrix22 - matrix12 * right_y) /
                        determinant;
+    if (!isfinite(phi2_speed_radps))
+    {
+        return;
+    }
     point_c_speed_x = point_b_speed_x + matrix11 * phi2_speed_radps;
     point_c_speed_y = point_b_speed_y + matrix21 * phi2_speed_radps;
 
     /* 将C点笛卡尔速度投影到虚拟腿径向和切向。 */
-    leg->length_speed_mps =
+    length_speed_mps =
         (point_c_x * point_c_speed_x + point_c_y * point_c_speed_y) /
         leg->length_m;
 
     length_squared = leg->length_m * leg->length_m;
-    if (fabsf(length_squared) <= CHASSIS_VMC_EPSILON)
-    {
-        memset(leg, 0, sizeof(*leg));
-        return;
-    }
-    leg->phi0_speed_radps =
+    phi0_speed_radps =
         (point_c_x * point_c_speed_y - point_c_y * point_c_speed_x) /
         length_squared;
+    if ((!isfinite(length_speed_mps)) || (!isfinite(phi0_speed_radps)))
+    {
+        return;
+    }
+    leg->length_speed_mps = length_speed_mps;
+    leg->phi0_speed_radps = phi0_speed_radps;
+    leg->valid = 1U;
 }
 
 /**
@@ -210,18 +280,17 @@ uint8_t VMC_CalcJointTarget(const chassis_leg_config_t *config,
         memset(target, 0, sizeof(*target));
     }
     if ((config == NULL) || (current_leg == NULL) || (target == NULL) ||
-        (!isfinite(target_length_m)) || (!isfinite(target_phi0_rad)))
+        (!isfinite(target_length_m)) || (!isfinite(target_phi0_rad)) ||
+        (!isfinite(current_leg->phi1_rad)) ||
+        (!isfinite(current_leg->phi4_rad)))
     {
         return 0U;
     }
 
     geometry = &config->geometry;
     /* 机械尺寸或目标腿长不具备物理意义时不进入三角形求解。 */
-    if ((geometry->link1_m <= 0.0f) ||
-        (geometry->link2_m <= 0.0f) ||
-        (geometry->link3_m <= 0.0f) ||
-        (geometry->link4_m <= 0.0f) ||
-        (target_length_m <= geometry->min_leg_length_m))
+    if ((VMC_IsGeometryValid(geometry) == 0U) ||
+        (target_length_m <= VMC_LEN_EPS))
     {
         return 0U;
     }
@@ -235,16 +304,16 @@ uint8_t VMC_CalcJointTarget(const chassis_leg_config_t *config,
                            point_c_y * point_c_y);
     back_distance = sqrtf(back_vector_x * back_vector_x +
                           point_c_y * point_c_y);
-    if ((front_distance <= CHASSIS_VMC_EPSILON) ||
-        (back_distance <= CHASSIS_VMC_EPSILON) ||
+    if ((front_distance <= VMC_LEN_EPS) ||
+        (back_distance <= VMC_LEN_EPS) ||
         (front_distance > geometry->link1_m + geometry->link2_m +
-                              CHASSIS_VMC_EPSILON) ||
+                              VMC_LEN_EPS) ||
         (front_distance < fabsf(geometry->link1_m - geometry->link2_m) -
-                              CHASSIS_VMC_EPSILON) ||
+                              VMC_LEN_EPS) ||
         (back_distance > geometry->link4_m + geometry->link3_m +
-                             CHASSIS_VMC_EPSILON) ||
+                             VMC_LEN_EPS) ||
         (back_distance < fabsf(geometry->link4_m - geometry->link3_m) -
-                             CHASSIS_VMC_EPSILON))
+                             VMC_LEN_EPS))
     {
         return 0U;
     }
@@ -288,23 +357,38 @@ uint8_t VMC_CalcJointTarget(const chassis_leg_config_t *config,
  * support_force_n沿虚拟腿方向，swing_torque_nm绕髋轴中点作用；
  * denominator接近零表示两根从动杆接近奇异，必须保持零输出。
  */
-void VMC_CalcTorque(const chassis_leg_config_t *config,
-                     const chassis_vmc_state_t *leg,
-                     float support_force_n,
-                     float swing_torque_nm,
-                     chassis_vmc_torque_t *torque)
+uint8_t VMC_CalcTorque(const chassis_leg_config_t *config,
+                       const chassis_vmc_state_t *leg,
+                       float support_force_n,
+                       float swing_torque_nm,
+                       chassis_vmc_torque_t *torque)
 {
     float denominator;
     float front_torque_nm;
     float back_torque_nm;
 
+    if (torque == NULL)
+    {
+        return 0U;
+    }
     memset(torque, 0, sizeof(*torque));
+    if ((config == NULL) || (leg == NULL) ||
+        (VMC_IsGeometryValid(&config->geometry) == 0U) ||
+        (!isfinite(leg->phi0_rad)) || (!isfinite(leg->phi1_rad)) ||
+        (!isfinite(leg->phi2_rad)) || (!isfinite(leg->phi3_rad)) ||
+        (!isfinite(leg->phi4_rad)) || (!isfinite(leg->length_m)) ||
+        (!isfinite(support_force_n)) || (!isfinite(swing_torque_nm)) ||
+        (!isfinite(config->joint[CHASSIS_JOINT_FRONT].torque_scale)) ||
+        (!isfinite(config->joint[CHASSIS_JOINT_BACK].torque_scale)))
+    {
+        return 0U;
+    }
 
     denominator = sinf(leg->phi2_rad - leg->phi3_rad);
-    if ((fabsf(denominator) <= CHASSIS_VMC_EPSILON) ||
-        (fabsf(leg->length_m) <= CHASSIS_VMC_EPSILON))
+    if ((!isfinite(denominator)) || (fabsf(denominator) <= VMC_SIN_EPS) ||
+        (fabsf(leg->length_m) <= VMC_LEN_EPS))
     {
-        return;
+        return 0U;
     }
 
     /* 雅可比转置展开后的前、后主动关节力矩。 */
@@ -328,8 +412,19 @@ void VMC_CalcTorque(const chassis_leg_config_t *config,
          cosf(leg->phi0_rad - leg->phi2_rad) /
          (leg->length_m * denominator) * swing_torque_nm);
 
+    if ((!isfinite(front_torque_nm)) || (!isfinite(back_torque_nm)))
+    {
+        return 0U;
+    }
+
     torque->front_nm = front_torque_nm *
                        config->joint[CHASSIS_JOINT_FRONT].torque_scale;
     torque->back_nm = back_torque_nm *
                       config->joint[CHASSIS_JOINT_BACK].torque_scale;
+    if ((!isfinite(torque->front_nm)) || (!isfinite(torque->back_nm)))
+    {
+        memset(torque, 0, sizeof(*torque));
+        return 0U;
+    }
+    return 1U;
 }

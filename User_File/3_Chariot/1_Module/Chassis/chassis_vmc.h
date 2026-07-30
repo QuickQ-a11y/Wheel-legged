@@ -20,6 +20,7 @@ typedef struct
     float phi0_total_rad;        /* 底盘状态层连续展开后的虚拟腿角。 */
     float length_speed_mps;      /* 虚拟腿伸缩速度，单位 m/s。 */
     float phi0_speed_radps;      /* 虚拟腿摆角速度，单位 rad/s。 */
+    uint8_t valid;               /* 本轮位置和速度解算均有数学定义。 */
 } chassis_vmc_state_t;
 
 /* VMC虚拟支撑力和摆力矩映射后的两个主动关节力矩。 */
@@ -39,7 +40,7 @@ typedef struct
 /**
  * @brief 由前后髋关节反馈计算五连杆虚拟腿状态。
  *
- * 输出包含主动/从动杆角、虚拟腿长和速度；几何无解或奇异时保持全零。
+ * 输出始终保留已完成的有限中间量；未定义字段保持零，valid置零。
  */
 void VMC_CalcState(const chassis_leg_config_t *config,
                     float front_position_rad,
@@ -62,13 +63,13 @@ uint8_t VMC_CalcJointTarget(const chassis_leg_config_t *config,
 /**
  * @brief 将虚拟支撑力和腿摆力矩映射为前后髋关节力矩。
  *
- * 映射采用虚功关系，几何奇异或腿长为零时输出保持零。
+ * 映射采用虚功关系；返回0时输出保持零，返回1时力矩有效。
  */
-void VMC_CalcTorque(const chassis_leg_config_t *config,
-                     const chassis_vmc_state_t *leg,
-                     float support_force_n,
-                     float swing_torque_nm,
-                     chassis_vmc_torque_t *torque);
+uint8_t VMC_CalcTorque(const chassis_leg_config_t *config,
+                       const chassis_vmc_state_t *leg,
+                       float support_force_n,
+                       float swing_torque_nm,
+                       chassis_vmc_torque_t *torque);
 
 #ifdef __cplusplus
 }
