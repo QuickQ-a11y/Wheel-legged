@@ -230,6 +230,14 @@ SECTIONS
   PROVIDE( __bss_start = __tbss_start );
   PROVIDE( __bss_size = __bss_end - __bss_start );
 
+  /* DMA1无法访问DTCM，外设DMA缓冲区统一放入AXI SRAM。 */
+  .ram_d1_dma (NOLOAD) :
+  {
+    . = ALIGN(32);
+    *(.ram_d1_dma)
+    . = ALIGN(32);
+  } >RAM_D1
+
   /* User_heap_stack section, used to check that there is enough RAM left */
   ._user_heap_stack (NOLOAD) :
   {

@@ -11,7 +11,7 @@
 #define CHASSIS_OUTPUT_FAULT_MASK                                         \
     (CHASSIS_FAULT_DISABLED | CHASSIS_FAULT_IMU |                       \
      CHASSIS_FAULT_DM_MOTOR | CHASSIS_FAULT_DJI_MOTOR | CHASSIS_FAULT_CAN | \
-     CHASSIS_FAULT_KINEMATICS)
+     CHASSIS_FAULT_KINEMATICS | CHASSIS_FAULT_REMOTE)
 
 chassis_t chassis;
 
@@ -50,6 +50,55 @@ static float Chassis_MoveToward(float value, float target, float maximum_step)
         return value - positive_step;
     }
     return target;
+}
+
+/**
+ * @brief 将遥控运动目标按当前控制周期写入正常站立目标。
+ *
+ * 速度和航向目标使用独立变化率限制；航向目标的差分同时作为十维
+ * LQR的目标角速度，避免只改变角度而产生不一致的参考轨迹。
+ */
+static void Chassis_ApplyMotionCommand(void)
+{
+    float dt_s = chassis.control_dt_s;
+    float yaw_step_rad;
+
+    if (chassis.remote_target_valid == 0U)
+    {
+        chassis.target_state[CHASSIS_STATE_DOT_S] =
+            Chassis_MoveToward(chassis.target_state[CHASSIS_STATE_DOT_S],
+                               0.0f,
+                               APP_RC_VEL_RATE * dt_s);
+        chassis.target_state[CHASSIS_STATE_DOT_FAI] = 0.0f;
+        return;
+    }
+
+    chassis.target_state[CHASSIS_STATE_DOT_S] =
+        Chassis_MoveToward(chassis.target_state[CHASSIS_STATE_DOT_S],
+                           chassis.motion_command.forward_speed_mps,
+                           APP_RC_VEL_RATE * dt_s);
+
+    yaw_step_rad = Chassis_LimitSymmetric(
+        chassis.motion_command.yaw_target_rad -
+            chassis.target_state[CHASSIS_STATE_FAI],
+        APP_RC_YAW_RATE * dt_s);
+    chassis.target_state[CHASSIS_STATE_FAI] += yaw_step_rad;
+    if (dt_s > 0.0f)
+    {
+        chassis.target_state[CHASSIS_STATE_DOT_FAI] =
+            yaw_step_rad / dt_s;
+    }
+
+    chassis.target_leg_length_m[CHASSIS_LEFT] =
+        Chassis_MoveToward(chassis.target_leg_length_m[CHASSIS_LEFT],
+                           chassis.motion_command.leg_length_m,
+                           chassis_config.recovery.standing_length_rate_mps *
+                               dt_s);
+    chassis.target_leg_length_m[CHASSIS_RIGHT] =
+        Chassis_MoveToward(chassis.target_leg_length_m[CHASSIS_RIGHT],
+                           chassis.motion_command.leg_length_m,
+                           chassis_config.recovery.standing_length_rate_mps *
+                               dt_s);
 }
 
 /** @brief 判断周期角是否存在落在指定连续区间内的等价角。 */
@@ -134,6 +183,10 @@ static uint32_t Chassis_GetOutputFaults(void)
     if (chassis.can_tx_error_count > APP_CAN_TX_ERROR_MAX)
     {
         fault_flags |= CHASSIS_FAULT_CAN;
+    }
+    if ((chassis.remote_online == 0U) || (chassis.remote_stop != 0U))
+    {
+        fault_flags |= CHASSIS_FAULT_REMOTE;
     }
     return fault_flags;
 }
@@ -285,6 +338,10 @@ void Chassis_ControlInit(void)
     chassis.state = CHASSIS_ZERO_FORCE;
     chassis.safe_output = 1U;
     chassis.control_dt_s = APP_CTRL_DT_S;
+    chassis.motion_command.forward_speed_mps = 0.0f;
+    chassis.motion_command.yaw_target_rad = 0.0f;
+    chassis.motion_command.leg_length_m = APP_RC_LEG_M;
+    chassis.motion_command.yaw_anchor_rad = 0.0f;
     memcpy(chassis.target_state,
            chassis_config.target_state,
            sizeof(chassis.target_state));
@@ -1022,14 +1079,20 @@ void Chassis_ControlLoop(void)
     dt_s = chassis.control_dt_s;
     if (bench_mode == 0U)
     {
-        chassis.target_leg_length_m[CHASSIS_LEFT] =
-            Chassis_MoveToward(chassis.target_leg_length_m[CHASSIS_LEFT],
-                        chassis_config.leg[CHASSIS_LEFT].target_leg_length_m,
-                        chassis_config.recovery.standing_length_rate_mps * dt_s);
-        chassis.target_leg_length_m[CHASSIS_RIGHT] =
-            Chassis_MoveToward(chassis.target_leg_length_m[CHASSIS_RIGHT],
-                        chassis_config.leg[CHASSIS_RIGHT].target_leg_length_m,
-                        chassis_config.recovery.standing_length_rate_mps * dt_s);
+        Chassis_ApplyMotionCommand();
+        if (chassis.remote_target_valid == 0U)
+        {
+            chassis.target_leg_length_m[CHASSIS_LEFT] =
+                Chassis_MoveToward(
+                    chassis.target_leg_length_m[CHASSIS_LEFT],
+                    chassis_config.leg[CHASSIS_LEFT].target_leg_length_m,
+                    chassis_config.recovery.standing_length_rate_mps * dt_s);
+            chassis.target_leg_length_m[CHASSIS_RIGHT] =
+                Chassis_MoveToward(
+                    chassis.target_leg_length_m[CHASSIS_RIGHT],
+                    chassis_config.leg[CHASSIS_RIGHT].target_leg_length_m,
+                    chassis_config.recovery.standing_length_rate_mps * dt_s);
+        }
     }
 
     /* 轮速、IMU 和腿部状态组成速度融合的两个测量量。 */
@@ -1104,7 +1167,8 @@ void Chassis_ControlLoop(void)
         chassis.speed_kalman.state[1] = chassis.forward_accel_fused_mps2;
     }
 
-    if ((chassis_config.speed_kalman.position_speed_limit_mps > 0.0f) &&
+    if ((fabsf(chassis.target_state[CHASSIS_STATE_DOT_S]) <= 1.0e-4f) &&
+        (chassis_config.speed_kalman.position_speed_limit_mps > 0.0f) &&
         (fabsf(chassis.forward_speed_mps) <=
          chassis_config.speed_kalman.position_speed_limit_mps))
     {

@@ -29,6 +29,7 @@
 #include "task_can.h"
 #include "chassis_task.h"
 #include "task_imu.h"
+#include "task_remote.h"
 #include "task_usb.h"
 
 /* USER CODE END Includes */
@@ -104,6 +105,7 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_THREADS */
   CAN_Task_Init();
+  Remote_Task_Init();
   Chassis_Task_Init();
   IMU_Task_Init();
   USB_Task_Init();

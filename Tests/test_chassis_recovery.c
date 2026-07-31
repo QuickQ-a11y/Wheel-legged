@@ -15,6 +15,8 @@ static void setOnlineFeedback(void)
     chassis.imu.initialized = 1U;
     chassis.imu.attitude_ready = 1U;
     chassis.imu.error_code = 0U;
+    chassis.remote_online = 1U;
+    chassis.remote_stop = 0U;
     chassis.can_tx_error_count = 0U;
     for (index = 0U; index < APP_DM_COUNT; index++)
     {
@@ -504,6 +506,81 @@ static void testContinuousPhi0AndYaw(void)
     assert(chassis.lqr_state[CHASSIS_STATE_THETA_R] < CHASSIS_PI);
 }
 
+static void testRemoteFaultsKeepCalculation(void)
+{
+    Chassis_ControlInit();
+    setOnlineFeedback();
+    chassis.imu.pitch_rad = 0.04f;
+    setSymmetricLegPose(0.25f, CHASSIS_HALF_PI);
+    chassis.mode = CHASSIS_MODE_FOLLOW;
+    chassis.remote_online = 0U;
+    Chassis_ControlUpdateState();
+    assert(chassis.state == CHASSIS_STANDING);
+
+    Chassis_ControlLoop();
+    assert((chassis.fault_flags & CHASSIS_FAULT_REMOTE) != 0U);
+    assert(chassis.state_valid == 1U);
+    assertControlRequestsCalculated();
+    assertZeroFinalOutput();
+
+    chassis.remote_online = 1U;
+    chassis.remote_stop = 1U;
+    Chassis_ControlUpdateState();
+    Chassis_ControlLoop();
+    assert((chassis.fault_flags & CHASSIS_FAULT_REMOTE) != 0U);
+    assert(chassis.state_valid == 1U);
+    assertControlRequestsCalculated();
+    assertZeroFinalOutput();
+
+    chassis.remote_stop = 0U;
+    Chassis_ControlUpdateState();
+    assert(chassis.fault_flags == CHASSIS_FAULT_NONE);
+    Chassis_ControlLoop();
+    assert(chassis.state_valid == 1U);
+    assert(chassis.fault_flags == CHASSIS_FAULT_NONE);
+}
+
+static void testRemoteMotionTargets(void)
+{
+    float initial_yaw_target_rad;
+    float initial_leg_target_m;
+
+    Chassis_ControlInit();
+    setOnlineFeedback();
+    chassis.imu.pitch_rad = 0.04f;
+    chassis.imu.yaw_total_rad = CHASSIS_PI + 0.04f;
+    setSymmetricLegPose(0.25f, CHASSIS_HALF_PI);
+    chassis.mode = CHASSIS_MODE_FOLLOW;
+    Chassis_ControlUpdateState();
+    assert(chassis.state == CHASSIS_STANDING);
+
+    initial_yaw_target_rad = chassis.target_state[CHASSIS_STATE_FAI];
+    initial_leg_target_m = chassis.target_leg_length_m[CHASSIS_LEFT];
+    chassis.remote_target_valid = 1U;
+    chassis.motion_command.forward_speed_mps = APP_RC_MAX_VEL;
+    chassis.motion_command.yaw_target_rad = initial_yaw_target_rad + 0.5f;
+    chassis.motion_command.leg_length_m = APP_RC_LEG_S;
+    chassis.forward_position_m = 5.0f;
+
+    Chassis_ControlLoop();
+
+    assert(fabsf(chassis.target_state[CHASSIS_STATE_DOT_S] -
+                 APP_RC_VEL_RATE * chassis.control_dt_s) < TEST_TOLERANCE);
+    assert(fabsf(chassis.target_state[CHASSIS_STATE_FAI] -
+                 (initial_yaw_target_rad +
+                  APP_RC_YAW_RATE * chassis.control_dt_s)) < TEST_TOLERANCE);
+    assert(chassis.target_state[CHASSIS_STATE_FAI] > CHASSIS_PI);
+    assert(fabsf(chassis.target_state[CHASSIS_STATE_DOT_FAI] -
+                 APP_RC_YAW_RATE) < TEST_TOLERANCE);
+    assert(fabsf(chassis.target_leg_length_m[CHASSIS_LEFT] -
+                 (initial_leg_target_m -
+                  chassis_config.recovery.standing_length_rate_mps *
+                      chassis.control_dt_s)) < TEST_TOLERANCE);
+    assert(chassis.forward_position_m == 0.0f);
+    assert(chassis.state_valid == 1U);
+    assertZeroFinalOutput();
+}
+
 int main(void)
 {
     testBenchControl();
@@ -515,5 +592,7 @@ int main(void)
     testMathRecoveryChecksPostureBeforeOutput();
     testOutputFaultsKeepCalculation();
     testContinuousPhi0AndYaw();
+    testRemoteFaultsKeepCalculation();
+    testRemoteMotionTargets();
     return 0;
 }

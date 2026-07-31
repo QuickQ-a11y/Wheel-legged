@@ -20,6 +20,7 @@ extern "C" {
 #define CHASSIS_FAULT_CONTROL 0x00000020UL        /* 姿态、配置或计算保护。 */
 #define CHASSIS_FAULT_KINEMATICS 0x00000040UL     /* 五连杆状态、逆解或力映射无效。 */
 #define CHASSIS_FAULT_RECOVERY_TIMEOUT 0x00000080UL /* 恢复动作阶段超时。 */
+#define CHASSIS_FAULT_REMOTE 0x00000100UL         /* 遥控器离线或收到急停请求。 */
 
 /* 外部请求模式：表示操作者想让底盘执行的行为。 */
 typedef enum
@@ -69,6 +70,15 @@ typedef struct
     int16_t current;             /* DJI原始电流反馈。 */
 } chassis_dji_motor_t;
 
+/** @brief 任务层发布给正常站立控制的遥控运动目标。 */
+typedef struct
+{
+    float forward_speed_mps; /* 期望前进速度，单位 m/s。 */
+    float yaw_target_rad;    /* 连续整车航向目标，单位 rad。 */
+    float leg_length_m;      /* 左右对称目标腿长，单位 m。 */
+    float yaw_anchor_rad;    /* 右摇杆航向偏置的连续锚点，单位 rad。 */
+} chassis_motion_command_t;
+
 typedef struct
 {
     /* 外部意图和内部状态机。 */
@@ -81,8 +91,15 @@ typedef struct
     chassis_imu_t imu;
     chassis_dm_motor_t dm_motor[APP_DM_COUNT];
     chassis_dji_motor_t wheel_motor[APP_WHEEL_COUNT];
+    uint8_t remote_online;          /* 当前遥控输入后端处于在线状态。 */
+    uint8_t remote_stop;            /* 急停请求，只封锁最终电机输出。 */
+    uint8_t remote_control_ready;   /* 已上线且收到FOLLOW请求。 */
+    uint8_t remote_target_valid;    /* 已建立过遥控目标，离线时保持腿长目标。 */
+    uint8_t remote_self_save_latched; /* 阻止持续SELF_SAVE请求重复触发。 */
     uint32_t can_tx_error_count;
     float control_dt_s;            /* 底盘控制本轮实际周期，单位 s。 */
+
+    chassis_motion_command_t motion_command;
 
     /* 五连杆、十维状态、LQR增益和运动融合中间量。 */
     chassis_vmc_state_t leg[CHASSIS_LEG_COUNT];

@@ -58,6 +58,23 @@ extern "C" {
 #define APP_USB_WAIT_TICKS 1U
 #define APP_USB_STATUS_TICKS 1U
 
+#define APP_REMOTE_WAIT_TICKS 10U
+#define APP_REMOTE_TIMEOUT_TICKS 100U
+#define APP_REMOTE_SYNC_FRAMES 2U
+
+/* DR16输入整形参数；轴值已经由DBUS解析为约-660..660。 */
+#define APP_DR16_DB 10
+#define APP_DR16_DIAL 400
+
+/* 与具体遥控协议无关的底盘运动目标。 */
+#define APP_RC_MAX_VEL 0.5f
+#define APP_RC_MAX_YAW 1.0f
+#define APP_RC_VEL_RATE 1.0f
+#define APP_RC_YAW_RATE 2.0f
+#define APP_RC_LEG_S 0.15f
+#define APP_RC_LEG_M 0.20f
+#define APP_RC_LEG_L 0.25f
+
 /*
  * 控制器第一阶段只计算中间状态和安全输出。
  * 该宏保持 0 时，即使控制器配置允许输出，也不会解除零力矩/零电流封锁。

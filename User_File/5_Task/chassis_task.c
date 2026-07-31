@@ -6,6 +6,7 @@
 #include "task_can.h"
 #include "task_can_dispatch.h"
 #include "task_imu.h"
+#include "task_remote.h"
 
 #include "cmsis_os2.h"
 
@@ -17,12 +18,185 @@ static const osThreadAttr_t chassis_task_attributes = {
     .priority = (osPriority_t)osPriorityHigh,
 };
 
+static remote_mode_request_t previousModeRequest = REMOTE_MODE_NONE;
+static uint8_t yawStickActive;
+
+/** @brief 取得十维模型使用的连续整车航向。 */
+static float Chassis_GetModelYawRad(void)
+{
+    return chassis.imu.yaw_total_rad * chassis_config.imu.yaw_angle_scale;
+}
+
+/** @brief 急停或离线时清零运动命令并从当前连续航向重新锚定。 */
+static void Chassis_HoldRemoteMotion(void)
+{
+    float yawRad = Chassis_GetModelYawRad();
+
+    chassis.motion_command.forward_speed_mps = 0.0f;
+    chassis.motion_command.yaw_anchor_rad = yawRad;
+    chassis.motion_command.yaw_target_rad = yawRad;
+    yawStickActive = 0U;
+}
+
+/** @brief 将通用遥控输入转换为底盘物理运动目标。 */
+static void Chassis_UpdateRemoteMotion(const remote_input_t *input)
+{
+    float yawAxis = input->yawAxis;
+    float yawRad = Chassis_GetModelYawRad();
+
+    chassis.motion_command.forward_speed_mps =
+        input->forwardAxis * APP_RC_MAX_VEL;
+
+    if (yawAxis != 0.0f)
+    {
+        if (yawStickActive == 0U)
+        {
+            chassis.motion_command.yaw_anchor_rad = yawRad;
+        }
+        yawStickActive = 1U;
+        chassis.motion_command.yaw_target_rad =
+            chassis.motion_command.yaw_anchor_rad - yawAxis * APP_RC_MAX_YAW;
+    }
+    else
+    {
+        if (yawStickActive != 0U)
+        {
+            chassis.motion_command.yaw_anchor_rad = yawRad;
+        }
+        yawStickActive = 0U;
+        chassis.motion_command.yaw_target_rad =
+            chassis.motion_command.yaw_anchor_rad;
+    }
+
+    switch (input->legRequest)
+    {
+    case REMOTE_LEG_SHORT:
+        chassis.motion_command.leg_length_m = APP_RC_LEG_S;
+        break;
+
+    case REMOTE_LEG_MIDDLE:
+        chassis.motion_command.leg_length_m = APP_RC_LEG_M;
+        break;
+
+    case REMOTE_LEG_LONG:
+        chassis.motion_command.leg_length_m = APP_RC_LEG_L;
+        break;
+
+    case REMOTE_LEG_KEEP:
+    default:
+        break;
+    }
+}
+
+/**
+ * @brief 维护遥控重新就绪、急停和外层动作模式。
+ *
+ * 急停和离线只关闭输出许可并保留当前模式，使控制中间量继续更新。
+ * 必须先收到FOLLOW请求才建立控制许可；SELF_SAVE只在边沿触发一次。
+ */
+void Chassis_SetRemoteInput(const remote_input_t *input, uint8_t online)
+{
+    remote_mode_request_t modeRequest;
+
+    if (input == NULL)
+    {
+        online = 0U;
+        modeRequest = REMOTE_MODE_NONE;
+    }
+    else
+    {
+        modeRequest = input->modeRequest;
+    }
+
+    chassis.remote_online = (online != 0U) ? 1U : 0U;
+    chassis.remote_stop =
+        ((input != NULL) && (input->stop != 0U)) ? 1U : 0U;
+
+    if ((chassis.remote_online == 0U) || (chassis.remote_stop != 0U))
+    {
+        Chassis_SetOutputEnable(0U);
+        chassis.remote_control_ready = 0U;
+        Chassis_HoldRemoteMotion();
+        previousModeRequest = modeRequest;
+        return;
+    }
+
+    if (chassis.remote_control_ready == 0U)
+    {
+        Chassis_SetOutputEnable(0U);
+        Chassis_HoldRemoteMotion();
+        if (modeRequest != REMOTE_MODE_FOLLOW)
+        {
+            previousModeRequest = modeRequest;
+            return;
+        }
+
+        chassis.remote_control_ready = 1U;
+        chassis.remote_target_valid = 1U;
+        chassis.motion_command.yaw_anchor_rad = Chassis_GetModelYawRad();
+        chassis.motion_command.yaw_target_rad =
+            chassis.motion_command.yaw_anchor_rad;
+        if (chassis.mode != CHASSIS_MODE_SELF_SAVE)
+        {
+            Chassis_SetMode(CHASSIS_MODE_FOLLOW);
+        }
+    }
+
+    Chassis_SetOutputEnable(1U);
+    Chassis_UpdateRemoteMotion(input);
+
+    /* 只有恢复状态机真正回到STANDING后，才自动结束SELF_SAVE请求。 */
+    if ((chassis.mode == CHASSIS_MODE_SELF_SAVE) &&
+        (chassis.last_mode == CHASSIS_MODE_SELF_SAVE) &&
+        (chassis.state == CHASSIS_STANDING))
+    {
+        Chassis_SetMode(CHASSIS_MODE_FOLLOW);
+    }
+
+    if (chassis.mode == CHASSIS_MODE_SELF_SAVE)
+    {
+        previousModeRequest = modeRequest;
+        return;
+    }
+
+    /* 自救结束后保持FOLLOW，直到重新收到FOLLOW请求才解除触发锁。 */
+    if (chassis.remote_self_save_latched != 0U)
+    {
+        Chassis_SetMode(CHASSIS_MODE_FOLLOW);
+        if (modeRequest == REMOTE_MODE_FOLLOW)
+        {
+            chassis.remote_self_save_latched = 0U;
+        }
+        previousModeRequest = modeRequest;
+        return;
+    }
+
+    if (modeRequest == REMOTE_MODE_FOLLOW)
+    {
+        Chassis_SetMode(CHASSIS_MODE_FOLLOW);
+    }
+    else if (modeRequest == REMOTE_MODE_BENCH)
+    {
+        Chassis_SetMode(CHASSIS_MODE_BENCH);
+    }
+    else if ((modeRequest == REMOTE_MODE_SELF_SAVE) &&
+             (previousModeRequest != REMOTE_MODE_SELF_SAVE) &&
+             (previousModeRequest != REMOTE_MODE_NONE))
+    {
+        chassis.remote_self_save_latched = 1U;
+        Chassis_SetMode(CHASSIS_MODE_SELF_SAVE);
+    }
+
+    previousModeRequest = modeRequest;
+}
+
 /**
  * @brief 从 IMU、DM、DJI 和 CAN 任务读取本轮底盘反馈。
  */
 static void Chassis_FeedbackUpdate(void)
 {
     task_imu_state_t imu_state = {0};
+    task_remote_state_t remote_state = {0};
     uint32_t now_tick = HAL_GetTick();
     uint32_t index;
 
@@ -41,6 +215,10 @@ static void Chassis_FeedbackUpdate(void)
     memcpy(chassis.imu.motion_accel_mps2,
            imu_state.motionAccMps2,
            sizeof(chassis.imu.motion_accel_mps2));
+
+    /* 遥控输入在任务层转换为模式和物理目标，不接触LQR或电机输出。 */
+    Remote_Task_GetState(&remote_state);
+    Chassis_SetRemoteInput(&remote_state.input, remote_state.online);
 
     /* DM状态保留最后一次反馈值，online只表示本周期是否超时。 */
     for (index = 0U; index < MOTOR_DM_COUNT; index++)
@@ -191,6 +369,8 @@ static void Chassis_TaskEntry(void *argument)
 void Chassis_Task_Init(void)
 {
     Chassis_ControlInit();
+    previousModeRequest = REMOTE_MODE_NONE;
+    yawStickActive = 0U;
     (void)osThreadNew(Chassis_TaskEntry, NULL, &chassis_task_attributes);
 }
 
