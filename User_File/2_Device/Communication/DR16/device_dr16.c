@@ -146,6 +146,7 @@ void DR16_MakeInput(const dr16_data_t *data,
     }
 
     input->forwardAxis = DR16_NormalizeAxis(data->leftY, deadband);
+    input->lateralAxis = DR16_NormalizeAxis(data->leftX, deadband);
     input->yawAxis = DR16_NormalizeAxis(data->rightX, deadband);
     input->stop = (data->rightSwitch == DR16_SWITCH_DOWN) ? 1U : 0U;
 

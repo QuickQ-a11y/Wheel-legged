@@ -18,182 +18,10 @@ static const osThreadAttr_t chassis_task_attributes = {
     .priority = (osPriority_t)osPriorityHigh,
 };
 
-static remote_mode_request_t previousModeRequest = REMOTE_MODE_NONE;
-static uint8_t yawStickActive;
-
-/** @brief 取得十维模型使用的连续整车航向。 */
-static float Chassis_GetModelYawRad(void)
-{
-    return chassis.imu.yaw_total_rad * chassis_config.imu.yaw_angle_scale;
-}
-
-/** @brief 急停或离线时清零运动命令并从当前连续航向重新锚定。 */
-static void Chassis_HoldRemoteMotion(void)
-{
-    float yawRad = Chassis_GetModelYawRad();
-
-    chassis.motion_command.forward_speed_mps = 0.0f;
-    chassis.motion_command.yaw_anchor_rad = yawRad;
-    chassis.motion_command.yaw_target_rad = yawRad;
-    yawStickActive = 0U;
-}
-
-/** @brief 将通用遥控输入转换为底盘物理运动目标。 */
-static void Chassis_UpdateRemoteMotion(const remote_input_t *input)
-{
-    float yawAxis = input->yawAxis;
-    float yawRad = Chassis_GetModelYawRad();
-
-    chassis.motion_command.forward_speed_mps =
-        input->forwardAxis * APP_RC_MAX_VEL;
-
-    if (yawAxis != 0.0f)
-    {
-        if (yawStickActive == 0U)
-        {
-            chassis.motion_command.yaw_anchor_rad = yawRad;
-        }
-        yawStickActive = 1U;
-        chassis.motion_command.yaw_target_rad =
-            chassis.motion_command.yaw_anchor_rad - yawAxis * APP_RC_MAX_YAW;
-    }
-    else
-    {
-        if (yawStickActive != 0U)
-        {
-            chassis.motion_command.yaw_anchor_rad = yawRad;
-        }
-        yawStickActive = 0U;
-        chassis.motion_command.yaw_target_rad =
-            chassis.motion_command.yaw_anchor_rad;
-    }
-
-    switch (input->legRequest)
-    {
-    case REMOTE_LEG_SHORT:
-        chassis.motion_command.leg_length_m = APP_RC_LEG_S;
-        break;
-
-    case REMOTE_LEG_MIDDLE:
-        chassis.motion_command.leg_length_m = APP_RC_LEG_M;
-        break;
-
-    case REMOTE_LEG_LONG:
-        chassis.motion_command.leg_length_m = APP_RC_LEG_L;
-        break;
-
-    case REMOTE_LEG_KEEP:
-    default:
-        break;
-    }
-}
-
-/**
- * @brief 维护遥控重新就绪、急停和外层动作模式。
- *
- * 急停和离线只关闭输出许可并保留当前模式，使控制中间量继续更新。
- * 必须先收到FOLLOW请求才建立控制许可；SELF_SAVE只在边沿触发一次。
- */
-void Chassis_SetRemoteInput(const remote_input_t *input, uint8_t online)
-{
-    remote_mode_request_t modeRequest;
-
-    if (input == NULL)
-    {
-        online = 0U;
-        modeRequest = REMOTE_MODE_NONE;
-    }
-    else
-    {
-        modeRequest = input->modeRequest;
-    }
-
-    chassis.remote_online = (online != 0U) ? 1U : 0U;
-    chassis.remote_stop =
-        ((input != NULL) && (input->stop != 0U)) ? 1U : 0U;
-
-    if ((chassis.remote_online == 0U) || (chassis.remote_stop != 0U))
-    {
-        Chassis_SetOutputEnable(0U);
-        chassis.remote_control_ready = 0U;
-        Chassis_HoldRemoteMotion();
-        previousModeRequest = modeRequest;
-        return;
-    }
-
-    if (chassis.remote_control_ready == 0U)
-    {
-        Chassis_SetOutputEnable(0U);
-        Chassis_HoldRemoteMotion();
-        if (modeRequest != REMOTE_MODE_FOLLOW)
-        {
-            previousModeRequest = modeRequest;
-            return;
-        }
-
-        chassis.remote_control_ready = 1U;
-        chassis.remote_target_valid = 1U;
-        chassis.motion_command.yaw_anchor_rad = Chassis_GetModelYawRad();
-        chassis.motion_command.yaw_target_rad =
-            chassis.motion_command.yaw_anchor_rad;
-        if (chassis.mode != CHASSIS_MODE_SELF_SAVE)
-        {
-            Chassis_SetMode(CHASSIS_MODE_FOLLOW);
-        }
-    }
-
-    Chassis_SetOutputEnable(1U);
-    Chassis_UpdateRemoteMotion(input);
-
-    /* 只有恢复状态机真正回到STANDING后，才自动结束SELF_SAVE请求。 */
-    if ((chassis.mode == CHASSIS_MODE_SELF_SAVE) &&
-        (chassis.last_mode == CHASSIS_MODE_SELF_SAVE) &&
-        (chassis.state == CHASSIS_STANDING))
-    {
-        Chassis_SetMode(CHASSIS_MODE_FOLLOW);
-    }
-
-    if (chassis.mode == CHASSIS_MODE_SELF_SAVE)
-    {
-        previousModeRequest = modeRequest;
-        return;
-    }
-
-    /* 自救结束后保持FOLLOW，直到重新收到FOLLOW请求才解除触发锁。 */
-    if (chassis.remote_self_save_latched != 0U)
-    {
-        Chassis_SetMode(CHASSIS_MODE_FOLLOW);
-        if (modeRequest == REMOTE_MODE_FOLLOW)
-        {
-            chassis.remote_self_save_latched = 0U;
-        }
-        previousModeRequest = modeRequest;
-        return;
-    }
-
-    if (modeRequest == REMOTE_MODE_FOLLOW)
-    {
-        Chassis_SetMode(CHASSIS_MODE_FOLLOW);
-    }
-    else if (modeRequest == REMOTE_MODE_BENCH)
-    {
-        Chassis_SetMode(CHASSIS_MODE_BENCH);
-    }
-    else if ((modeRequest == REMOTE_MODE_SELF_SAVE) &&
-             (previousModeRequest != REMOTE_MODE_SELF_SAVE) &&
-             (previousModeRequest != REMOTE_MODE_NONE))
-    {
-        chassis.remote_self_save_latched = 1U;
-        Chassis_SetMode(CHASSIS_MODE_SELF_SAVE);
-    }
-
-    previousModeRequest = modeRequest;
-}
-
 /**
  * @brief 从 IMU、DM、DJI 和 CAN 任务读取本轮底盘反馈。
  */
-static void Chassis_FeedbackUpdate(void)
+static void Chassis_Feedback_Update(void)
 {
     task_imu_state_t imu_state = {0};
     task_remote_state_t remote_state = {0};
@@ -202,23 +30,26 @@ static void Chassis_FeedbackUpdate(void)
 
     /* IMU任务已经完成传感器坐标到整车右手系的转换。 */
     IMU_Task_GetState(&imu_state);
-    chassis.imu.initialized = imu_state.isInitialized;
-    chassis.imu.attitude_ready = imu_state.isAttitudeReady;
-    chassis.imu.error_code = imu_state.lastErrorCode;
-    chassis.imu.roll_rad = imu_state.rollRad;
-    chassis.imu.pitch_rad = imu_state.pitchRad;
-    chassis.imu.yaw_rad = imu_state.yawRad;
-    chassis.imu.yaw_total_rad = imu_state.yawTotalRad;
-    memcpy(chassis.imu.gyro_radps,
+    Chassis.imu.init_flag = imu_state.isInitialized;
+    Chassis.imu.attitude_flag = imu_state.isAttitudeReady;
+    Chassis.imu.error_code = imu_state.lastErrorCode;
+    Chassis.imu.roll = imu_state.rollRad;
+    Chassis.imu.pitch = imu_state.pitchRad;
+    Chassis.imu.yaw = imu_state.yawRad;
+    Chassis.imu.yaw_total = imu_state.yawTotalRad;
+    memcpy(Chassis.imu.gyro,
            imu_state.filteredGyroRadps,
-           sizeof(chassis.imu.gyro_radps));
-    memcpy(chassis.imu.motion_accel_mps2,
+           sizeof(Chassis.imu.gyro));
+    memcpy(Chassis.imu.body_accel,
+           imu_state.bodyMotionAccMps2,
+           sizeof(Chassis.imu.body_accel));
+    memcpy(Chassis.imu.accel,
            imu_state.motionAccMps2,
-           sizeof(chassis.imu.motion_accel_mps2));
+           sizeof(Chassis.imu.accel));
 
     /* 遥控输入在任务层转换为模式和物理目标，不接触LQR或电机输出。 */
     Remote_Task_GetState(&remote_state);
-    Chassis_SetRemoteInput(&remote_state.input, remote_state.online);
+    Chassis_Remote_Update(&remote_state.input, remote_state.online);
 
     /* DM状态保留最后一次反馈值，online只表示本周期是否超时。 */
     for (index = 0U; index < MOTOR_DM_COUNT; index++)
@@ -226,45 +57,45 @@ static void Chassis_FeedbackUpdate(void)
         motor_dm_state_t motor_state = {0};
 
         Motor_DM_GetState((motor_dm_index_t)index, &motor_state);
-        chassis.dm_motor[index].online =
+        Chassis.dm_motor[index].online_flag =
             Motor_DM_IsOnline((motor_dm_index_t)index, now_tick);
-        chassis.dm_motor[index].position_rad = motor_state.positionRad;
-        chassis.dm_motor[index].speed_radps = motor_state.velocityRadps;
-        chassis.dm_motor[index].torque_nm = motor_state.torqueNm;
+        Chassis.dm_motor[index].position_rad = motor_state.positionRad;
+        Chassis.dm_motor[index].speed_radps = motor_state.velocityRadps;
+        Chassis.dm_motor[index].torque_nm = motor_state.torqueNm;
     }
 
     /* DJI轮电机同样分开保存反馈值和在线判定。 */
     for (index = 0U; index < APP_WHEEL_COUNT; index++)
     {
-        chassis.wheel_motor[index].online =
+        Chassis.wheel_motor[index].online_flag =
             Motor_DJI_IsOnline(&chassisDjiWheels[index], now_tick);
-        chassis.wheel_motor[index].speed_rpm = chassisDjiWheels[index].speedRpm;
-        chassis.wheel_motor[index].current = chassisDjiWheels[index].currentRaw;
+        Chassis.wheel_motor[index].speed_rpm = chassisDjiWheels[index].speedRpm;
+        Chassis.wheel_motor[index].current = chassisDjiWheels[index].currentRaw;
     }
 
-    chassis.can_tx_error_count = CAN_Task_GetTxErrorCount();
+    Chassis.can_error_count = CAN_Task_GetTxErrorCount();
 }
 
 /**
  * @brief 将底盘最终命令写入 DM 设备层和 DJI CAN 发送缓存。
  */
-static void Chassis_CommandSend(void)
+static void Chassis_Command_Send(void)
 {
     uint32_t index;
 
     /*
-     * safe_output是任务发送前的最后安全门。触发后只清最终命令，
-     * joint_torque_request_nm和wheel_current_request继续供Watch观察。
+     * output.safe_flag是发送前最后安全门。触发后只清最终命令，
+     * T_joint_req和I_wheel_req继续供Watch观察。
      */
-    Motor_DM_SetSafe(chassis.safe_output);
-    if (chassis.safe_output != 0U)
+    Motor_DM_SetSafe(Chassis.output.safe_flag);
+    if (Chassis.output.safe_flag != 0U)
     {
-        memset(chassis.joint_torque_nm,
+        memset(Chassis.output.T_joint,
                0,
-               sizeof(chassis.joint_torque_nm));
-        memset(chassis.wheel_current,
+               sizeof(Chassis.output.T_joint));
+        memset(Chassis.output.I_wheel,
                0,
-               sizeof(chassis.wheel_current));
+               sizeof(Chassis.output.I_wheel));
         Motor_DM_ZeroAll();
     }
 
@@ -272,14 +103,14 @@ static void Chassis_CommandSend(void)
     for (index = 0U; index < MOTOR_DM_COUNT; index++)
     {
         motor_dm_command_t command = {
-            .torqueNm = chassis.joint_torque_nm[index],
+            .torqueNm = Chassis.output.T_joint[index],
         };
 
         Motor_DM_SetCommand((motor_dm_index_t)index, &command);
     }
 
     /* 更新两类发送缓存后只提交最新命令，不等待ACK或重发旧帧。 */
-    CAN_Task_SetDjiCurrent(chassis.wheel_current);
+    CAN_Task_SetDjiCurrent(Chassis.output.I_wheel);
     Motor_DM_UpdateTxFrames();
     CAN_Task_RequestTx();
 }
@@ -288,9 +119,9 @@ static void Chassis_CommandSend(void)
  * @brief 周期执行底盘反馈、状态选择、控制计算和命令发送。
  *
  * DM协议上电使能只用于取得反馈；非零输出仍由底盘输出许可、设备
- * 状态、分路开关和safe_output共同决定。
+ * 状态、分路开关和output.safe_flag共同决定。
  */
-static void Chassis_TaskEntry(void *argument)
+static void Chassis_Task_Entry(void *argument)
 {
     const float tick_sec = 1.0f / (float)osKernelGetTickFreq();
     uint32_t control_last_tick = 0U;
@@ -314,48 +145,52 @@ static void Chassis_TaskEntry(void *argument)
         /* 底盘PID、速度Kalman和位移积分只使用底盘自己的实际周期。 */
         if (control_last_tick == 0U)
         {
-            chassis.control_dt_s = chassis_config.default_dt_s;
+            Chassis.dt = Chassis_Config.default_dt;
         }
         else
         {
-            chassis.control_dt_s =
+            Chassis.dt =
                 (float)(control_tick - control_last_tick) * tick_sec;
-            if ((chassis.control_dt_s < chassis_config.min_dt_s) ||
-                (chassis.control_dt_s > chassis_config.max_dt_s))
+            if ((Chassis.dt < Chassis_Config.dt_min) ||
+                (Chassis.dt > Chassis_Config.dt_max))
             {
-                chassis.control_dt_s = chassis_config.default_dt_s;
+                Chassis.dt = Chassis_Config.default_dt;
             }
         }
         control_last_tick = control_tick;
 
         /* 反馈 -> 状态选择 -> 控制 -> 电机命令，保持单向数据流。 */
-        Chassis_FeedbackUpdate();
-        Chassis_ControlUpdateLegState();
-        Chassis_ControlUpdateState();
+        Chassis_Feedback_Update();
+        Chassis_Leg_Update();
+        Chassis_State_Update();
 
         /* 内部state只决定本周期调用哪条控制链，外部mode不会在此修改。 */
-        switch (chassis.state)
+        switch (Chassis.state)
         {
         case CHASSIS_STANDING:
-            Chassis_ControlLoop();
+            Chassis_Control();
             break;
 
         case CHASSIS_FALLEN:
         case CHASSIS_FALLING_TO_STAND:
-            Chassis_RecoveryControlLoop();
+            Chassis_Recovery();
             break;
 
         case CHASSIS_BENCH:
-            Chassis_BenchControlLoop();
+            Chassis_Bench();
+            break;
+
+        case CHASSIS_STEP:
+            Chassis_Step();
             break;
 
         case CHASSIS_ZERO_FORCE:
         default:
-            Chassis_ZeroOutput();
+            Chassis_Zero_Output();
             break;
         }
 
-        Chassis_CommandSend();
+        Chassis_Command_Send();
 
         wake_tick += APP_CTRL_TICKS;
         if ((int32_t)(osKernelGetTickCount() - wake_tick) >= 0)
@@ -368,25 +203,7 @@ static void Chassis_TaskEntry(void *argument)
 
 void Chassis_Task_Init(void)
 {
-    Chassis_ControlInit();
-    previousModeRequest = REMOTE_MODE_NONE;
-    yawStickActive = 0U;
-    (void)osThreadNew(Chassis_TaskEntry, NULL, &chassis_task_attributes);
-}
-
-void Chassis_SetOutputEnable(uint8_t enable)
-{
-    chassis.enabled = (enable != 0U) ? 1U : 0U;
-}
-
-void Chassis_SetMode(chassis_mode_t mode)
-{
-    if (mode <= CHASSIS_MODE_BENCH)
-    {
-        chassis.mode = mode;
-    }
-    else
-    {
-        chassis.mode = CHASSIS_MODE_ZERO_FORCE;
-    }
+    Chassis_Init();
+    Chassis_Remote_Init();
+    (void)osThreadNew(Chassis_Task_Entry, NULL, &chassis_task_attributes);
 }

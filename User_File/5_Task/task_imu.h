@@ -23,6 +23,7 @@ typedef struct
     float pitchRad;                                  /* 整车右手系俯仰角，单位 rad。 */
     float yawRad;                                    /* 整车右手系偏航角，单位 rad。 */
     float yawTotalRad;                               /* 整车右手系连续偏航角，单位 rad。 */
+    float bodyMotionAccMps2[BMI088_AXIS_COUNT];      /* 整车右手系机体系去重力运动加速度。 */
     float motionAccMps2[BMI088_AXIS_COUNT];          /* 整车右手系去重力运动加速度，单位 m/s^2。 */
     float accNormMps2;                               /* 原始加速度模长，单位 m/s^2，用于判断静止可信度。 */
     float gyroNormRadps;                             /* 修正后角速度模长，单位 rad/s，用于判断静止可信度。 */

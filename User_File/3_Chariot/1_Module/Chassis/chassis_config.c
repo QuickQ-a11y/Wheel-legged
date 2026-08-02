@@ -5,16 +5,16 @@
  * IMU 任务已经完成坐标转换，本文件中的 scale 只匹配控制模型正方向。
  * DM 顺序为左前、左后、右前、右后；DJI 顺序为左轮、右轮。
  */
-const chassis_config_t chassis_config = {
+const Chassis_Config_t Chassis_Config = {
     /* 左右腿尺寸相同，但电机索引和后续实机标定值分别保存。 */
     .leg = {
         [CHASSIS_LEFT] = {
             .geometry = {
-                .link1_m = 0.215f,
-                .link2_m = 0.258f,
-                .link3_m = 0.258f,
-                .link4_m = 0.215f,
-                .frame_joint_distance_m = 0.0f,
+                .l1 = 0.215f,
+                .l2 = 0.258f,
+                .l3 = 0.258f,
+                .l4 = 0.215f,
+                .l5 = 0.0f,
             },
             .joint = {
                 [CHASSIS_JOINT_FRONT] = {
@@ -30,15 +30,15 @@ const chassis_config_t chassis_config = {
                     .torque_scale = -1.0f,
                 },
             },
-            .target_leg_length_m = 0.25f,
+            .target_L0 = 0.25f,
         },
         [CHASSIS_RIGHT] = {
             .geometry = {
-                .link1_m = 0.215f,
-                .link2_m = 0.258f,
-                .link3_m = 0.258f,
-                .link4_m = 0.215f,
-                .frame_joint_distance_m = 0.0f,
+                .l1 = 0.215f,
+                .l2 = 0.258f,
+                .l3 = 0.258f,
+                .l4 = 0.215f,
+                .l5 = 0.0f,
             },
             .joint = {
                 [CHASSIS_JOINT_FRONT] = {
@@ -54,7 +54,7 @@ const chassis_config_t chassis_config = {
                     .torque_scale = -1.0f,
                 },
             },
-            .target_leg_length_m = 0.25f,
+            .target_L0 = 0.25f,
         },
     },
     /* IMU任务已输出整车右手系数据，此处只匹配控制模型的轴和正方向。 */
@@ -73,25 +73,25 @@ const chassis_config_t chassis_config = {
     },
     /* 轮速用于车体速度观测，轮力矩请求最终换算为DJI原始电流。 */
     .wheel = {
-        .radius_m = 0.10f,
-        .half_track_m = 0.1965f,
-        .left_speed_scale = 1.0f,
-        .right_speed_scale = 1.0f,
+        .R = 0.10f,
+        .half_track = 0.1965f,
+        .left_scale = 1.0f,
+        .right_scale = 1.0f,
         /*
          * 当前轮电机：24 V 直驱，传动比 1，转矩常数 0.02 N*m/A。
          * 空载 9400 rpm/0.6 A，额定 9085 rpm/0.16 N*m/10 A。
          * C620 的 16384 对应 20 A：
-         * torque_to_current = 16384 / (20 * 0.02) = 40960 count/(N*m)
-         * current_limit = 16384 * 10 / 20 = 8192 count
+         * T_to_I = 16384 / (20 * 0.02) = 40960 count/(N*m)
+         * I_limit = 16384 * 10 / 20 = 8192 count
          * 更换轮电机时在此处重算转矩换算、连续转矩和额定电流限幅。
          */
-        .torque_limit_nm = 0.16f,
-        .torque_to_current = 40960.0f,
-        .current_limit = 8192,
+        .T_limit = 0.16f,
+        .T_to_I = 40960.0f,
+        .I_limit = 8192,
     },
     /* 状态为前进速度和前进加速度，矩阵按2x2行优先顺序填写。 */
     .speed_kalman = {
-        .enabled = 1U,
+        .enable_flag = 1U,
         .initial_covariance = {
             1.0f, 0.0f,
             0.0f, 1.0f,
@@ -104,7 +104,7 @@ const chassis_config_t chassis_config = {
             100.0f, 0.0f,
             0.0f, 1.0e12f,
         },
-        .position_speed_limit_mps = 0.1f,
+        .position_d_s_limit = 0.1f,
     },
     /* 腿长PID输出作为虚拟支撑力修正，反馈速度直接作为阻尼项。 */
     .leg_length_pid = {
@@ -128,28 +128,28 @@ const chassis_config_t chassis_config = {
          * 动作阶段参考 SPR，两端腿长改为本工程当前 0.15~0.35 m 工作范围。
          * 串级 PID 和 1 N*m 请求限幅是输出封锁阶段的保守调试初值，后续按实机修改。
          */
-        .bench_leg_length_m = 0.15f,
-        .extended_leg_length_m = 0.35f,
-        .bench_phi0_rad = CHASSIS_HALF_PI,
-        .rotate_offset_rad = 0.30f,
-        .lagging_rotate_offset_rad = 0.60f,
-        .leg_difference_threshold_rad = 0.80f,
-        .ready_theta_min_rad = 0.50f,
-        .ready_theta_max_rad = 1.40f,
-        .direct_prepare_pitch_rad = 0.80f,
-        .ready_pitch_rad = 0.30f,
-        .direct_phi0_min_rad = 0.70f,
-        .direct_phi0_max_rad = 3.00f,
-        .leg_length_tolerance_m = 0.02f,
-        .leg_angle_tolerance_rad = 0.10f,
-        .stable_time_s = 0.10f,
-        .fallen_timeout_s = 5.0f,
-        .prepare_timeout_s = 3.0f,
-        .standing_length_rate_mps = 0.10f,
-        .standing_pitch_limit_rad = 1.60f,
-        .standing_phi0_min_rad = 0.40f,
-        .standing_phi0_max_rad = 2.80f,
-        .joint_torque_limit_nm = 1.0f,
+        .bench_L0 = 0.15f,
+        .extend_L0 = 0.35f,
+        .bench_phi0 = CHASSIS_HALF_PI,
+        .rotate_phi0 = 0.30f,
+        .lag_phi0 = 0.60f,
+        .theta_diff = 0.80f,
+        .theta_min = 0.50f,
+        .theta_max = 1.40f,
+        .direct_pitch = 0.80f,
+        .ready_pitch = 0.30f,
+        .phi0_min = 0.70f,
+        .phi0_max = 3.00f,
+        .L0_tol = 0.02f,
+        .angle_tol = 0.10f,
+        .stable_time = 0.10f,
+        .fallen_timeout = 5.0f,
+        .prepare_timeout = 3.0f,
+        .L0_rate = 0.10f,
+        .pitch_limit = 1.60f,
+        .stand_phi0_min = 0.40f,
+        .stand_phi0_max = 2.80f,
+        .joint_T_limit = 1.0f,
         .joint_angle_pid = {
             .kp = 4.0f,
             .ki = 0.0f,
@@ -165,14 +165,80 @@ const chassis_config_t chassis_config = {
             .outputLimit = 1.0f,
         },
     },
+    /* 小陀螺保留速度和姿态反馈，关闭位移与航向角位置反馈。 */
+    .top = {
+        .max_d_s = 0.25f,
+        .max_d_fai = 2.0f,
+        .scale = {
+            [CHASSIS_STATE_S] = 0.0f,
+            [CHASSIS_STATE_DOT_S] = 1.0f,
+            [CHASSIS_STATE_FAI] = 0.0f,
+            [CHASSIS_STATE_DOT_FAI] = 1.0f,
+            [CHASSIS_STATE_THETA_L] = 1.0f,
+            [CHASSIS_STATE_DOT_THETA_L] = 1.0f,
+            [CHASSIS_STATE_THETA_R] = 1.0f,
+            [CHASSIS_STATE_DOT_THETA_R] = 1.0f,
+            [CHASSIS_STATE_THETA_B] = 1.0f,
+            [CHASSIS_STATE_DOT_THETA_B] = 1.0f,
+        },
+    },
+    /* 当前均为输出封锁阶段的保守调试初值。 */
+    .step = {
+        .approach_L0 = 0.35f,
+        .retract_L0 = 0.15f,
+        .approach_d_s = 0.10f,
+        .contact_T_req = 0.12f,
+        .contact_T_fb = 0.08f,
+        .contact_theta = 0.30f,
+        .contact_time = 0.05f,
+        .peak_theta = 0.80f,
+        .recover_theta = 0.0f,
+        .L0_tol = 0.02f,
+        .angle_tol = 0.10f,
+        .stable_time = 0.10f,
+        .prepare_timeout = 3.0f,
+        .approach_timeout = 10.0f,
+        .climb_timeout = 3.0f,
+        .recover_timeout = 2.0f,
+        .leg_angle_pid = {
+            .kp = 4.0f,
+            .ki = 0.0f,
+            .kd = 0.2f,
+            .integralLimit = 0.0f,
+            .outputLimit = 1.0f,
+        },
+    },
+    /* 质量来自现有MATLAB名义模型，仅用于生成Watch估计量。 */
+    .observer = {
+        .gravity_mps2 = 9.81f,
+        .body_mass_kg = 10.0f,
+        .leg_mass_kg = 0.5f,
+        .wheel_mass_kg = 1.0f,
+        .body_cg_to_hip_m = 0.04f,
+        .residual_filter_s = 0.02f,
+        .turn_filter_s = 0.05f,
+        .normal_force_filter_s = 0.02f,
+        .slip_speed_enter_mps = 0.20f,
+        .slip_speed_exit_mps = 0.10f,
+        .slip_yaw_enter_radps = 0.80f,
+        .slip_yaw_exit_radps = 0.40f,
+        .slip_delta_enter_mps = 0.03f,
+        .slip_delta_exit_mps = 0.015f,
+        .slip_enter_s = 0.05f,
+        .slip_exit_s = 0.20f,
+        .off_force_ratio = 0.20f,
+        .land_force_ratio = 0.35f,
+        .off_hold_s = 0.03f,
+        .land_hold_s = 0.05f,
+        .turn_force_limit_ratio = 0.50f,
+    },
     /* 四路输出、十个状态分别保存一组双腿长poly22系数。 */
     .lqr = {
-        .enabled = 1U,
-        .length_source = CHASSIS_K_LENGTH_FIXED,
-        .min_leg_length_m = 0.15f,
-        .max_leg_length_m = 0.35f,
-        .fixed_left_length_m = 0.25f,
-        .fixed_right_length_m = 0.25f,
+        .enable_flag = 1U,
+        .L0_source = CHASSIS_K_LENGTH_FIXED,
+        .L0_min = 0.15f,
+        .L0_max = 0.35f,
+        .fixed_L0 = {0.25f, 0.25f},
         /*
          * MATLAB poly22 顺序：p00、p10、p01、p20、p11、p02。
          * 两个输入依次为左腿长和右腿长，单位 m。
@@ -235,19 +301,19 @@ const chassis_config_t chassis_config = {
          * 11/12.5 N*m 峰值未配置持续时间保护，因此暂不作为运行限幅。
          * MIT 协议映射量程在 app_config.h 中配置，当前为 +/-40 N*m。
          */
-        .joint_enabled = 0U,
-        .wheel_enabled = 0U,
-        .joint_torque_limit_nm = 3.5f,
+        .joint_flag = 0U,
+        .wheel_flag = 0U,
+        .joint_T_limit = 3.5f,
     },
     /* 整车公共目标、支撑力前馈、控制周期边界和固定K备用表。 */
-    .leg_vertical_offset_rad = CHASSIS_HALF_PI,
-    .target_roll_rad = 0.0f,
-    .base_support_force_n = -30.0f,
-    .left_support_feedforward_n = 0.0f,
-    .right_support_feedforward_n = 0.0f,
-    .default_dt_s = APP_CTRL_DT_S,
-    .min_dt_s = 0.0002f,
-    .max_dt_s = 0.02f,
-    .target_state = {0.0f},
-    .fixed_lqr_k = {{0.0f}},
+    .phi0_offset = CHASSIS_HALF_PI,
+    .roll_target = 0.0f,
+    .F0_base = -30.0f,
+    .F0_left = 0.0f,
+    .F0_right = 0.0f,
+    .default_dt = APP_CTRL_DT_S,
+    .dt_min = 0.0002f,
+    .dt_max = 0.02f,
+    .target = {0.0f},
+    .fixed_K = {{0.0f}},
 };

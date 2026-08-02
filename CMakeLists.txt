@@ -68,6 +68,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     User_File/2_Device/Communication/DR16/device_dr16.c
     User_File/3_Chariot/1_Module/Chassis/chassis_config.c
     User_File/3_Chariot/1_Module/Chassis/chassis_control.c
+    User_File/3_Chariot/1_Module/Chassis/chassis_observer.c
+    User_File/3_Chariot/1_Module/Chassis/chassis_remote.c
     User_File/3_Chariot/1_Module/Chassis/chassis_vmc.c
     User_File/5_Task/task_can.c
     User_File/5_Task/chassis_task.c

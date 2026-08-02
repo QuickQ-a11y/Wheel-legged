@@ -212,6 +212,7 @@ static void testGenericInputMapping(void)
 {
     dr16_data_t data = {
         .rightX = -660,
+        .leftX = 335,
         .leftY = 660,
         .dial = 500,
         .rightSwitch = DR16_SWITCH_DOWN,
@@ -222,6 +223,7 @@ static void testGenericInputMapping(void)
 
     DR16_MakeInput(&data, 10, 400, &input);
     assert(input.forwardAxis == 1.0f);
+    assert(input.lateralAxis == 0.5f);
     assert(input.yawAxis == -1.0f);
     assert(input.stop == 1U);
     assert(input.modeRequest == REMOTE_MODE_FOLLOW);

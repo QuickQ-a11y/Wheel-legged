@@ -268,23 +268,6 @@ static void IMU_Task_UpdateMotionAcceleration(task_imu_state_t *state)
         return;
     }
 
-    Algorithm_QuaternionEKF_EarthToBody(gravityEarth,
-                                         state->quaternion,
-                                         gravityBody);
-
-    for (axis = 0U; axis < BMI088_AXIS_COUNT; axis++)
-    {
-        motionAccBody[axis] = data->accMps2[axis] - gravityBody[axis];
-    }
-
-    /*
-     * 运动加速度先转到滤波器内部导航坐标，保存给业务层前再转成整车右手系。
-     * 当前 yaw 仍由陀螺积分主导，长时间运行时 X/Y 方向会随 yaw 漂移。
-     */
-    Algorithm_QuaternionEKF_BodyToEarth(motionAccBody,
-                                         state->quaternion,
-                                         motionAccEarth);
-
     if ((APP_IMU_ACCEL_LPF_S <= 0.0f) ||
         (state->dtSec <= 0.0f))
     {
@@ -295,6 +278,26 @@ static void IMU_Task_UpdateMotionAcceleration(task_imu_state_t *state)
         filterRatio =
             state->dtSec / (APP_IMU_ACCEL_LPF_S + state->dtSec);
     }
+
+    Algorithm_QuaternionEKF_EarthToBody(gravityEarth,
+                                         state->quaternion,
+                                         gravityBody);
+
+    for (axis = 0U; axis < BMI088_AXIS_COUNT; axis++)
+    {
+        motionAccBody[axis] = data->accMps2[axis] - gravityBody[axis];
+        state->bodyMotionAccMps2[axis] =
+            (filterRatio * motionAccBody[axis]) +
+            ((1.0f - filterRatio) * state->bodyMotionAccMps2[axis]);
+    }
+
+    /*
+     * 运动加速度先转到滤波器内部导航坐标，保存给业务层前再转成整车右手系。
+     * 当前 yaw 仍由陀螺积分主导，长时间运行时 X/Y 方向会随 yaw 漂移。
+     */
+    Algorithm_QuaternionEKF_BodyToEarth(motionAccBody,
+                                         state->quaternion,
+                                         motionAccEarth);
 
     for (axis = 0U; axis < BMI088_AXIS_COUNT; axis++)
     {
@@ -335,6 +338,8 @@ static void IMU_Task_BuildRightHandOutput(const task_imu_state_t *internalState,
     *outputState = *internalState;
 
     /* Z 轴镜像时，线加速度是普通向量，仅 Z 分量反号。 */
+    outputState->bodyMotionAccMps2[2] =
+        -outputState->bodyMotionAccMps2[2];
     outputState->motionAccMps2[2] = -outputState->motionAccMps2[2];
 
     /*

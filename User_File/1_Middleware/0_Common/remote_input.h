@@ -14,6 +14,8 @@ typedef enum
     REMOTE_MODE_FOLLOW,
     REMOTE_MODE_BENCH,
     REMOTE_MODE_SELF_SAVE,
+    REMOTE_MODE_TOP,
+    REMOTE_MODE_STEP,
 } remote_mode_request_t;
 
 /** @brief 遥控后端发布给底盘的离散腿长请求。 */
@@ -29,6 +31,7 @@ typedef enum
 typedef struct
 {
     float forwardAxis;                 /* 前进轴，范围-1..1。 */
+    float lateralAxis;                 /* 横向轴，范围-1..1，仅小陀螺投影使用。 */
     float yawAxis;                     /* 航向轴，范围-1..1。 */
     uint8_t stop;                      /* 非零时封锁最终电机输出。 */
     remote_mode_request_t modeRequest; /* 当前外层模式请求。 */
