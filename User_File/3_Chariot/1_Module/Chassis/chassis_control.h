@@ -118,7 +118,6 @@ typedef struct
     float target[CHASSIS_STATE_COUNT];
     float scale[CHASSIS_STATE_COUNT];
     float K[CHASSIS_OUTPUT_COUNT][CHASSIS_STATE_COUNT];
-    uint8_t fit_flag;
     uint8_t limit_flag;
 } Chassis_LQR_t;
 
@@ -177,7 +176,6 @@ struct Chassis
     float stable_time;
     Chassis_Output_t output;
     uint32_t fault;
-    uint8_t calc_flag;              /* 本轮控制链已执行到末端，不代表输出已放行。 */
 
     /* 需要跨控制周期保存的滤波器和PID状态。 */
     algorithm_kalman_t speed_kalman;

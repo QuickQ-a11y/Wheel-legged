@@ -24,11 +24,11 @@ typedef enum
     CHASSIS_LEG_COUNT,
 } Chassis_Side_t;
 
-/* 单腿两根主动杆对应的前、后髋关节下标。 */
+/* 单腿两根主动杆按五连杆共同符号定义的关节下标。 */
 typedef enum
 {
-    CHASSIS_JOINT_FRONT = 0,
-    CHASSIS_JOINT_BACK,
+    CHASSIS_JOINT_PHI1 = 0,
+    CHASSIS_JOINT_PHI4,
     CHASSIS_JOINT_COUNT,
 } Chassis_Joint_t;
 
@@ -57,11 +57,11 @@ typedef enum
 /** @brief 单侧五连杆的机械尺寸。 */
 typedef struct
 {
-    float l1;                         /* 前主动杆长度，m。 */
-    float l2;                         /* 前从动杆长度，m。 */
-    float l3;                         /* 后从动杆长度，m。 */
-    float l4;                         /* 后主动杆长度，m。 */
-    float l5;                         /* 前后髋轴间距，m。 */
+    float l1;                         /* phi1主动杆长度，m。 */
+    float l2;                         /* phi1侧从动杆长度，m。 */
+    float l3;                         /* phi4侧从动杆长度，m。 */
+    float l4;                         /* phi4主动杆长度，m。 */
+    float l5;                         /* 两个主动杆输出铰点间距，m。 */
 } Chassis_Geometry_Config_t;
 
 /** @brief 关节电机索引以及电机量到几何量的符号映射。 */
@@ -69,8 +69,8 @@ typedef struct
 {
     uint8_t motor_index;              /* 在DM反馈和命令数组中的索引。 */
     float angle_offset_rad;           /* 电机零位对应的几何角偏置，单位 rad。 */
-    float angle_scale;                /* 电机位置、速度到几何正方向的比例。 */
-    float torque_scale;               /* VMC几何力矩到电机正方向的比例。 */
+    float scale;                      /* 电机与几何关节的方向，取+1或-1。 */
+    float ratio;                      /* 几何关节角/电机角传动比。 */
 } Chassis_Joint_Config_t;
 
 /** @brief 单腿机械、关节映射和正常站立目标腿长。 */
@@ -102,10 +102,10 @@ typedef struct
 {
     float R;               /* 轮半径，m。 */
     float half_track;      /* 半轮距，m。 */
-    float left_scale;      /* 左轮反馈到整车前进正方向的比例。 */
-    float right_scale;     /* 右轮反馈到整车前进正方向的比例。 */
+    float left_scale;      /* 左轮反馈和命令到模型正方向的比例。 */
+    float right_scale;     /* 右轮反馈和命令到模型正方向的比例。 */
     float T_limit;         /* 单轮LQR力矩请求限幅，N*m。 */
-    float T_to_I;          /* 轮力矩到DJI原始电流的比例。 */
+    float T_to_I;          /* 轮力矩绝对方向到DJI原始电流的比例。 */
     int16_t I_limit;       /* 单轮原始电流绝对值限幅。 */
 } Chassis_Wheel_Config_t;
 
@@ -211,21 +211,11 @@ typedef struct
     float turn_force_limit_ratio;
 } Chassis_Observer_Config_t;
 
-/* LQR拟合使用固定调试腿长或当前五连杆实测腿长。 */
-typedef enum
-{
-    CHASSIS_K_LENGTH_FIXED = 0,
-    CHASSIS_K_LENGTH_MEASURED,
-} Chassis_K_Source_t;
-
-/** @brief 双腿长poly22增益拟合的范围、输入来源和系数表。 */
+/** @brief 双腿长poly22增益拟合的范围和系数表。 */
 typedef struct
 {
-    uint8_t enable_flag;                 /* 0使用fixed_K，1使用poly22拟合。 */
-    Chassis_K_Source_t L0_source;
-    float L0_min;                       /* 拟合腿长下限，m。 */
-    float L0_max;                       /* 拟合腿长上限，m。 */
-    float fixed_L0[CHASSIS_LEG_COUNT]; /* 固定调试腿长，m。 */
+    float L0_min; /* 当前系数实际采样腿长下限，m。 */
+    float L0_max; /* 当前系数实际采样腿长上限，m。 */
     float coefficients[CHASSIS_OUTPUT_COUNT][CHASSIS_STATE_COUNT]
                       [ALGORITHM_LQR_POLY22_COEFFICIENT_COUNT];
 } Chassis_LQR_Config_t;
@@ -254,7 +244,6 @@ typedef struct
     float dt_min;                   /* 最小控制周期，s。 */
     float dt_max;                   /* 最大控制周期，s。 */
     float target[CHASSIS_STATE_COUNT]; /* 十维LQR默认目标状态。 */
-    float fixed_K[CHASSIS_OUTPUT_COUNT][CHASSIS_STATE_COUNT]; /* 固定K。 */
 } Chassis_Config_t;
 
 extern const Chassis_Config_t Chassis_Config;

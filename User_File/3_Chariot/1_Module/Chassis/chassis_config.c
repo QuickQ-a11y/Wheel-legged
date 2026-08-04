@@ -2,7 +2,8 @@
 
 /*
  * 整车业务坐标使用右手系：X 前、Y 左、Z 上。
- * IMU 任务已经完成坐标转换，本文件中的 scale 只匹配控制模型正方向。
+ * IMU 任务已经完成坐标转换，本文件中的 scale 匹配控制模型正方向，ratio
+ * 描述同步带传动的角度比例。
  * DM 顺序为左前、左后、右前、右后；DJI 顺序为左轮、右轮。
  */
 const Chassis_Config_t Chassis_Config = {
@@ -10,48 +11,48 @@ const Chassis_Config_t Chassis_Config = {
     .leg = {
         [CHASSIS_LEFT] = {
             .geometry = {
-                .l1 = 0.215f,
-                .l2 = 0.258f,
-                .l3 = 0.258f,
-                .l4 = 0.215f,
+                .l1 = 0.13787f,
+                .l2 = 0.15817f,
+                .l3 = 0.15817f,
+                .l4 = 0.13787f,
                 .l5 = 0.0f,
             },
             .joint = {
-                [CHASSIS_JOINT_FRONT] = {
-                    .motor_index = 0U,
-                    .angle_offset_rad = CHASSIS_PI,
-                    .angle_scale = -1.0f,
-                    .torque_scale = -1.0f,
-                },
-                [CHASSIS_JOINT_BACK] = {
+                [CHASSIS_JOINT_PHI1] = {
                     .motor_index = 1U,
-                    .angle_offset_rad = 0.0f,
-                    .angle_scale = -1.0f,
-                    .torque_scale = -1.0f,
+                    .angle_offset_rad = CHASSIS_HALF_PI,
+                    .scale = 1.0f,
+                    .ratio = 0.75f,
+                },
+                [CHASSIS_JOINT_PHI4] = {
+                    .motor_index = 0U,
+                    .angle_offset_rad = CHASSIS_HALF_PI,
+                    .scale = 1.0f,
+                    .ratio = 0.75f,
                 },
             },
             .target_L0 = 0.25f,
         },
         [CHASSIS_RIGHT] = {
             .geometry = {
-                .l1 = 0.215f,
-                .l2 = 0.258f,
-                .l3 = 0.258f,
-                .l4 = 0.215f,
+                .l1 = 0.13787f,
+                .l2 = 0.15817f,
+                .l3 = 0.15817f,
+                .l4 = 0.13787f,
                 .l5 = 0.0f,
             },
             .joint = {
-                [CHASSIS_JOINT_FRONT] = {
-                    .motor_index = 2U,
-                    .angle_offset_rad = CHASSIS_PI,
-                    .angle_scale = -1.0f,
-                    .torque_scale = -1.0f,
-                },
-                [CHASSIS_JOINT_BACK] = {
+                [CHASSIS_JOINT_PHI1] = {
                     .motor_index = 3U,
-                    .angle_offset_rad = 0.0f,
-                    .angle_scale = -1.0f,
-                    .torque_scale = -1.0f,
+                    .angle_offset_rad = CHASSIS_HALF_PI,
+                    .scale = -1.0f,
+                    .ratio = 0.75f,
+                },
+                [CHASSIS_JOINT_PHI4] = {
+                    .motor_index = 2U,
+                    .angle_offset_rad = CHASSIS_HALF_PI,
+                    .scale = -1.0f,
+                    .ratio = 0.75f,
                 },
             },
             .target_L0 = 0.25f,
@@ -71,7 +72,7 @@ const Chassis_Config_t Chassis_Config = {
         .forward_accel_axis = 0U,
         .forward_accel_scale = 1.0f,
     },
-    /* 轮速用于车体速度观测，轮力矩请求最终换算为DJI原始电流。 */
+    /* 左右scale同时约束反馈和命令，避免同一轮方向在两处独立维护。 */
     .wheel = {
         .R = 0.10f,
         .half_track = 0.1965f,
@@ -102,6 +103,10 @@ const Chassis_Config_t Chassis_Config = {
         },
         .measurement_noise = {
             100.0f, 0.0f,
+            /*
+             * 加速度权重暂时保持关闭量级，待采集实车噪声后再标定Q/R；
+             * 当前不能描述为已经完成IMU加速度融合。
+             */
             0.0f, 1.0e12f,
         },
         .position_d_s_limit = 0.1f,
@@ -125,11 +130,11 @@ const Chassis_Config_t Chassis_Config = {
     /* 倒地转腿、小板凳准备和关节串级位置控制参数。 */
     .recovery = {
         /*
-         * 动作阶段参考 SPR，两端腿长改为本工程当前 0.15~0.35 m 工作范围。
+         * 动作阶段参考 SPR，目标限制在本机构约0.296 m的最大可达腿长内。
          * 串级 PID 和 1 N*m 请求限幅是输出封锁阶段的保守调试初值，后续按实机修改。
          */
         .bench_L0 = 0.15f,
-        .extend_L0 = 0.35f,
+        .extend_L0 = 0.29f,
         .bench_phi0 = CHASSIS_HALF_PI,
         .rotate_phi0 = 0.30f,
         .lag_phi0 = 0.60f,
@@ -184,7 +189,7 @@ const Chassis_Config_t Chassis_Config = {
     },
     /* 当前均为输出封锁阶段的保守调试初值。 */
     .step = {
-        .approach_L0 = 0.35f,
+        .approach_L0 = 0.29f,
         .retract_L0 = 0.15f,
         .approach_d_s = 0.10f,
         .contact_T_req = 0.12f,
@@ -232,13 +237,14 @@ const Chassis_Config_t Chassis_Config = {
         .land_hold_s = 0.05f,
         .turn_force_limit_ratio = 0.50f,
     },
-    /* 四路输出、十个状态分别保存一组双腿长poly22系数。 */
+    /*
+     * 四路输出、十个状态分别保存一组双腿长poly22系数。
+     * 现有MATLAB脚本实际采样0.12~0.31 m；重新生成系数前按真实
+     * 采样边界限幅，禁止0.31 m以上继续外推。
+     */
     .lqr = {
-        .enable_flag = 1U,
-        .L0_source = CHASSIS_K_LENGTH_FIXED,
-        .L0_min = 0.15f,
-        .L0_max = 0.35f,
-        .fixed_L0 = {0.25f, 0.25f},
+        .L0_min = 0.12f,
+        .L0_max = 0.31f,
         /*
          * MATLAB poly22 顺序：p00、p10、p01、p20、p11、p02。
          * 两个输入依次为左腿长和右腿长，单位 m。
@@ -305,7 +311,7 @@ const Chassis_Config_t Chassis_Config = {
         .wheel_flag = 0U,
         .joint_T_limit = 3.5f,
     },
-    /* 整车公共目标、支撑力前馈、控制周期边界和固定K备用表。 */
+    /* 整车公共目标、支撑力前馈和控制周期边界。 */
     .phi0_offset = CHASSIS_HALF_PI,
     .roll_target = 0.0f,
     .F0_base = -30.0f,
@@ -315,5 +321,4 @@ const Chassis_Config_t Chassis_Config = {
     .dt_min = 0.0002f,
     .dt_max = 0.02f,
     .target = {0.0f},
-    .fixed_K = {{0.0f}},
 };

@@ -17,17 +17,17 @@ static Chassis_Leg_Config_t make_leg_config(uint8_t motor_offset)
             .l5 = 0.0f,
         },
         .joint = {
-            [CHASSIS_JOINT_FRONT] = {
+            [CHASSIS_JOINT_PHI1] = {
                 .motor_index = motor_offset,
                 .angle_offset_rad = CHASSIS_PI,
-                .angle_scale = -1.0f,
-                .torque_scale = -1.0f,
+                .scale = -1.0f,
+                .ratio = 1.0f,
             },
-            [CHASSIS_JOINT_BACK] = {
+            [CHASSIS_JOINT_PHI4] = {
                 .motor_index = motor_offset + 1U,
                 .angle_offset_rad = 0.0f,
-                .angle_scale = -1.0f,
-                .torque_scale = -1.0f,
+                .scale = -1.0f,
+                .ratio = 1.0f,
             },
         },
     };
@@ -77,10 +77,10 @@ static void set_feedback_force(const Chassis_Config_t *config,
                                F0,
                                0.0f,
                                &torque) == 1U);
-        chassis->dm_motor[leg_config->joint[CHASSIS_JOINT_FRONT].motor_index]
-            .torque_nm = torque.T_A;
-        chassis->dm_motor[leg_config->joint[CHASSIS_JOINT_BACK].motor_index]
-            .torque_nm = torque.T_E;
+        chassis->dm_motor[leg_config->joint[CHASSIS_JOINT_PHI1].motor_index]
+            .torque_nm = torque.T1;
+        chassis->dm_motor[leg_config->joint[CHASSIS_JOINT_PHI4].motor_index]
+            .torque_nm = torque.T4;
     }
 }
 

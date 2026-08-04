@@ -115,7 +115,7 @@ static void Observer_Slip_Update(
             observer->delta_residual_mps[side] =
                 (chassis->body.side_speed[side] -
                  observer->last_side_speed[side]) -
-                chassis->imu.body_accel[0] * chassis->dt;
+                chassis->body.dd_s * chassis->dt;
         }
 
         enter_flag =
@@ -192,10 +192,10 @@ static void Observer_Force_Update(
         float dd_theta_raw = 0.0f;
         float leg_accel;
         float Fn;
-        uint8_t front_index =
-            leg_config[side].joint[CHASSIS_JOINT_FRONT].motor_index;
-        uint8_t back_index =
-            leg_config[side].joint[CHASSIS_JOINT_BACK].motor_index;
+        uint8_t phi1_index =
+            leg_config[side].joint[CHASSIS_JOINT_PHI1].motor_index;
+        uint8_t phi4_index =
+            leg_config[side].joint[CHASSIS_JOINT_PHI4].motor_index;
         uint8_t force_flag;
 
         if (chassis->dt > CHASSIS_OBS_EPS)
@@ -223,8 +223,8 @@ static void Observer_Force_Update(
         force_flag = VMC_Force_Calc(
             &leg_config[side],
             &chassis->leg[side],
-            chassis->dm_motor[front_index].torque_nm,
-            chassis->dm_motor[back_index].torque_nm,
+            chassis->dm_motor[phi1_index].torque_nm,
+            chassis->dm_motor[phi4_index].torque_nm,
             &observer->feedback_force[side]);
         observer->force_valid_flag[side] = force_flag;
         if ((force_flag == 0U) ||

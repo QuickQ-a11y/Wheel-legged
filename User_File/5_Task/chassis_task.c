@@ -96,7 +96,7 @@ static void Chassis_Command_Send(void)
         memset(Chassis.output.I_wheel,
                0,
                sizeof(Chassis.output.I_wheel));
-        Motor_DM_ZeroAll();
+        Motor_DM_ClearCommands();
     }
 
     /* 最终关节数组逐项写入DM设备层命令缓存。 */
@@ -131,7 +131,6 @@ static void Chassis_Task_Entry(void *argument)
 
     Motor_DM_Init();
     Motor_DM_SetSafe(1U);
-    Motor_DM_ZeroAll();
     /*
      * DM 必须进入协议使能状态才会持续反馈。协议使能后仍由 safe 和
      * 底盘最终输出数组双重保证零力矩，不等同于开放底盘动力输出。

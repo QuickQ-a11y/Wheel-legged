@@ -21,13 +21,13 @@ typedef enum
 typedef struct
 {
     app_can_bus_t bus;           /* 电机所在 CAN 总线。 */
-    uint32_t motorId;            /* 控制帧 ID，也是反馈 D[0] 中的电机 ID。 */
-    int8_t direction;            /* 机械安装方向，1 或 -1。 */
+    uint32_t commandId;          /* MIT控制帧标准ID。 */
+    uint32_t feedbackId;         /* 调试助手配置的反馈帧标准ID。 */
 } motor_dm_config_t;
 
 typedef struct
 {
-    float positionWrappedRad;    /* 单圈反馈位置，范围 [-pi, pi]，单位 rad。 */
+    float positionWrappedRad;    /* 反馈帧解码位置，协议范围 [-12.5, 12.5] rad。 */
     float positionRad;           /* 本次在线期间连续展开的位置，单位 rad。 */
     float velocityRadps;         /* 反馈速度，单位 rad/s。 */
     float torqueNm;              /* 反馈力矩，单位 N*m。 */
@@ -73,7 +73,9 @@ uint8_t Motor_DM_IsSafe(void);
 void Motor_DM_SetEnable(uint8_t enable);
 uint8_t Motor_DM_IsEnabled(void);
 uint8_t Motor_DM_IsOnline(motor_dm_index_t index, uint32_t nowTick);
-void Motor_DM_ZeroAll(void);
+
+/** @brief 清空软件保存的四路力矩命令，不修改电机零点。 */
+void Motor_DM_ClearCommands(void);
 
 /**
  * @brief 将当前 DM 命令打包并更新到 CAN 发送缓存。

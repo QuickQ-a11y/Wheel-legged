@@ -17,6 +17,7 @@ static motor_dm_object_t dmMotors[MOTOR_DM_COUNT];
 static uint8_t dmSafe = 1U;
 static uint8_t dmEnable;
 static uint8_t dmModeRequest;
+static uint32_t dmEnableTick[MOTOR_DM_COUNT];
 
 /**
  * @brief 对浮点值限幅。
@@ -87,25 +88,41 @@ static FDCAN_HandleTypeDef *Motor_DM_GetCanHandle(app_can_bus_t bus)
 /**
  * @brief 向发送缓存写入 DM 使能或失能特殊帧。
  */
+static void Motor_DM_UpdateModeFrame(uint32_t index, uint8_t enable)
+{
+    uint8_t data[APP_DM_FRAME_LEN] = {
+        0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU,
+        (enable != 0U) ? 0xFCU : 0xFDU,
+    };
+    FDCAN_HandleTypeDef *handle;
+
+    if (index >= MOTOR_DM_COUNT)
+    {
+        return;
+    }
+
+    handle = Motor_DM_GetCanHandle(dmMotors[index].config.bus);
+    if (handle == NULL)
+    {
+        return;
+    }
+
+    CAN_Task_UpdateTxFrame(handle,
+                           dmMotors[index].config.commandId,
+                           data,
+                           APP_DM_FRAME_LEN);
+}
+
+/**
+ * @brief 向发送缓存写入四台 DM 的使能或失能特殊帧。
+ */
 static void Motor_DM_UpdateModeFrames(void)
 {
     uint32_t index;
 
     for (index = 0U; index < MOTOR_DM_COUNT; index++)
     {
-        uint8_t data[APP_DM_FRAME_LEN] = {
-            0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU,
-            (dmEnable != 0U) ? 0xFCU : 0xFDU,
-        };
-        FDCAN_HandleTypeDef *handle = Motor_DM_GetCanHandle(dmMotors[index].config.bus);
-
-        if (handle != NULL)
-        {
-            CAN_Task_UpdateTxFrame(handle,
-                                   dmMotors[index].config.motorId,
-                                   data,
-                                   APP_DM_FRAME_LEN);
-        }
+        Motor_DM_UpdateModeFrame(index, dmEnable);
     }
 }
 
@@ -114,17 +131,26 @@ void Motor_DM_Init(void)
     memset(dmMotors, 0, sizeof(dmMotors));
 
     dmMotors[MOTOR_DM_LEFT_FRONT].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_DM_LF_ID, APP_DM_L_DIR};
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN1,
+                            APP_DM_LF_ID,
+                            APP_DM_LF_FB};
     dmMotors[MOTOR_DM_LEFT_BACK].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_DM_LB_ID, APP_DM_L_DIR};
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN1,
+                            APP_DM_LB_ID,
+                            APP_DM_LB_FB};
     dmMotors[MOTOR_DM_RIGHT_FRONT].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_DM_RF_ID, APP_DM_R_DIR};
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN1,
+                            APP_DM_RF_ID,
+                            APP_DM_RF_FB};
     dmMotors[MOTOR_DM_RIGHT_BACK].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN1, APP_DM_RB_ID, APP_DM_R_DIR};
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN1,
+                            APP_DM_RB_ID,
+                            APP_DM_RB_FB};
 
     dmSafe = 1U;
     dmEnable = 0U;
     dmModeRequest = 0U;
+    memset(dmEnableTick, 0, sizeof(dmEnableTick));
 }
 
 void Motor_DM_UpdateFeedback(app_can_bus_t bus,
@@ -135,7 +161,7 @@ void Motor_DM_UpdateFeedback(app_can_bus_t bus,
     uint32_t now_tick;
     uint32_t index;
 
-    if ((data == NULL) || (identifier != APP_DM_FB_MASTER))
+    if (data == NULL)
     {
         return;
     }
@@ -147,20 +173,23 @@ void Motor_DM_UpdateFeedback(app_can_bus_t bus,
         motor_dm_object_t *motor = &dmMotors[index];
 
         if ((motor->config.bus != bus) ||
-            ((motor->config.motorId & 0x0FU) != feedback_motor_id))
+            (motor->config.feedbackId != identifier))
         {
             continue;
+        }
+        if ((motor->config.commandId & 0x0FU) != feedback_motor_id)
+        {
+            return;
         }
 
         uint16_t positionRaw = ((uint16_t)data[1] << 8U) | (uint16_t)data[2];
         uint16_t velocityRaw = ((uint16_t)data[3] << 4U) | ((uint16_t)data[4] >> 4U);
         uint16_t torqueRaw = (((uint16_t)data[4] & 0x0FU) << 8U) | (uint16_t)data[5];
-        float direction = (float)motor->config.direction;
         float wrapped_position_rad =
             Motor_DM_UintToFloat(positionRaw,
-                                 APP_DM_FB_PMIN,
-                                 APP_DM_FB_PMAX,
-                                 16U) * direction;
+                                 APP_DM_PMIN,
+                                 APP_DM_PMAX,
+                                 16U);
 
         motor->state.state = data[0] >> 4U;
         if ((motor->state.feedbackCount == 0U) ||
@@ -180,12 +209,12 @@ void Motor_DM_UpdateFeedback(app_can_bus_t bus,
             Motor_DM_UintToFloat(velocityRaw,
                                  APP_DM_VEL_MIN,
                                  APP_DM_VEL_MAX,
-                                 12U) * direction;
+                                 12U);
         motor->state.torqueNm =
             Motor_DM_UintToFloat(torqueRaw,
                                  APP_DM_TOR_MIN,
                                  APP_DM_TOR_MAX,
-                                 12U) * direction;
+                                 12U);
         motor->state.mosTemperature = data[6];
         motor->state.rotorTemperature = data[7];
         motor->state.feedbackCount++;
@@ -259,7 +288,7 @@ uint8_t Motor_DM_IsOnline(motor_dm_index_t index, uint32_t nowTick)
     return ((nowTick - dmMotors[index].state.lastUpdateTick) <= APP_DM_TIMEOUT_TICKS) ? 1U : 0U;
 }
 
-void Motor_DM_ZeroAll(void)
+void Motor_DM_ClearCommands(void)
 {
     uint32_t index;
 
@@ -271,11 +300,19 @@ void Motor_DM_ZeroAll(void)
 
 void Motor_DM_UpdateTxFrames(void)
 {
+    uint32_t nowTick = HAL_GetTick();
     uint32_t index;
 
     if (dmModeRequest != 0U)
     {
         Motor_DM_UpdateModeFrames();
+        if (dmEnable != 0U)
+        {
+            for (index = 0U; index < MOTOR_DM_COUNT; index++)
+            {
+                dmEnableTick[index] = nowTick;
+            }
+        }
         dmModeRequest = 0U;
         return;
     }
@@ -286,10 +323,22 @@ void Motor_DM_UpdateTxFrames(void)
         motor_dm_object_t *motor = &dmMotors[index];
         motor_dm_command_t command = motor->command;
         FDCAN_HandleTypeDef *handle = Motor_DM_GetCanHandle(motor->config.bus);
-        float direction = (float)motor->config.direction;
 
         if (handle == NULL)
         {
+            continue;
+        }
+
+        /*
+         * ERR=0 表示电机仍处于失能状态。使能请求按电机独立重发；
+         * ERR=1 或 8~E 时不重发，避免用使能命令掩盖实际故障。
+         */
+        if ((dmEnable != 0U) &&
+            (motor->state.state == 0U) &&
+            ((nowTick - dmEnableTick[index]) >= APP_DM_EN_RETRY))
+        {
+            Motor_DM_UpdateModeFrame(index, 1U);
+            dmEnableTick[index] = nowTick;
             continue;
         }
 
@@ -303,7 +352,7 @@ void Motor_DM_UpdateTxFrames(void)
          * 前 6 字节直接置 0，最后 2 字节放 12 bit 力矩编码。
          * 这表示当前固件只使用 DM MIT 的力矩通道，不在发送帧中下发位置、速度、KP、KD。
          */
-        uint16_t torqueRaw = Motor_DM_FloatToUint(command.torqueNm * direction,
+        uint16_t torqueRaw = Motor_DM_FloatToUint(command.torqueNm,
                                                    APP_DM_TOR_MIN,
                                                    APP_DM_TOR_MAX,
                                                    12U);
@@ -312,7 +361,7 @@ void Motor_DM_UpdateTxFrames(void)
         data[7] = (uint8_t)torqueRaw;
 
         CAN_Task_UpdateTxFrame(handle,
-                               motor->config.motorId,
+                               motor->config.commandId,
                                data,
                                APP_DM_FRAME_LEN);
     }

@@ -24,22 +24,19 @@ extern "C" {
 #define APP_DJI_LEFT_RX_ID 0x201U
 #define APP_DJI_RIGHT_RX_ID 0x202U
 
-#define APP_DM_FB_MASTER 0x000U
-#define APP_DM_LF_ID 0x002U
-#define APP_DM_LB_ID 0x001U
-#define APP_DM_RF_ID 0x004U
-#define APP_DM_RB_ID 0x003U
+#define APP_DM_LF_ID 0x001U
+#define APP_DM_LB_ID 0x002U
+#define APP_DM_RF_ID 0x003U
+#define APP_DM_RB_ID 0x004U
 
-#define APP_DM_L_DIR 1
-#define APP_DM_R_DIR (-1)
+#define APP_DM_LF_FB 0x011U
+#define APP_DM_LB_FB 0x012U
+#define APP_DM_RF_FB 0x013U
+#define APP_DM_RB_FB 0x014U
 
-/* DM MIT 控制帧的位置给定范围，PMAX 使用电机默认值 12.5 rad。 */
-#define APP_DM_CMD_PMIN (-12.5f)
-#define APP_DM_CMD_PMAX 12.5f
-
-/* DM MIT 反馈帧的位置解码范围，与控制帧 PMAX 独立。 */
-#define APP_DM_FB_PMIN (-3.14159265358979323846f)
-#define APP_DM_FB_PMAX 3.14159265358979323846f
+/* DM MIT 控制帧和反馈帧的 16 bit 位置字段映射范围，单位 rad。 */
+#define APP_DM_PMIN (-12.5f)
+#define APP_DM_PMAX 12.5f
 
 /* 速度单位 rad/s，力矩单位 N*m；范围按当前 J4310 协议配置。 */
 #define APP_DM_VEL_MIN (-30.0f)
@@ -82,6 +79,8 @@ extern "C" {
 #define APP_CHASSIS_OUTPUT_ENABLE 0U
 
 #define APP_DM_TIMEOUT_TICKS 50U
+/* DM 反馈 ERR=0 时重发使能帧的周期，单位 HAL tick。 */
+#define APP_DM_EN_RETRY 20U
 #define APP_DJI_TIMEOUT_TICKS 50U
 #define APP_CAN_TX_ERROR_MAX 1000U
 
