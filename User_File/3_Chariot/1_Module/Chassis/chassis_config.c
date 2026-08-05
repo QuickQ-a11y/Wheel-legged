@@ -154,20 +154,20 @@ const Chassis_Config_t Chassis_Config = {
         .pitch_limit = 1.60f,
         .stand_phi0_min = 0.40f,
         .stand_phi0_max = 2.80f,
-        .joint_T_limit = 1.0f,
+        .joint_T_limit = 3.5f,
         .joint_angle_pid = {
-            .kp = 4.0f,
+            .kp = 8.0f,
             .ki = 0.0f,
             .kd = 0.0f,
             .integralLimit = 0.0f,
-            .outputLimit = 1.0f,
+            .outputLimit = 5.0f,
         },
         .joint_speed_pid = {
-            .kp = 1.0f,
+            .kp = 2.0f,
             .ki = 0.0f,
             .kd = 0.0f,
             .integralLimit = 0.0f,
-            .outputLimit = 1.0f,
+            .outputLimit = 5.0f,
         },
     },
     /* 小陀螺保留速度和姿态反馈，关闭位移与航向角位置反馈。 */
@@ -307,7 +307,7 @@ const Chassis_Config_t Chassis_Config = {
          * 11/12.5 N*m 峰值未配置持续时间保护，因此暂不作为运行限幅。
          * MIT 协议映射量程在 app_config.h 中配置，当前为 +/-40 N*m。
          */
-        .joint_flag = 0U,
+        .joint_flag = 1U,
         .wheel_flag = 0U,
         .joint_T_limit = 3.5f,
     },

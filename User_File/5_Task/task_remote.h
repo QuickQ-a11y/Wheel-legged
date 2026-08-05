@@ -12,7 +12,6 @@ extern "C" {
 
 typedef struct
 {
-    remote_input_t input;              /* 发布给底盘的通用输入。 */
     dr16_data_t dr16Data;              /* 当前DR16原始解析结果。 */
     uint8_t rawFrame[DR16_FRAME_LEN];  /* 最近一次DR16原始帧。 */
     uint8_t online;
@@ -41,9 +40,9 @@ extern task_remote_state_t remoteTaskDebugState;
 void Remote_Task_Init(void);
 
 /**
- * @brief 复制最新的通用遥控输入、DR16数据与诊断状态快照。
+ * @brief 将任务发布的完整遥控快照刷新到全局Remote。
  */
-void Remote_Task_GetState(task_remote_state_t *state);
+void Remote_Task_Update(void);
 
 #ifdef __cplusplus
 }

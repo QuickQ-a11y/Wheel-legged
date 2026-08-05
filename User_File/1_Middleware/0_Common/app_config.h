@@ -76,7 +76,7 @@ extern "C" {
  * 控制器第一阶段只计算中间状态和安全输出。
  * 该宏保持 0 时，即使控制器配置允许输出，也不会解除零力矩/零电流封锁。
  */
-#define APP_CHASSIS_OUTPUT_ENABLE 0U
+#define APP_CHASSIS_OUTPUT_ENABLE 1U
 
 #define APP_DM_TIMEOUT_TICKS 50U
 /* DM 反馈 ERR=0 时重发使能帧的周期，单位 HAL tick。 */

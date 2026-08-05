@@ -84,12 +84,12 @@ uint8_t DR16_IsKeyDown(const dr16_data_t *data, dr16_key_t key);
 float DR16_NormalizeAxis(int16_t axis, int16_t deadband);
 
 /**
- * @brief 将DR16物理控件转换为与接收机协议无关的底盘遥控输入。
+ * @brief 将DR16物理控件转换为归一化遥控快照。
  */
-void DR16_MakeInput(const dr16_data_t *data,
-                    int16_t deadband,
-                    int16_t dialThreshold,
-                    remote_input_t *input);
+void DR16_MakeRemote(const dr16_data_t *data,
+                     int16_t deadband,
+                     int16_t dialThreshold,
+                     Remote_t *remote);
 
 #ifdef __cplusplus
 }

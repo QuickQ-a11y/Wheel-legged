@@ -24,7 +24,6 @@ static const osThreadAttr_t chassis_task_attributes = {
 static void Chassis_Feedback_Update(void)
 {
     task_imu_state_t imu_state = {0};
-    task_remote_state_t remote_state = {0};
     uint32_t now_tick = HAL_GetTick();
     uint32_t index;
 
@@ -48,8 +47,8 @@ static void Chassis_Feedback_Update(void)
            sizeof(Chassis.imu.accel));
 
     /* 遥控输入在任务层转换为模式和物理目标，不接触LQR或电机输出。 */
-    Remote_Task_GetState(&remote_state);
-    Chassis_Remote_Update(&remote_state.input, remote_state.online);
+    Remote_Task_Update();
+    Chassis_Remote_Update(&Remote);
 
     /* DM状态保留最后一次反馈值，online只表示本周期是否超时。 */
     for (index = 0U; index < MOTOR_DM_COUNT; index++)
@@ -87,6 +86,7 @@ static void Chassis_Command_Send(void)
      * output.safe_flag是发送前最后安全门。触发后只清最终命令，
      * T_joint_req和I_wheel_req继续供Watch观察。
      */
+    
     Motor_DM_SetSafe(Chassis.output.safe_flag);
     if (Chassis.output.safe_flag != 0U)
     {
@@ -161,6 +161,12 @@ static void Chassis_Task_Entry(void *argument)
         /* 反馈 -> 状态选择 -> 控制 -> 电机命令，保持单向数据流。 */
         Chassis_Feedback_Update();
         Chassis_Leg_Update();
+
+        if ((Remote.leftSwitch == REMOTE_SWITCH_UP) &&
+            (Remote.rightSwitch == REMOTE_SWITCH_UP))
+        {
+            Chassis.mode = CHASSIS_MODE_BENCH;
+        }
         Chassis_State_Update();
 
         /* 内部state只决定本周期调用哪条控制链，外部mode不会在此修改。 */
@@ -174,7 +180,7 @@ static void Chassis_Task_Entry(void *argument)
         case CHASSIS_FALLING_TO_STAND:
             Chassis_Recovery();
             break;
-
+        
         case CHASSIS_BENCH:
             Chassis_Bench();
             break;

@@ -27,18 +27,18 @@ static void Remote_Hold(void)
 }
 
 /** @brief 将通用遥控输入转换为底盘物理运动目标。 */
-static void Remote_Goal_Update(const remote_input_t *input)
+static void Remote_Goal_Update(const Remote_t *remote)
 {
-    float yaw_axis = input->yawAxis;
+    float yaw_axis = remote->rightStick.x;
     float yaw = Model_Yaw_Get();
 
-    if (input->modeRequest == REMOTE_MODE_TOP)
+    if (remote->modeRequest == REMOTE_MODE_TOP)
     {
         Chassis.goal.d_s =
-            input->forwardAxis *
+            remote->leftStick.y *
             Chassis_Config.top.max_d_s;
         Chassis.goal.d_y =
-            input->lateralAxis *
+            remote->leftStick.x *
             Chassis_Config.top.max_d_s;
         Chassis.goal.d_fai =
             -yaw_axis * Chassis_Config.top.max_d_fai;
@@ -49,7 +49,7 @@ static void Remote_Goal_Update(const remote_input_t *input)
     else
     {
         Chassis.goal.d_s =
-            input->forwardAxis * APP_RC_MAX_VEL;
+            remote->leftStick.y * APP_RC_MAX_VEL;
         Chassis.goal.d_y = 0.0f;
         Chassis.goal.d_fai = 0.0f;
 
@@ -76,7 +76,7 @@ static void Remote_Goal_Update(const remote_input_t *input)
         }
     }
 
-    switch (input->legRequest)
+    switch (remote->legRequest)
     {
     case REMOTE_LEG_SHORT:
         Chassis.goal.L0 = APP_RC_LEG_S;
@@ -102,23 +102,24 @@ void Chassis_Remote_Init(void)
     yaw_stick_flag = 0U;
 }
 
-void Chassis_Remote_Update(const remote_input_t *input, uint8_t online_flag)
+void Chassis_Remote_Update(const Remote_t *remote)
 {
     remote_mode_request_t mode_request;
 
-    if (input == NULL)
+    if (remote == NULL)
     {
-        online_flag = 0U;
         mode_request = REMOTE_MODE_NONE;
     }
     else
     {
-        mode_request = input->modeRequest;
+        mode_request = remote->modeRequest;
     }
 
-    Chassis.remote_online_flag = (online_flag != 0U) ? 1U : 0U;
+    Chassis.remote_online_flag =
+        ((remote != NULL) && (remote->online != 0U)) ? 1U : 0U;
     Chassis.remote_stop_flag =
-        ((input != NULL) && (input->stop != 0U)) ? 1U : 0U;
+        ((remote != NULL) &&
+         (remote->rightSwitch == REMOTE_SWITCH_DOWN)) ? 1U : 0U;
 
     if ((Chassis.remote_online_flag == 0U) || (Chassis.remote_stop_flag != 0U))
     {
@@ -151,7 +152,7 @@ void Chassis_Remote_Update(const remote_input_t *input, uint8_t online_flag)
     }
 
     Chassis.enable_flag = 1U;
-    Remote_Goal_Update(input);
+    Remote_Goal_Update(remote);
 
     /* 只有恢复状态机真正回到STANDING后，才自动结束SELF_SAVE请求。 */
     if ((Chassis.mode == CHASSIS_MODE_SELF_SAVE) &&

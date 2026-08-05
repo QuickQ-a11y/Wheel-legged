@@ -7,6 +7,8 @@
 #include <math.h>
 #include <string.h>
 
+#include "remote_input.h"
+
 #define CHASSIS_RPM_TO_RADPS 0.10471975512f
 #define CHASSIS_OUTPUT_FAULT_MASK                                         \
     (CHASSIS_FAULT_DISABLED | CHASSIS_FAULT_IMU |                       \
@@ -196,14 +198,18 @@ static uint32_t Output_Fault_Get(void)
             break;
         }
     }
-    for (index = 0U; index < APP_WHEEL_COUNT; index++)
-    {
-        if (Chassis.wheel_motor[index].online_flag == 0U)
-        {
-            fault |= CHASSIS_FAULT_DJI_MOTOR;
-            break;
-        }
-    }
+  if ((Chassis.state != CHASSIS_BENCH) ||
+      (Chassis_Config.output.wheel_flag != 0U))
+  {
+      for (index = 0U; index < APP_WHEEL_COUNT; index++)
+      {
+          if (Chassis.wheel_motor[index].online_flag == 0U)
+          {
+              fault |= CHASSIS_FAULT_DJI_MOTOR;
+              break;
+          }
+      }
+  }
     if (Chassis.can_error_count > APP_CAN_TX_ERROR_MAX)
     {
         fault |= CHASSIS_FAULT_CAN;
@@ -212,6 +218,7 @@ static uint32_t Output_Fault_Get(void)
     {
         fault |= CHASSIS_FAULT_REMOTE;
     }
+
     return fault;
 }
 
@@ -965,18 +972,43 @@ void Chassis_Recovery(void)
  */
 void Chassis_Bench(void)
 {
-    uint32_t side;
+      uint32_t side;
 
-    Chassis.state_time += Chassis.dt;
-    for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
-    {
-        Chassis.leg[side].target_L0 = Chassis_Config.recovery.bench_L0;
-        Chassis.leg[side].target_phi0 =
-            Algorithm_AngleNearestEquivalentRad(
-                Chassis_Config.recovery.bench_phi0,
-                Chassis.leg[side].phi0_total);
-    }
-    Chassis_Control();
+      if (Chassis.state_time == 0.0f)
+      {
+          for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+          {
+              Chassis.leg[side].target_L0 = Chassis.leg[side].L0;
+              Chassis.leg[side].target_phi0 =
+                  Chassis.leg[side].phi0_total;
+          }
+      }
+
+      /*下为遥控控制腿长，调试用记得注释掉*/
+      Chassis.state_time += Chassis.dt;
+
+            Chassis.leg[CHASSIS_LEFT].target_L0 +=
+            Remote.leftStick.y * 0.8f * Chassis.dt;
+
+            Chassis.leg[CHASSIS_RIGHT].target_L0 +=
+            Remote.rightStick.y * 0.8f * Chassis.dt;
+
+          Chassis.leg[CHASSIS_LEFT].target_phi0 +=
+              Remote.leftStick.x * 3.2f * Chassis.dt;
+
+          Chassis.leg[CHASSIS_RIGHT].target_phi0 +=
+              Remote.rightStick.x * 3.2f * Chassis.dt;
+
+        for(side = 0U; side < CHASSIS_LEG_COUNT; side++)
+        {
+            Chassis.leg[side].target_L0 =
+                fminf(fmaxf(Chassis.leg[side].target_L0, 0.09f), 0.25f);
+
+            // Chassis.leg[side].target_phi0 =
+            //     fminf(fmaxf(Chassis.leg[side].target_phi0, 0.70f), 3.00f);
+        }
+
+      Chassis_Control();
 }
 
 /** @brief 按当前模式缩放十维误差并完成四路LQR统一点乘。 */

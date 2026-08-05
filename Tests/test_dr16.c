@@ -212,6 +212,7 @@ static void testGenericInputMapping(void)
 {
     dr16_data_t data = {
         .rightX = -660,
+        .rightY = -335,
         .leftX = 335,
         .leftY = 660,
         .dial = 500,
@@ -219,37 +220,52 @@ static void testGenericInputMapping(void)
         .leftSwitch = DR16_SWITCH_UP,
         .dialValid = 1U,
     };
-    remote_input_t input = {0};
+    Remote_t remote = {0};
 
-    DR16_MakeInput(&data, 10, 400, &input);
-    assert(input.forwardAxis == 1.0f);
-    assert(input.lateralAxis == 0.5f);
-    assert(input.yawAxis == -1.0f);
-    assert(input.stop == 1U);
-    assert(input.modeRequest == REMOTE_MODE_FOLLOW);
-    assert(input.legRequest == REMOTE_LEG_SHORT);
+    DR16_MakeRemote(&data, 10, 400, &remote);
+    assert(remote.leftStick.x == 0.5f);
+    assert(remote.leftStick.y == 1.0f);
+    assert(remote.rightStick.x == -1.0f);
+    assert(remote.rightStick.y == -0.5f);
+    assert(fabsf(remote.dial - (490.0f / 650.0f)) < TEST_TOLERANCE);
+    assert(remote.dialValid == 1U);
+    assert(remote.leftSwitch == REMOTE_SWITCH_UP);
+    assert(remote.rightSwitch == REMOTE_SWITCH_DOWN);
+    assert(remote.online == 0U);
+    assert(remote.modeRequest == REMOTE_MODE_FOLLOW);
+    assert(remote.legRequest == REMOTE_LEG_SHORT);
 
     data.rightSwitch = DR16_SWITCH_UP;
     data.leftSwitch = DR16_SWITCH_MID;
     data.dial = 400;
-    DR16_MakeInput(&data, 10, 400, &input);
-    assert(input.stop == 0U);
-    assert(input.modeRequest == REMOTE_MODE_BENCH);
-    assert(input.legRequest == REMOTE_LEG_MIDDLE);
+    DR16_MakeRemote(&data, 10, 400, &remote);
+    assert(remote.rightSwitch == REMOTE_SWITCH_UP);
+    assert(remote.leftSwitch == REMOTE_SWITCH_MID);
+    assert(fabsf(remote.dial - 0.6f) < TEST_TOLERANCE);
+    assert(remote.modeRequest == REMOTE_MODE_BENCH);
+    assert(remote.legRequest == REMOTE_LEG_MIDDLE);
 
     data.leftSwitch = DR16_SWITCH_DOWN;
     data.dial = -400;
-    DR16_MakeInput(&data, 10, 400, &input);
-    assert(input.modeRequest == REMOTE_MODE_SELF_SAVE);
-    assert(input.legRequest == REMOTE_LEG_MIDDLE);
+    DR16_MakeRemote(&data, 10, 400, &remote);
+    assert(remote.leftSwitch == REMOTE_SWITCH_DOWN);
+    assert(remote.modeRequest == REMOTE_MODE_SELF_SAVE);
+    assert(remote.legRequest == REMOTE_LEG_MIDDLE);
 
     data.dial = -401;
-    DR16_MakeInput(&data, 10, 400, &input);
-    assert(input.legRequest == REMOTE_LEG_LONG);
+    DR16_MakeRemote(&data, 10, 400, &remote);
+    assert(remote.legRequest == REMOTE_LEG_LONG);
 
     data.dialValid = 0U;
-    DR16_MakeInput(&data, 10, 400, &input);
-    assert(input.legRequest == REMOTE_LEG_KEEP);
+    DR16_MakeRemote(&data, 10, 400, &remote);
+    assert(remote.dial == 0.0f);
+    assert(remote.dialValid == 0U);
+    assert(remote.legRequest == REMOTE_LEG_KEEP);
+
+    remote.leftStick.x = 1.0f;
+    DR16_MakeRemote(NULL, 10, 400, &remote);
+    assert(remote.leftStick.x == 0.0f);
+    assert(remote.leftSwitch == REMOTE_SWITCH_UNKNOWN);
 }
 
 int main(void)

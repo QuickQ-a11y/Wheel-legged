@@ -37,7 +37,9 @@ static uint8_t dr16DmaBuffer[DR16_FRAME_LEN]
 static task_remote_pending_t remotePending;
 static volatile uint32_t remoteOverwriteCount;
 static volatile uint32_t remoteLastError;
+static Remote_t remotePublished;
 
+Remote_t Remote;
 task_remote_state_t remoteTaskDebugState;
 
 /** @brief 在 DMA 重新启用前，将本次接收事件复制到任务邮箱。 */
@@ -100,10 +102,11 @@ static uint8_t Remote_Task_TakePending(task_remote_pending_t *pending)
     return hasPending;
 }
 
-/** @brief 为底盘任务和 Watch 发布一份一致的遥控状态快照。 */
-static void Remote_Task_Publish(const task_remote_state_t *state)
+/** @brief 为底盘任务和Watch同时发布控制输入与协议诊断快照。 */
+static void Remote_Task_Publish(const Remote_t *remote,
+                                const task_remote_state_t *state)
 {
-    if ((state == NULL) || (remoteStateMutex == NULL))
+    if ((remote == NULL) || (state == NULL) || (remoteStateMutex == NULL))
     {
         return;
     }
@@ -112,16 +115,19 @@ static void Remote_Task_Publish(const task_remote_state_t *state)
         return;
     }
 
+    remotePublished = *remote;
     remoteTaskDebugState = *state;
     (void)osMutexRelease(remoteStateMutex);
 }
 
 /** @brief 解析一个待处理事件并更新遥控器上线同步状态。 */
 static void Remote_Task_ProcessFrame(task_remote_state_t *state,
+                                     Remote_t *remote,
                                      const task_remote_pending_t *pending,
                                      uint16_t *previousKeys)
 {
     dr16_data_t parsed;
+    Remote_t converted;
 
     state->lastRxSize = pending->size;
     memcpy(state->rawFrame, pending->frame, sizeof(state->rawFrame));
@@ -171,10 +177,19 @@ static void Remote_Task_ProcessFrame(task_remote_state_t *state,
     }
 
     state->dr16Data = parsed;
-    DR16_MakeInput(&parsed,
-                   APP_DR16_DB,
-                   APP_DR16_DIAL,
-                   &state->input);
+    DR16_MakeRemote(&parsed,
+                    APP_DR16_DB,
+                    APP_DR16_DIAL,
+                    &converted);
+    if (state->online != 0U)
+    {
+        converted.online = 1U;
+        *remote = converted;
+    }
+    else
+    {
+        memset(remote, 0, sizeof(*remote));
+    }
     *previousKeys = parsed.keyBits;
 }
 
@@ -182,6 +197,7 @@ static void Remote_Task_ProcessFrame(task_remote_state_t *state,
 static void RemoteTask(void *argument)
 {
     task_remote_state_t state = {0};
+    Remote_t remote = {0};
     task_remote_pending_t pending;
     uint16_t previousKeys = 0U;
     uint32_t rateTick = HAL_GetTick();
@@ -205,7 +221,10 @@ static void RemoteTask(void *argument)
                                 APP_REMOTE_WAIT_TICKS);
         while (Remote_Task_TakePending(&pending) != 0U)
         {
-            Remote_Task_ProcessFrame(&state, &pending, &previousKeys);
+            Remote_Task_ProcessFrame(&state,
+                                     &remote,
+                                     &pending,
+                                     &previousKeys);
         }
 
         nowTick = HAL_GetTick();
@@ -217,6 +236,7 @@ static void RemoteTask(void *argument)
             state.keyPressed = 0U;
             state.keyReleased = 0U;
             previousKeys = state.dr16Data.keyBits;
+            memset(&remote, 0, sizeof(remote));
         }
         if (driverUart5Object.receiving == 0U)
         {
@@ -238,13 +258,15 @@ static void RemoteTask(void *argument)
             rateTick = nowTick;
             rateFrameCount = state.validFrameCount;
         }
-        Remote_Task_Publish(&state);
+        Remote_Task_Publish(&remote, &state);
     }
 }
 
 void Remote_Task_Init(void)
 {
     memset(&remotePending, 0, sizeof(remotePending));
+    memset(&remotePublished, 0, sizeof(remotePublished));
+    memset(&Remote, 0, sizeof(Remote));
     memset(&remoteTaskDebugState, 0, sizeof(remoteTaskDebugState));
     remoteOverwriteCount = 0U;
     remoteLastError = 0U;
@@ -257,9 +279,9 @@ void Remote_Task_Init(void)
     remoteTaskHandle = osThreadNew(RemoteTask, NULL, &remoteTaskAttributes);
 }
 
-void Remote_Task_GetState(task_remote_state_t *state)
+void Remote_Task_Update(void)
 {
-    if ((state == NULL) || (remoteStateMutex == NULL))
+    if (remoteStateMutex == NULL)
     {
         return;
     }
@@ -268,6 +290,6 @@ void Remote_Task_GetState(task_remote_state_t *state)
         return;
     }
 
-    *state = remoteTaskDebugState;
+    Remote = remotePublished;
     (void)osMutexRelease(remoteStateMutex);
 }

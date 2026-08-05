@@ -135,55 +135,90 @@ float DR16_NormalizeAxis(int16_t axis, int16_t deadband)
     return (float)magnitude / (float)(DR16_AXIS_MAX - positive_deadband);
 }
 
-void DR16_MakeInput(const dr16_data_t *data,
-                    int16_t deadband,
-                    int16_t dialThreshold,
-                    remote_input_t *input)
+static Remote_Switch_t DR16_ConvertSwitch(dr16_switch_t value)
 {
-    if ((data == NULL) || (input == NULL))
+    switch (value)
+    {
+    case DR16_SWITCH_UP:
+        return REMOTE_SWITCH_UP;
+
+    case DR16_SWITCH_DOWN:
+        return REMOTE_SWITCH_DOWN;
+
+    case DR16_SWITCH_MID:
+        return REMOTE_SWITCH_MID;
+
+    case DR16_SWITCH_UNKNOWN:
+    default:
+        return REMOTE_SWITCH_UNKNOWN;
+    }
+}
+
+void DR16_MakeRemote(const dr16_data_t *data,
+                     int16_t deadband,
+                     int16_t dialThreshold,
+                     Remote_t *remote)
+{
+    Remote_t converted = {0};
+
+    if (remote == NULL)
     {
         return;
     }
+    if (data == NULL)
+    {
+        *remote = converted;
+        return;
+    }
 
-    input->forwardAxis = DR16_NormalizeAxis(data->leftY, deadband);
-    input->lateralAxis = DR16_NormalizeAxis(data->leftX, deadband);
-    input->yawAxis = DR16_NormalizeAxis(data->rightX, deadband);
-    input->stop = (data->rightSwitch == DR16_SWITCH_DOWN) ? 1U : 0U;
+    converted.leftStick.x = DR16_NormalizeAxis(data->leftX, deadband);
+    converted.leftStick.y = DR16_NormalizeAxis(data->leftY, deadband);
+    converted.rightStick.x = DR16_NormalizeAxis(data->rightX, deadband);
+    converted.rightStick.y = DR16_NormalizeAxis(data->rightY, deadband);
+    converted.leftSwitch = DR16_ConvertSwitch(data->leftSwitch);
+    converted.rightSwitch = DR16_ConvertSwitch(data->rightSwitch);
+    converted.dialValid = data->dialValid;
+    if (data->dialValid != 0U)
+    {
+        converted.dial = DR16_NormalizeAxis(data->dial, deadband);
+    }
 
     switch (data->leftSwitch)
     {
     case DR16_SWITCH_UP:
-        input->modeRequest = REMOTE_MODE_FOLLOW;
+        converted.modeRequest = REMOTE_MODE_FOLLOW;
         break;
 
     case DR16_SWITCH_MID:
-        input->modeRequest = REMOTE_MODE_BENCH;
+        converted.modeRequest = REMOTE_MODE_BENCH;
         break;
 
     case DR16_SWITCH_DOWN:
-        input->modeRequest = REMOTE_MODE_SELF_SAVE;
+        converted.modeRequest = REMOTE_MODE_SELF_SAVE;
         break;
 
     case DR16_SWITCH_UNKNOWN:
     default:
-        input->modeRequest = REMOTE_MODE_NONE;
+        converted.modeRequest = REMOTE_MODE_NONE;
         break;
     }
 
     if (data->dialValid == 0U)
     {
-        input->legRequest = REMOTE_LEG_KEEP;
+        converted.legRequest = REMOTE_LEG_KEEP;
     }
     else if (data->dial > dialThreshold)
     {
-        input->legRequest = REMOTE_LEG_SHORT;
+        converted.legRequest = REMOTE_LEG_SHORT;
     }
     else if (data->dial < -dialThreshold)
     {
-        input->legRequest = REMOTE_LEG_LONG;
+        converted.legRequest = REMOTE_LEG_LONG;
     }
     else
     {
-        input->legRequest = REMOTE_LEG_MIDDLE;
+        converted.legRequest = REMOTE_LEG_MIDDLE;
     }
+
+    *remote = converted;
 }
