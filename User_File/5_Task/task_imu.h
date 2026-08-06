@@ -12,7 +12,6 @@ typedef struct
     uint8_t isInitialized;                           /* BMI088 初始化完成后置 1。 */
     uint8_t isAttitudeReady;                         /* 完成陀螺零偏采样后置 1。 */
     uint32_t initErrorCount;                         /* 初始化失败累计次数。 */
-    uint32_t readErrorCount;                         /* 读取失败累计次数。 */
     uint32_t lastErrorCode;                          /* BMI088 最近一次错误码。 */
     bmi088_data_t bmi088Data;                        /* 最近一次 BMI088 原始坐标数据快照。 */
     float gyroBiasRadps[BMI088_AXIS_COUNT];          /* 整车右手系下的启动阶段陀螺零偏。 */

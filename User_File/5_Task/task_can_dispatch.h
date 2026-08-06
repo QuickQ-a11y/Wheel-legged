@@ -6,9 +6,6 @@ extern "C" {
 #endif
 
 #include "app_config.h"
-#include "device_motor_dji.h"
-
-extern motor_dji_t chassisDjiWheels[APP_WHEEL_COUNT];
 
 #ifdef __cplusplus
 }

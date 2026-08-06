@@ -9,6 +9,13 @@ extern "C" {
 
 #include <stdint.h>
 
+/* 轮电机数组下标，顺序与底盘左右轮一致。 */
+typedef enum
+{
+    MOTOR_DJI_LEFT = 0,
+    MOTOR_DJI_RIGHT,
+} motor_dji_index_t;
+
 typedef struct
 {
     uint16_t encoderRaw;         /* ESC 编码器机械角度，范围 0..8191。 */
@@ -19,20 +26,25 @@ typedef struct
     uint32_t feedbackCount;      /* 有效反馈帧累计数量。 */
     uint32_t lastUpdateTick;     /* 最近一次反馈 HAL tick。 */
     uint8_t isOnline;            /* 收到有效反馈后置 1。 */
-} motor_dji_t;
+} motor_dji_state_t;
 
 /**
- * @brief 解析一帧 DJI ESC 反馈并刷新电机状态。
+ * @brief 解析一帧 DJI ESC 反馈并刷新对应轮电机状态。
  *
  * 反馈帧为大端格式：编码器、转速、电流各 16 位，温度 8 位。
  */
-void Motor_DJI_UpdateFeedback(motor_dji_t *motor,
+void Motor_DJI_UpdateFeedback(motor_dji_index_t index,
                               const uint8_t data[APP_DJI_RX_LEN]);
+
+/**
+ * @brief 读取单个轮电机状态快照。
+ */
+void Motor_DJI_GetState(motor_dji_index_t index, motor_dji_state_t *state);
 
 /**
  * @brief 判断 DJI 电机反馈是否仍在线。
  */
-uint8_t Motor_DJI_IsOnline(const motor_dji_t *motor, uint32_t nowTick);
+uint8_t Motor_DJI_IsOnline(motor_dji_index_t index, uint32_t nowTick);
 
 #ifdef __cplusplus
 }

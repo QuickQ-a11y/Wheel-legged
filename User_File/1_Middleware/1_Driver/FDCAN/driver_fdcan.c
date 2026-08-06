@@ -12,11 +12,6 @@ driver_fdcan_object_t driverFdcan2Object = {0};
  */
 static driver_fdcan_object_t *Driver_FDCAN_GetObject(FDCAN_HandleTypeDef *handle)
 {
-    if (handle == NULL)
-    {
-        return NULL;
-    }
-
     if (handle->Instance == FDCAN1)
     {
         return &driverFdcan1Object;
@@ -110,11 +105,6 @@ void Driver_FDCAN_Init(FDCAN_HandleTypeDef *handle,
 {
     driver_fdcan_object_t *fdcanObject = Driver_FDCAN_GetObject(handle);
 
-    if (fdcanObject == NULL)
-    {
-        return;
-    }
-
     fdcanObject->handle = handle;
     fdcanObject->rxCallback = rxCallback;
 
@@ -128,20 +118,6 @@ void Driver_FDCAN_Init(FDCAN_HandleTypeDef *handle,
                                          0U);
 }
 
-void Driver_FDCAN_RegisterRxCallback(FDCAN_HandleTypeDef *handle,
-                                     driver_fdcan_rx_callback_t rxCallback)
-{
-    driver_fdcan_object_t *fdcanObject = Driver_FDCAN_GetObject(handle);
-
-    if (fdcanObject == NULL)
-    {
-        return;
-    }
-
-    fdcanObject->handle = handle;
-    fdcanObject->rxCallback = rxCallback;
-}
-
 void Driver_FDCAN_SendData(FDCAN_HandleTypeDef *handle,
                            uint32_t identifier,
                            const uint8_t *data,
@@ -153,10 +129,8 @@ void Driver_FDCAN_SendData(FDCAN_HandleTypeDef *handle,
     const uint8_t *txData = data;
     uint32_t pendingTxRequests;
 
-    if ((handle == NULL) ||
-        (identifier > APP_CAN_STD_ID_MAX) ||
-        (length > APP_CAN_DATA_MAX_BYTES) ||
-        ((data == NULL) && (length > 0U)))
+    /* length 随后用作 dlcTable 下标，越界不得继续。 */
+    if (length > APP_CAN_DATA_MAX_BYTES)
     {
         return;
     }

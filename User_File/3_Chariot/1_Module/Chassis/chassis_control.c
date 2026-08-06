@@ -2,12 +2,11 @@
 
 #include "Angle.h"
 #include "LQR.h"
+#include "Limit.h"
 #include "PID.h"
 
 #include <math.h>
 #include <string.h>
-
-#include "remote_input.h"
 
 #define CHASSIS_RPM_TO_RADPS 0.10471975512f
 #define CHASSIS_OUTPUT_FAULT_MASK                                         \
@@ -18,27 +17,6 @@
 Chassis_t Chassis;
 
 static void Control_Reset(void);
-
-/** @brief 按给定绝对值对称限制标量，非正限幅直接返回零。 */
-static float Limit_Symmetric(float value, float limit)
-{
-    float positive_limit = fabsf(limit);
-
-    if ((!isfinite(value)) || (!isfinite(positive_limit)) ||
-        (positive_limit <= 0.0f))
-    {
-        return 0.0f;
-    }
-    if (value > positive_limit)
-    {
-        return positive_limit;
-    }
-    if (value < -positive_limit)
-    {
-        return -positive_limit;
-    }
-    return value;
-}
 
 /** @brief 让目标量每周期最多移动maximum_step，避免腿长目标阶跃。 */
 static float Move_Toward(float value, float target, float maximum_step)
@@ -71,13 +49,13 @@ static void Motion_Update(void)
 
     if (Chassis.remote_target_flag == 0U)
     {
-        Chassis.lqr.target[CHASSIS_STATE_DOT_S] =
-            Move_Toward(Chassis.lqr.target[CHASSIS_STATE_DOT_S],
+        Chassis.lqr.target[CHASSIS_STATE_D_S] =
+            Move_Toward(Chassis.lqr.target[CHASSIS_STATE_D_S],
                                0.0f,
                                APP_RC_VEL_RATE * dt);
-        Chassis.lqr.target[CHASSIS_STATE_DOT_FAI] =
+        Chassis.lqr.target[CHASSIS_STATE_D_FAI] =
             Move_Toward(
-                Chassis.lqr.target[CHASSIS_STATE_DOT_FAI],
+                Chassis.lqr.target[CHASSIS_STATE_D_FAI],
                 0.0f,
                 APP_RC_YAW_RATE * dt);
         return;
@@ -91,33 +69,33 @@ static void Motion_Update(void)
         Chassis.top_d_s =
             Chassis.goal.d_s * cosf(top_phase_rad) +
             Chassis.goal.d_y * sinf(top_phase_rad);
-        Chassis.lqr.target[CHASSIS_STATE_DOT_S] =
-            Move_Toward(Chassis.lqr.target[CHASSIS_STATE_DOT_S],
+        Chassis.lqr.target[CHASSIS_STATE_D_S] =
+            Move_Toward(Chassis.lqr.target[CHASSIS_STATE_D_S],
                                Chassis.top_d_s,
                                APP_RC_VEL_RATE * dt);
         Chassis.lqr.target[CHASSIS_STATE_FAI] = model_yaw_rad;
-        Chassis.lqr.target[CHASSIS_STATE_DOT_FAI] =
+        Chassis.lqr.target[CHASSIS_STATE_D_FAI] =
             Move_Toward(
-                Chassis.lqr.target[CHASSIS_STATE_DOT_FAI],
+                Chassis.lqr.target[CHASSIS_STATE_D_FAI],
                 Chassis.goal.d_fai,
                 APP_RC_YAW_RATE * dt);
     }
     else
     {
         Chassis.top_d_s = 0.0f;
-        Chassis.lqr.target[CHASSIS_STATE_DOT_S] =
-            Move_Toward(Chassis.lqr.target[CHASSIS_STATE_DOT_S],
+        Chassis.lqr.target[CHASSIS_STATE_D_S] =
+            Move_Toward(Chassis.lqr.target[CHASSIS_STATE_D_S],
                                Chassis.goal.d_s,
                                APP_RC_VEL_RATE * dt);
 
-        yaw_step_rad = Limit_Symmetric(
+        yaw_step_rad = Algorithm_LimitSymmetric(
             Chassis.goal.fai -
                 Chassis.lqr.target[CHASSIS_STATE_FAI],
             APP_RC_YAW_RATE * dt);
         Chassis.lqr.target[CHASSIS_STATE_FAI] += yaw_step_rad;
         if (dt > 0.0f)
         {
-            Chassis.lqr.target[CHASSIS_STATE_DOT_FAI] =
+            Chassis.lqr.target[CHASSIS_STATE_D_FAI] =
                 yaw_step_rad / dt;
         }
     }
@@ -145,28 +123,6 @@ static uint8_t Angle_In_Range(float angle_rad,
 
     return ((equivalent_rad >= minimum_rad) &&
             (equivalent_rad <= maximum_rad)) ? 1U : 0U;
-}
-
-/** @brief 读取左右腿phi1和phi4关节的DM数组索引并检查数组边界。 */
-static uint8_t Joint_Index_Get(
-    uint8_t indices[CHASSIS_LEG_COUNT][CHASSIS_JOINT_COUNT])
-{
-    uint32_t side;
-    uint32_t joint;
-
-    for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
-    {
-        for (joint = 0U; joint < CHASSIS_JOINT_COUNT; joint++)
-        {
-            indices[side][joint] =
-                Chassis_Config.leg[side].joint[joint].motor_index;
-            if (indices[side][joint] >= APP_DM_COUNT)
-            {
-                return 0U;
-            }
-        }
-    }
-    return 1U;
 }
 
 /**
@@ -222,6 +178,28 @@ static uint32_t Output_Fault_Get(void)
     return fault;
 }
 
+/**
+ * @brief 清空本轮全部控制请求量与最终电机命令，并置回发送前安全门。
+ *
+ * 每条控制链在入口调用一次，保证任何提前返回都不会遗留上一周期的命令。
+ */
+static void Output_Clear(void)
+{
+    memset(Chassis.output.T_joint, 0, sizeof(Chassis.output.T_joint));
+    memset(Chassis.output.T_joint_req,
+           0,
+           sizeof(Chassis.output.T_joint_req));
+    memset(Chassis.output.I_wheel, 0, sizeof(Chassis.output.I_wheel));
+    memset(Chassis.output.I_wheel_req,
+           0,
+           sizeof(Chassis.output.I_wheel_req));
+    memset(Chassis.output.target_speed,
+           0,
+           sizeof(Chassis.output.target_speed));
+    memset(Chassis.output.T_wheel, 0, sizeof(Chassis.output.T_wheel));
+    Chassis.output.safe_flag = 1U;
+}
+
 /** @brief 清空四个关节串级PID状态、目标和调试请求量。 */
 static void Joint_Control_Reset(void)
 {
@@ -244,25 +222,12 @@ static void Joint_Control_Reset(void)
 }
 
 /**
- * @brief 在输出故障清除前重置所有可能积累陈旧反馈的动态状态。
- */
-static void Dynamic_Control_Reset(void)
-{
-    Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_LEFT]);
-    Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_RIGHT]);
-    Algorithm_PID_Init(&Chassis.roll_pid);
-    Joint_Control_Reset();
-    Control_Reset();
-}
-
-/**
  * @brief 切换内部控制状态并初始化该状态所需目标和控制器。
  *
  * 相同状态不重复进入，避免每周期清空计时器、PID和目标斜坡。
  */
 static void State_Enter(Chassis_State_t state)
 {
-    uint8_t leg_valid_flag;
     uint32_t side;
 
     if (Chassis.state == state)
@@ -273,12 +238,7 @@ static void State_Enter(Chassis_State_t state)
     Chassis.state = state;
     Chassis.state_time = 0.0f;
     Chassis.stable_time = 0.0f;
-    memset(Chassis.output.T_joint, 0, sizeof(Chassis.output.T_joint));
-    memset(Chassis.output.I_wheel, 0, sizeof(Chassis.output.I_wheel));
-    memset(Chassis.output.I_wheel_req,
-           0,
-           sizeof(Chassis.output.I_wheel_req));
-    Chassis.output.safe_flag = 1U;
+    Output_Clear();
     Joint_Control_Reset();
 
     if ((state == CHASSIS_STANDING) || (state == CHASSIS_BENCH) ||
@@ -295,16 +255,15 @@ static void State_Enter(Chassis_State_t state)
 
     if (state == CHASSIS_STANDING)
     {
-        leg_valid_flag =
-            ((Chassis.leg[CHASSIS_LEFT].valid_flag != 0U) &&
-             (Chassis.leg[CHASSIS_RIGHT].valid_flag != 0U)) ? 1U : 0U;
         Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_LEFT]);
         Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_RIGHT]);
         Algorithm_PID_Init(&Chassis.roll_pid);
         for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
         {
+            /* 五连杆正解有效时从当前腿长接管，否则回到配置目标腿长。 */
             Chassis.leg[side].target_L0 =
-                (leg_valid_flag != 0U) ?
+                ((Chassis.leg[CHASSIS_LEFT].valid_flag != 0U) &&
+                 (Chassis.leg[CHASSIS_RIGHT].valid_flag != 0U)) ?
                     Chassis.leg[side].L0 :
                     Chassis_Config.leg[side].target_L0;
         }
@@ -368,18 +327,7 @@ static void Control_Reset(void)
  */
 void Chassis_Zero_Output(void)
 {
-    memset(Chassis.output.T_joint, 0, sizeof(Chassis.output.T_joint));
-    memset(Chassis.output.I_wheel, 0, sizeof(Chassis.output.I_wheel));
-    memset(Chassis.output.I_wheel_req,
-           0,
-           sizeof(Chassis.output.I_wheel_req));
-    memset(Chassis.output.T_joint_req,
-           0,
-           sizeof(Chassis.output.T_joint_req));
-    memset(Chassis.output.target_speed,
-           0,
-           sizeof(Chassis.output.target_speed));
-    Chassis.output.safe_flag = 1U;
+    Output_Clear();
     Control_Reset();
 }
 
@@ -426,42 +374,38 @@ void Chassis_Init(void)
  */
 void Chassis_Leg_Update(void)
 {
-    uint8_t indices[CHASSIS_LEG_COUNT][CHASSIS_JOINT_COUNT];
     uint32_t side;
-
-    if (Joint_Index_Get(indices) == 0U)
-    {
-        Chassis.leg[CHASSIS_LEFT].valid_flag = 0U;
-        Chassis.leg[CHASSIS_RIGHT].valid_flag = 0U;
-        return;
-    }
 
     /* 每条腿独立提交，便于Watch区分是哪一侧的数学计算不完整。 */
     for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
     {
         float last_phi0 = Chassis.leg[side].phi0_total;
+        uint8_t phi1_index =
+            Chassis_Config.leg[side].joint[CHASSIS_JOINT_PHI1].motor_index;
+        uint8_t phi4_index =
+            Chassis_Config.leg[side].joint[CHASSIS_JOINT_PHI4].motor_index;
+
+        /* 配置索引直接用作 dm_motor 下标，越界时不得继续访问数组。 */
+        if ((phi1_index >= APP_DM_COUNT) || (phi4_index >= APP_DM_COUNT))
+        {
+            Chassis.leg[CHASSIS_LEFT].valid_flag = 0U;
+            Chassis.leg[CHASSIS_RIGHT].valid_flag = 0U;
+            return;
+        }
 
         VMC_State_Calc(&Chassis_Config.leg[side],
-                       Chassis.dm_motor[indices[side][CHASSIS_JOINT_PHI1]]
-                           .position_rad,
-                       Chassis.dm_motor[indices[side][CHASSIS_JOINT_PHI4]]
-                           .position_rad,
-                       Chassis.dm_motor[indices[side][CHASSIS_JOINT_PHI1]]
-                           .speed_radps,
-                        Chassis.dm_motor[indices[side][CHASSIS_JOINT_PHI4]]
-                            .speed_radps,
-                        &Chassis.leg[side]);
-        if ((Chassis.leg[side].L0 > 0.0f) &&
-            isfinite(Chassis.leg[side].phi0))
+                       Chassis.dm_motor[phi1_index].position_rad,
+                       Chassis.dm_motor[phi4_index].position_rad,
+                       Chassis.dm_motor[phi1_index].speed_radps,
+                       Chassis.dm_motor[phi4_index].speed_radps,
+                       &Chassis.leg[side]);
+        if (Chassis.leg[side].L0 > 0.0f)
         {
-            if (isfinite(last_phi0))
-            {
-                /* phi0主值跨过+-pi时选择距离上一有效角最近的等价角。 */
-                Chassis.leg[side].phi0_total =
-                    Algorithm_AngleNearestEquivalentRad(
-                        Chassis.leg[side].phi0,
-                        last_phi0);
-            }
+            /* phi0主值跨过+-pi时选择距离上一有效角最近的等价角。 */
+            Chassis.leg[side].phi0_total =
+                Algorithm_AngleNearestEquivalentRad(
+                    Chassis.leg[side].phi0,
+                    last_phi0);
         }
         else
         {
@@ -480,7 +424,6 @@ void Chassis_Leg_Update(void)
 void Chassis_State_Update(void)
 {
     float theta_b;
-    uint8_t posture_flag;
     uint8_t leg_valid_flag;
     uint32_t output_fault;
     uint32_t active_fault;
@@ -516,29 +459,17 @@ void Chassis_State_Update(void)
          * 输出重新放行前丢弃故障期间由陈旧反馈积累的动态状态，首个
          * 完整控制周期从当前姿态重新建立速度、积分和 yaw 平衡点。
          */
-        Dynamic_Control_Reset();
+        Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_LEFT]);
+        Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_RIGHT]);
+        Algorithm_PID_Init(&Chassis.roll_pid);
+        Joint_Control_Reset();
+        Control_Reset();
         Chassis.lqr.target[CHASSIS_STATE_S] = 0.0f;
         Chassis.lqr.target[CHASSIS_STATE_FAI] =
             Chassis.imu.yaw_total * Chassis_Config.imu.yaw_angle_scale;
     }
-    /*
-     * 3. posture_flag只判断FOLLOW/TOP能否直接进入站立控制：
-     * 左右腿正解有效、pitch较小且两条虚拟腿都位于准备角区间。
-     */
-    posture_flag =
-        ((leg_valid_flag != 0U) &&
-         (fabsf(theta_b) <=
-          Chassis_Config.recovery.direct_pitch) &&
-         (Angle_In_Range(
-              Chassis.leg[CHASSIS_LEFT].phi0_total,
-              Chassis_Config.recovery.phi0_min,
-              Chassis_Config.recovery.phi0_max) != 0U) &&
-         (Angle_In_Range(
-              Chassis.leg[CHASSIS_RIGHT].phi0_total,
-              Chassis_Config.recovery.phi0_min,
-              Chassis_Config.recovery.phi0_max) != 0U)) ? 1U : 0U;
 
-    /* 4. 仅在外部模式变化时选择入口状态，避免每周期重复初始化。 */
+    /* 3. 仅在外部模式变化时选择入口状态，避免每周期重复初始化。 */
     if (Chassis.mode != Chassis.last_mode)
     {
         Chassis.fault = active_fault;
@@ -556,9 +487,23 @@ void Chassis_State_Update(void)
         case CHASSIS_MODE_FOLLOW:
             if (Chassis.state != CHASSIS_STANDING)
             {
-                if ((posture_flag != 0U) || (leg_valid_flag == 0U))
+                /*
+                 * 能否直接进入站立：左右腿正解有效、pitch较小且两条
+                 * 虚拟腿都位于准备角区间；正解无效时也放行，中间量继
+                 * 续计算，最终输出由故障门封锁。
+                 */
+                if ((leg_valid_flag == 0U) ||
+                    ((fabsf(theta_b) <=
+                      Chassis_Config.recovery.direct_pitch) &&
+                     (Angle_In_Range(
+                          Chassis.leg[CHASSIS_LEFT].phi0_total,
+                          Chassis_Config.recovery.phi0_min,
+                          Chassis_Config.recovery.phi0_max) != 0U) &&
+                     (Angle_In_Range(
+                          Chassis.leg[CHASSIS_RIGHT].phi0_total,
+                          Chassis_Config.recovery.phi0_min,
+                          Chassis_Config.recovery.phi0_max) != 0U)))
                 {
-                    /* 数学无效时仍计算中间量，最终输出由故障门封锁。 */
                     State_Enter(CHASSIS_STANDING);
                 }
                 else
@@ -590,7 +535,7 @@ void Chassis_State_Update(void)
         Chassis.last_mode = Chassis.mode;
     }
 
-    /* 5. 数学有效时才用当前腿角执行站立姿态保护。 */
+    /* 4. 数学有效时才用当前腿角执行站立姿态保护。 */
     if ((Chassis.state == CHASSIS_STANDING) &&
         (leg_valid_flag != 0U) &&
         ((fabsf(theta_b) >
@@ -620,10 +565,12 @@ void Chassis_State_Update(void)
  *
  * 逆运动学给出主动关节角目标，角度PID生成速度目标，速度PID生成
  * 力矩请求。输出故障只阻止请求量复制到最终关节力矩数组。
+ *
+ * 故障统一记录在 Chassis.fault；关节映射或逆解无定义时自行切入零力状态，
+ * 后续轮输出阶段会因为 Chassis.fault 非零而自然封锁。
  */
-static uint8_t Joint_Control(uint32_t active_fault)
+static void Joint_Control(void)
 {
-    uint8_t indices[CHASSIS_LEG_COUNT][CHASSIS_JOINT_COUNT];
     VMC_Joint_Target_t joint_target[CHASSIS_LEG_COUNT];
     float geometric_torque_nm;
     float target_speed_radps;
@@ -634,60 +581,45 @@ static uint8_t Joint_Control(uint32_t active_fault)
     uint32_t side;
     uint32_t joint;
 
-    /* 1. 每周期先清最终关节命令，防止任何提前返回遗留旧力矩。 */
-    memset(Chassis.output.T_joint, 0, sizeof(Chassis.output.T_joint));
-    memset(Chassis.output.T_joint_req,
-           0,
-           sizeof(Chassis.output.T_joint_req));
-    memset(Chassis.output.target_speed,
-           0,
-           sizeof(Chassis.output.target_speed));
-    Chassis.output.safe_flag = 1U;
-
-    /* 2. 输出故障只参与末端许可，当前串级控制仍继续计算请求量。 */
+    /* 1. 输出故障只参与末端许可，当前串级控制仍继续计算请求量。 */
+    Chassis.fault = Output_Fault_Get();
     if ((Chassis.leg[CHASSIS_LEFT].valid_flag == 0U) ||
         (Chassis.leg[CHASSIS_RIGHT].valid_flag == 0U))
     {
-        active_fault |= CHASSIS_FAULT_KINEMATICS;
-    }
-    Chassis.fault = active_fault | CHASSIS_FAULT_CONTROL;
-    if (Joint_Index_Get(indices) == 0U)
-    {
-        Chassis.fault = active_fault | CHASSIS_FAULT_KINEMATICS;
-        return 0U;
-    }
-    if ((dt < Chassis_Config.dt_min) ||
-        (dt > Chassis_Config.dt_max))
-    {
-        dt = Chassis_Config.default_dt;
+        Chassis.fault |= CHASSIS_FAULT_KINEMATICS;
     }
 
-    /* 3. 目标腿长和连续phi0经逆运动学转换为四个关节目标角。 */
+    /* 2. 目标腿长和连续phi0经逆运动学转换为四个关节目标角。 */
     for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
     {
-        if (VMC_Inverse_Calc(&Chassis_Config.leg[side],
-                             &Chassis.leg[side],
-                             Chassis.leg[side].target_L0,
-                             Chassis.leg[side].target_phi0,
-                             &joint_target[side]) == 0U)
+        uint8_t phi1_index =
+            Chassis_Config.leg[side].joint[CHASSIS_JOINT_PHI1].motor_index;
+        uint8_t phi4_index =
+            Chassis_Config.leg[side].joint[CHASSIS_JOINT_PHI4].motor_index;
+
+        /* 配置索引直接用作关节数组下标，越界时不得继续访问数组。 */
+        if ((phi1_index >= APP_DM_COUNT) || (phi4_index >= APP_DM_COUNT) ||
+            (VMC_Inverse_Calc(&Chassis_Config.leg[side],
+                              &Chassis.leg[side],
+                              Chassis.leg[side].target_L0,
+                              Chassis.leg[side].target_phi0,
+                              &joint_target[side]) == 0U))
         {
-            Chassis.fault = active_fault | CHASSIS_FAULT_KINEMATICS;
-            return 0U;
+            Chassis.fault |= CHASSIS_FAULT_KINEMATICS;
+            State_Enter(CHASSIS_ZERO_FORCE);
+            return;
         }
-        Chassis.output.target_angle
-            [indices[side][CHASSIS_JOINT_PHI1]] =
-                joint_target[side].phi1;
-        Chassis.output.target_angle
-            [indices[side][CHASSIS_JOINT_PHI4]] =
-                joint_target[side].phi4;
+        Chassis.output.target_angle[phi1_index] = joint_target[side].phi1;
+        Chassis.output.target_angle[phi4_index] = joint_target[side].phi4;
     }
 
-    /* 4. 关节角度环输出目标速度，速度环输出有方向的力矩请求。 */
+    /* 3. 关节角度环输出目标速度，速度环输出有方向的力矩请求。 */
     for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
     {
         for (joint = 0U; joint < CHASSIS_JOINT_COUNT; joint++)
         {
-            uint8_t motor_index = indices[side][joint];
+            uint8_t motor_index =
+                Chassis_Config.leg[side].joint[joint].motor_index;
             float joint_scale =
                 Chassis_Config.leg[side].joint[joint].scale *
                 Chassis_Config.leg[side].joint[joint].ratio;
@@ -702,10 +634,6 @@ static uint8_t Joint_Control(uint32_t active_fault)
             }
             feedback_speed_radps =
                 joint_scale * Chassis.dm_motor[motor_index].speed_radps;
-            if (!isfinite(feedback_speed_radps))
-            {
-                feedback_speed_radps = 0.0f;
-            }
             target_speed_radps = 0.0f;
             Algorithm_PID_UpdateByFeedbackRate(
                 &Chassis_Config.recovery.joint_angle_pid,
@@ -728,14 +656,14 @@ static uint8_t Joint_Control(uint32_t active_fault)
                 dt,
                 &geometric_torque_nm);
             Chassis.output.T_joint_req[motor_index] =
-                Limit_Symmetric(
+                Algorithm_LimitSymmetric(
                     geometric_torque_nm * joint_scale,
                     Chassis_Config.recovery.joint_T_limit);
         }
     }
 
-    /* 5. 仅在全部输出条件满足时，把调试请求复制到最终命令。 */
-    if ((active_fault == CHASSIS_FAULT_NONE) &&
+    /* 4. 仅在全部输出条件满足时，把调试请求复制到最终命令。 */
+    if ((Chassis.fault == CHASSIS_FAULT_NONE) &&
         (APP_CHASSIS_OUTPUT_ENABLE != 0U) &&
         (Chassis_Config.output.joint_flag != 0U) &&
         (Chassis_Config.output.joint_T_limit > 0.0f) &&
@@ -749,14 +677,11 @@ static uint8_t Joint_Control(uint32_t active_fault)
         for (side = 0U; side < APP_DM_COUNT; side++)
         {
             Chassis.output.T_joint[side] =
-                Limit_Symmetric(Chassis.output.T_joint_req[side],
+                Algorithm_LimitSymmetric(Chassis.output.T_joint_req[side],
                                 output_limit_nm);
         }
         Chassis.output.safe_flag = 0U;
     }
-
-    Chassis.fault = active_fault;
-    return 1U;
 }
 
 /**
@@ -771,43 +696,26 @@ void Chassis_Recovery(void)
     float direction;
     float theta_ref;
     uint8_t theta_flag[CHASSIS_LEG_COUNT];
-    uint8_t direct_flag;
     uint8_t prepare_flag;
-    uint8_t leg_valid_flag;
     uint32_t side;
     float dt = Chassis.dt;
 
-    memset(Chassis.output.I_wheel, 0, sizeof(Chassis.output.I_wheel));
-    memset(Chassis.output.I_wheel_req,
-           0,
-           sizeof(Chassis.output.I_wheel_req));
-    Chassis.output.T_wheel[CHASSIS_LEFT] = 0.0f;
-    Chassis.output.T_wheel[CHASSIS_RIGHT] = 0.0f;
+    Output_Clear();
 
-    if ((dt < Chassis_Config.dt_min) ||
-        (dt > Chassis_Config.dt_max))
-    {
-        dt = Chassis_Config.default_dt;
-    }
     if ((Chassis.state != CHASSIS_FALLEN) &&
         (Chassis.state != CHASSIS_FALLING_TO_STAND))
     {
         Chassis_Zero_Output();
         return;
     }
-    leg_valid_flag =
-        ((Chassis.leg[CHASSIS_LEFT].valid_flag != 0U) &&
-         (Chassis.leg[CHASSIS_RIGHT].valid_flag != 0U)) ? 1U : 0U;
-    if (leg_valid_flag == 0U)
+    if ((Chassis.leg[CHASSIS_LEFT].valid_flag == 0U) ||
+        (Chassis.leg[CHASSIS_RIGHT].valid_flag == 0U))
     {
         /*
          * 当前腿姿态不足以推进恢复阶段时冻结计时和跳转，但仍运行已有
          * 目标下的关节串级控制，保留可定义请求量供Watch观察。
          */
-        if (Joint_Control(Output_Fault_Get()) == 0U)
-        {
-            State_Enter(CHASSIS_ZERO_FORCE);
-        }
+        Joint_Control();
         return;
     }
 
@@ -825,17 +733,16 @@ void Chassis_Recovery(void)
     if (Chassis.state == CHASSIS_FALLEN)
     {
         Chassis.state_time += dt;
-        direct_flag =
-            ((fabsf(theta_b) <= recovery->direct_pitch) &&
-             (Angle_In_Range(
-                  Chassis.leg[CHASSIS_LEFT].phi0_total,
-                  recovery->phi0_min,
-                  recovery->phi0_max) != 0U) &&
-             (Angle_In_Range(
-                  Chassis.leg[CHASSIS_RIGHT].phi0_total,
-                  recovery->phi0_min,
-                  recovery->phi0_max) != 0U)) ? 1U : 0U;
-        if (direct_flag != 0U)
+        /* 倒地时姿态已经满足准备条件，直接跳过转腿阶段。 */
+        if ((fabsf(theta_b) <= recovery->direct_pitch) &&
+            (Angle_In_Range(
+                 Chassis.leg[CHASSIS_LEFT].phi0_total,
+                 recovery->phi0_min,
+                 recovery->phi0_max) != 0U) &&
+            (Angle_In_Range(
+                 Chassis.leg[CHASSIS_RIGHT].phi0_total,
+                 recovery->phi0_min,
+                 recovery->phi0_max) != 0U))
         {
             State_Enter(CHASSIS_FALLING_TO_STAND);
         }
@@ -910,10 +817,7 @@ void Chassis_Recovery(void)
             }
             else
             {
-                if (Joint_Control(Output_Fault_Get()) == 0U)
-                {
-                    State_Enter(CHASSIS_ZERO_FORCE);
-                }
+                Joint_Control();
                 return;
             }
         }
@@ -960,55 +864,44 @@ void Chassis_Recovery(void)
             State_Enter(CHASSIS_ZERO_FORCE);
             return;
         }
-        if (Joint_Control(Output_Fault_Get()) == 0U)
-        {
-            State_Enter(CHASSIS_ZERO_FORCE);
-        }
+        Joint_Control();
     }
 }
 
 /**
- * @brief 设置固定板凳腿长/腿角，再复用主控制环计算轮LQR和关节位置环。
+ * @brief 保持板凳腿长/腿角，再复用主控制环计算轮LQR和关节位置环。
+ *
+ * 进入板凳时锁存当前实际姿态作为起点，此后按遥控模块给出的调节速率
+ * 逐周期积分，腿长限制在机构可达区间内。
  */
 void Chassis_Bench(void)
 {
-      uint32_t side;
+    const Chassis_Recovery_Config_t *recovery = &Chassis_Config.recovery;
+    uint32_t side;
 
-      if (Chassis.state_time == 0.0f)
-      {
-          for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
-          {
-              Chassis.leg[side].target_L0 = Chassis.leg[side].L0;
-              Chassis.leg[side].target_phi0 =
-                  Chassis.leg[side].phi0_total;
-          }
-      }
-
-      /*下为遥控控制腿长，调试用记得注释掉*/
-      Chassis.state_time += Chassis.dt;
-
-            Chassis.leg[CHASSIS_LEFT].target_L0 +=
-            Remote.leftStick.y * 0.8f * Chassis.dt;
-
-            Chassis.leg[CHASSIS_RIGHT].target_L0 +=
-            Remote.rightStick.y * 0.8f * Chassis.dt;
-
-          Chassis.leg[CHASSIS_LEFT].target_phi0 +=
-              Remote.leftStick.x * 3.2f * Chassis.dt;
-
-          Chassis.leg[CHASSIS_RIGHT].target_phi0 +=
-              Remote.rightStick.x * 3.2f * Chassis.dt;
-
-        for(side = 0U; side < CHASSIS_LEG_COUNT; side++)
+    if (Chassis.state_time == 0.0f)
+    {
+        for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
         {
-            Chassis.leg[side].target_L0 =
-                fminf(fmaxf(Chassis.leg[side].target_L0, 0.09f), 0.25f);
-
-            // Chassis.leg[side].target_phi0 =
-            //     fminf(fmaxf(Chassis.leg[side].target_phi0, 0.70f), 3.00f);
+            Chassis.leg[side].target_L0 = Chassis.leg[side].L0;
+            Chassis.leg[side].target_phi0 = Chassis.leg[side].phi0_total;
         }
+    }
+    Chassis.state_time += Chassis.dt;
 
-      Chassis_Control();
+    for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+    {
+        Chassis.leg[side].target_L0 +=
+            Chassis.goal.bench_d_L0[side] * Chassis.dt;
+        Chassis.leg[side].target_phi0 +=
+            Chassis.goal.bench_d_phi0[side] * Chassis.dt;
+        Chassis.leg[side].target_L0 =
+            fminf(fmaxf(Chassis.leg[side].target_L0,
+                        recovery->bench_L0_min),
+                  recovery->bench_L0_max);
+    }
+
+    Chassis_Control();
 }
 
 /** @brief 按当前模式缩放十维误差并完成四路LQR统一点乘。 */
@@ -1098,57 +991,27 @@ void Chassis_Control(void)
     float theta_b;
     float d_theta_b;
     uint32_t side;
-    uint32_t active_fault;
 
-    memset(Chassis.output.T_joint, 0, sizeof(Chassis.output.T_joint));
-    memset(Chassis.output.I_wheel, 0, sizeof(Chassis.output.I_wheel));
-    memset(Chassis.output.I_wheel_req,
-           0,
-           sizeof(Chassis.output.I_wheel_req));
-    memset(Chassis.output.T_joint_req,
-           0,
-           sizeof(Chassis.output.T_joint_req));
-    Chassis.output.safe_flag = 1U;
+    Output_Clear();
     Chassis.lqr.limit_flag = 0U;
 
     /* 1. 输出故障只封锁最终命令，中间控制量继续使用最新反馈计算。 */
-    active_fault = Output_Fault_Get();
+    Chassis.fault = Output_Fault_Get();
     if ((Chassis.leg[CHASSIS_LEFT].valid_flag == 0U) ||
         (Chassis.leg[CHASSIS_RIGHT].valid_flag == 0U))
     {
-        active_fault |= CHASSIS_FAULT_KINEMATICS;
+        Chassis.fault |= CHASSIS_FAULT_KINEMATICS;
     }
-    Chassis.fault = active_fault | CHASSIS_FAULT_CONTROL;
 
-    /* 配置边界属于实机安全底线，运行期不再封装额外的状态查询函数。 */
+    /* 配置轴号随后直接用作 imu.gyro/body_accel 下标，越界不得继续。 */
     if ((Chassis_Config.imu.pitch_rate_axis >= APP_IMU_AXIS_COUNT) ||
         (Chassis_Config.imu.roll_rate_axis >= APP_IMU_AXIS_COUNT) ||
         (Chassis_Config.imu.yaw_rate_axis >= APP_IMU_AXIS_COUNT) ||
+        (Chassis_Config.imu.lateral_accel_axis >= APP_IMU_AXIS_COUNT) ||
+        (Chassis_Config.imu.vertical_accel_axis >= APP_IMU_AXIS_COUNT) ||
         (Chassis_Config.imu.forward_accel_axis >= APP_IMU_AXIS_COUNT))
     {
-        Chassis.fault = active_fault | CHASSIS_FAULT_CONTROL;
-        State_Enter(CHASSIS_ZERO_FORCE);
-        return;
-    }
-    for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
-    {
-        const Chassis_Geometry_Config_t *geometry =
-            &Chassis_Config.leg[side].geometry;
-
-        if ((geometry->l1 <= 0.0f) || (geometry->l2 <= 0.0f) ||
-            (geometry->l3 <= 0.0f) || (geometry->l4 <= 0.0f))
-        {
-            Chassis.fault = active_fault | CHASSIS_FAULT_CONTROL;
-            State_Enter(CHASSIS_ZERO_FORCE);
-            return;
-        }
-    }
-
-    if ((Chassis_Config.lqr.L0_min <= 0.0f) ||
-        (Chassis_Config.lqr.L0_max <
-         Chassis_Config.lqr.L0_min))
-    {
-        Chassis.fault = active_fault | CHASSIS_FAULT_CONTROL;
+        Chassis.fault |= CHASSIS_FAULT_CONTROL;
         State_Enter(CHASSIS_ZERO_FORCE);
         return;
     }
@@ -1240,7 +1103,7 @@ void Chassis_Control(void)
         Chassis.speed_kalman.state[1] = Chassis.body.dd_s_fused;
     }
 
-    if ((fabsf(Chassis.lqr.target[CHASSIS_STATE_DOT_S]) <= 1.0e-4f) &&
+    if ((fabsf(Chassis.lqr.target[CHASSIS_STATE_D_S]) <= 1.0e-4f) &&
         (Chassis_Config.speed_kalman.position_d_s_limit > 0.0f) &&
         (fabsf(Chassis.body.d_s) <=
          Chassis_Config.speed_kalman.position_d_s_limit))
@@ -1257,24 +1120,24 @@ void Chassis_Control(void)
     Chassis.body.d_fai =
         Chassis.imu.gyro[Chassis_Config.imu.yaw_rate_axis] *
         Chassis_Config.imu.yaw_rate_scale;
-    Chassis.body.theta = theta_b;
-    Chassis.body.d_theta = d_theta_b;
+    Chassis.body.theta_b = theta_b;
+    Chassis.body.d_theta_b = d_theta_b;
 
     /* 十维数组只表达模型接口，物理状态在 body 和 leg 中各有唯一所有者。 */
     Chassis.lqr.x[CHASSIS_STATE_S] = Chassis.body.s;
-    Chassis.lqr.x[CHASSIS_STATE_DOT_S] = Chassis.body.d_s;
+    Chassis.lqr.x[CHASSIS_STATE_D_S] = Chassis.body.d_s;
     Chassis.lqr.x[CHASSIS_STATE_FAI] = Chassis.body.fai;
-    Chassis.lqr.x[CHASSIS_STATE_DOT_FAI] = Chassis.body.d_fai;
+    Chassis.lqr.x[CHASSIS_STATE_D_FAI] = Chassis.body.d_fai;
     Chassis.lqr.x[CHASSIS_STATE_THETA_L] =
         Chassis.leg[CHASSIS_LEFT].theta;
-    Chassis.lqr.x[CHASSIS_STATE_DOT_THETA_L] =
+    Chassis.lqr.x[CHASSIS_STATE_D_THETA_L] =
         Chassis.leg[CHASSIS_LEFT].d_theta;
     Chassis.lqr.x[CHASSIS_STATE_THETA_R] =
         Chassis.leg[CHASSIS_RIGHT].theta;
-    Chassis.lqr.x[CHASSIS_STATE_DOT_THETA_R] =
+    Chassis.lqr.x[CHASSIS_STATE_D_THETA_R] =
         Chassis.leg[CHASSIS_RIGHT].d_theta;
-    Chassis.lqr.x[CHASSIS_STATE_THETA_B] = Chassis.body.theta;
-    Chassis.lqr.x[CHASSIS_STATE_DOT_THETA_B] = Chassis.body.d_theta;
+    Chassis.lqr.x[CHASSIS_STATE_THETA_B] = Chassis.body.theta_b;
+    Chassis.lqr.x[CHASSIS_STATE_D_THETA_B] = Chassis.body.d_theta_b;
     Chassis_Observer_Update(&Chassis_Config, &Chassis);
 
     /* 3. 小板凳由关节位置环保持腿姿态，不再叠加腿长和横滚支撑力。 */
@@ -1368,8 +1231,8 @@ void Chassis_Control(void)
                     Chassis_Config.wheel.right_scale;
 
             Chassis.output.I_wheel_req[side] =
-                (int16_t)Limit_Symmetric(
-                    Limit_Symmetric(Chassis.output.T_wheel[side],
+                (int16_t)Algorithm_LimitSymmetric(
+                    Algorithm_LimitSymmetric(Chassis.output.T_wheel[side],
                                     Chassis_Config.wheel.T_limit) *
                         Chassis_Config.wheel.T_to_I *
                         wheel_scale,
@@ -1380,41 +1243,40 @@ void Chassis_Control(void)
     /* 6. 板凳使用关节串级，其他状态由VMC生成四路关节请求。 */
     if (Chassis.state == CHASSIS_BENCH)
     {
-        if (Joint_Control(active_fault) == 0U)
-        {
-            State_Enter(CHASSIS_ZERO_FORCE);
-            return;
-        }
+        Joint_Control();
     }
     else
     {
         VMC_Torque_t torque[CHASSIS_LEG_COUNT] = {0};
-        uint8_t indices[CHASSIS_LEG_COUNT][CHASSIS_JOINT_COUNT];
 
-        if (Joint_Index_Get(indices) == 0U)
-        {
-            Chassis.fault = active_fault | CHASSIS_FAULT_KINEMATICS;
-            State_Enter(CHASSIS_ZERO_FORCE);
-            return;
-        }
         for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
         {
+            uint8_t phi1_index =
+                Chassis_Config.leg[side].joint[CHASSIS_JOINT_PHI1].motor_index;
+            uint8_t phi4_index =
+                Chassis_Config.leg[side].joint[CHASSIS_JOINT_PHI4].motor_index;
+
+            /* 配置索引直接用作关节数组下标，越界时不得继续访问数组。 */
+            if ((phi1_index >= APP_DM_COUNT) || (phi4_index >= APP_DM_COUNT))
+            {
+                Chassis.fault |= CHASSIS_FAULT_KINEMATICS;
+                State_Enter(CHASSIS_ZERO_FORCE);
+                return;
+            }
             if (VMC_Torque_Calc(&Chassis_Config.leg[side],
                                 &Chassis.leg[side],
                                 Chassis.leg[side].F0,
                                 Chassis.leg[side].Tp,
                                 &torque[side]) == 0U)
             {
-                active_fault |= CHASSIS_FAULT_KINEMATICS;
+                Chassis.fault |= CHASSIS_FAULT_KINEMATICS;
             }
-            Chassis.output.T_joint_req
-                [indices[side][CHASSIS_JOINT_PHI1]] = torque[side].T1;
-            Chassis.output.T_joint_req
-                [indices[side][CHASSIS_JOINT_PHI4]] = torque[side].T4;
+            Chassis.output.T_joint_req[phi1_index] = torque[side].T1;
+            Chassis.output.T_joint_req[phi4_index] = torque[side].T4;
         }
 
         /* 7. VMC请求经总开关、分路开关和限幅后进入最终关节命令。 */
-        if ((active_fault == CHASSIS_FAULT_NONE) &&
+        if ((Chassis.fault == CHASSIS_FAULT_NONE) &&
             (APP_CHASSIS_OUTPUT_ENABLE != 0U) &&
             (Chassis_Config.output.joint_flag != 0U) &&
             (Chassis_Config.output.joint_T_limit > 0.0f))
@@ -1422,7 +1284,7 @@ void Chassis_Control(void)
             for (side = 0U; side < APP_DM_COUNT; side++)
             {
                 Chassis.output.T_joint[side] =
-                    Limit_Symmetric(Chassis.output.T_joint_req[side],
+                    Algorithm_LimitSymmetric(Chassis.output.T_joint_req[side],
                                     Chassis_Config.output.joint_T_limit);
             }
             Chassis.output.safe_flag = 0U;
@@ -1430,7 +1292,7 @@ void Chassis_Control(void)
     }
 
     /* 8. 轮请求在全部输出条件满足时进入最终CAN电流数组。 */
-    if ((active_fault == CHASSIS_FAULT_NONE) &&
+    if ((Chassis.fault == CHASSIS_FAULT_NONE) &&
         (APP_CHASSIS_OUTPUT_ENABLE != 0U) &&
         (Chassis_Config.output.wheel_flag != 0U) &&
         (Chassis_Config.wheel.T_limit > 0.0f) &&
@@ -1442,8 +1304,6 @@ void Chassis_Control(void)
                sizeof(Chassis.output.I_wheel));
         Chassis.output.safe_flag = 0U;
     }
-
-    Chassis.fault = active_fault;
 }
 
 /** @brief 切换爬台阶阶段并清空该阶段的计时和摆腿PID状态。 */
@@ -1529,7 +1389,6 @@ void Chassis_Step(void)
     float target_length_m;
     float target_speed_mps = 0.0f;
     float target_angle_rad = 0.0f;
-    uint8_t phase_flag = 0U;
     uint32_t side;
 
     if (Chassis.state != CHASSIS_STEP)
@@ -1537,16 +1396,11 @@ void Chassis_Step(void)
         Chassis_Zero_Output();
         return;
     }
-    if ((dt < Chassis_Config.dt_min) ||
-        (dt > Chassis_Config.dt_max))
-    {
-        dt = Chassis_Config.default_dt;
-    }
 
     target_length_m = config->approach_L0;
     if (Chassis.step_phase == CHASSIS_STEP_APPROACH)
     {
-        target_speed_mps = Limit_Symmetric(
+        target_speed_mps = Algorithm_LimitSymmetric(
             Chassis.goal.d_s,
             config->approach_d_s);
         if (target_speed_mps < 0.0f)
@@ -1566,16 +1420,16 @@ void Chassis_Step(void)
     }
 
     Chassis.state_time += dt;
-    Chassis.lqr.target[CHASSIS_STATE_DOT_S] =
-        Move_Toward(Chassis.lqr.target[CHASSIS_STATE_DOT_S],
+    Chassis.lqr.target[CHASSIS_STATE_D_S] =
+        Move_Toward(Chassis.lqr.target[CHASSIS_STATE_D_S],
                            target_speed_mps,
                            APP_RC_VEL_RATE * dt);
     Chassis.lqr.target[CHASSIS_STATE_FAI] = Chassis.step_fai;
-    Chassis.lqr.target[CHASSIS_STATE_DOT_FAI] = 0.0f;
+    Chassis.lqr.target[CHASSIS_STATE_D_FAI] = 0.0f;
     Chassis.lqr.target[CHASSIS_STATE_THETA_L] = target_angle_rad;
     Chassis.lqr.target[CHASSIS_STATE_THETA_R] = target_angle_rad;
-    Chassis.lqr.target[CHASSIS_STATE_DOT_THETA_L] = 0.0f;
-    Chassis.lqr.target[CHASSIS_STATE_DOT_THETA_R] = 0.0f;
+    Chassis.lqr.target[CHASSIS_STATE_D_THETA_L] = 0.0f;
+    Chassis.lqr.target[CHASSIS_STATE_D_THETA_R] = 0.0f;
     for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
     {
         Chassis.leg[side].target_L0 =
@@ -1594,14 +1448,12 @@ void Chassis_Step(void)
     switch (Chassis.step_phase)
     {
     case CHASSIS_STEP_PREPARE:
-        phase_flag =
-            ((fabsf(Chassis.leg[CHASSIS_LEFT].L0 -
-                    config->approach_L0) <=
-              config->L0_tol) &&
-             (fabsf(Chassis.leg[CHASSIS_RIGHT].L0 -
-                    config->approach_L0) <=
-              config->L0_tol)) ? 1U : 0U;
-        if (phase_flag != 0U)
+        if ((fabsf(Chassis.leg[CHASSIS_LEFT].L0 -
+                   config->approach_L0) <=
+             config->L0_tol) &&
+            (fabsf(Chassis.leg[CHASSIS_RIGHT].L0 -
+                   config->approach_L0) <=
+             config->L0_tol))
         {
             Chassis.stable_time += dt;
         }
@@ -1633,20 +1485,18 @@ void Chassis_Step(void)
         break;
 
     case CHASSIS_STEP_CLIMB:
-        phase_flag =
-            ((fabsf(Chassis.leg[CHASSIS_LEFT].L0 -
-                    config->retract_L0) <=
-              config->L0_tol) &&
-             (fabsf(Chassis.leg[CHASSIS_RIGHT].L0 -
-                    config->retract_L0) <=
-              config->L0_tol) &&
-             (fabsf(Chassis.lqr.x[CHASSIS_STATE_THETA_L] -
-                    config->peak_theta) <=
-              config->angle_tol) &&
-             (fabsf(Chassis.lqr.x[CHASSIS_STATE_THETA_R] -
-                    config->peak_theta) <=
-              config->angle_tol)) ? 1U : 0U;
-        if (phase_flag != 0U)
+        if ((fabsf(Chassis.leg[CHASSIS_LEFT].L0 -
+                   config->retract_L0) <=
+             config->L0_tol) &&
+            (fabsf(Chassis.leg[CHASSIS_RIGHT].L0 -
+                   config->retract_L0) <=
+             config->L0_tol) &&
+            (fabsf(Chassis.lqr.x[CHASSIS_STATE_THETA_L] -
+                   config->peak_theta) <=
+             config->angle_tol) &&
+            (fabsf(Chassis.lqr.x[CHASSIS_STATE_THETA_R] -
+                   config->peak_theta) <=
+             config->angle_tol))
         {
             Chassis.stable_time += dt;
         }
@@ -1665,20 +1515,18 @@ void Chassis_Step(void)
         break;
 
     case CHASSIS_STEP_RECOVER:
-        phase_flag =
-            ((fabsf(Chassis.leg[CHASSIS_LEFT].L0 -
-                    target_length_m) <=
-              config->L0_tol) &&
-             (fabsf(Chassis.leg[CHASSIS_RIGHT].L0 -
-                    target_length_m) <=
-              config->L0_tol) &&
-             (fabsf(Chassis.lqr.x[CHASSIS_STATE_THETA_L] -
-                    config->recover_theta) <=
-              config->angle_tol) &&
-             (fabsf(Chassis.lqr.x[CHASSIS_STATE_THETA_R] -
-                    config->recover_theta) <=
-              config->angle_tol)) ? 1U : 0U;
-        if (phase_flag != 0U)
+        if ((fabsf(Chassis.leg[CHASSIS_LEFT].L0 -
+                   target_length_m) <=
+             config->L0_tol) &&
+            (fabsf(Chassis.leg[CHASSIS_RIGHT].L0 -
+                   target_length_m) <=
+             config->L0_tol) &&
+            (fabsf(Chassis.lqr.x[CHASSIS_STATE_THETA_L] -
+                   config->recover_theta) <=
+             config->angle_tol) &&
+            (fabsf(Chassis.lqr.x[CHASSIS_STATE_THETA_R] -
+                   config->recover_theta) <=
+             config->angle_tol))
         {
             Chassis.stable_time += dt;
         }

@@ -2,6 +2,7 @@
 
 #include "app_config.h"
 #include "main.h"
+#include "Limit.h"
 #include "PID.h"
 #include "QuaternionEKF.h"
 #include "spi.h"
@@ -36,21 +37,6 @@ static const osThreadAttr_t imuTaskAttributes = {
 static const osMutexAttr_t imuStateMutexAttributes = {
     .name = "ImuStateMutex",
 };
-
-static float IMU_Task_LimitFloat(float value, float minValue, float maxValue)
-{
-    if (value < minValue)
-    {
-        return minValue;
-    }
-
-    if (value > maxValue)
-    {
-        return maxValue;
-    }
-
-    return value;
-}
 
 /**
  * @brief 生成 IMU 姿态 EKF 参数。
@@ -136,9 +122,9 @@ static void IMU_Task_UpdateTemperatureControl(task_imu_state_t *state,
                                        dtSec,
                                        &pidOutput);
 
-    pidOutput = IMU_Task_LimitFloat(pidOutput,
-                                    0.0f,
-                                    APP_IMU_TEMP_PWM_MAX);
+    pidOutput = Algorithm_LimitRange(pidOutput,
+                                     0.0f,
+                                     APP_IMU_TEMP_PWM_MAX);
     state->isTemperatureProtected =
         (state->bmi088Data.temperatureCelsius >=
          APP_IMU_TEMP_PROTECT_C)
@@ -240,7 +226,7 @@ static void IMU_Task_UpdateStableZBias(task_imu_state_t *state)
      */
     zBiasFilterRatio =
         state->dtSec / (APP_IMU_Z_BIAS_LPF_S + state->dtSec);
-    zBiasFilterRatio = IMU_Task_LimitFloat(zBiasFilterRatio, 0.0f, 1.0f);
+    zBiasFilterRatio = Algorithm_LimitRange(zBiasFilterRatio, 0.0f, 1.0f);
     state->gyroBiasRadps[2] += zBiasFilterRatio * state->zGyroResidualRadps;
     state->zBiasUpdateCount++;
     state->isZBiasUpdated = 1U;
@@ -308,33 +294,16 @@ static void IMU_Task_UpdateMotionAcceleration(task_imu_state_t *state)
 }
 
 /**
- * @brief 保存 IMU 状态快照。
- */
-static void IMU_Task_SaveState(const task_imu_state_t *state)
-{
-    if ((state == NULL) || (imuStateMutex == NULL))
-    {
-        return;
-    }
-
-    if (osMutexAcquire(imuStateMutex, osWaitForever) != osOK)
-    {
-        return;
-    }
-
-    imuTaskDebugState = *state;
-    (void)osMutexRelease(imuStateMutex);
-}
-
-/**
- * @brief 把 IMU 内部坐标快照转换为整车右手系输出。
+ * @brief 把 IMU 内部坐标快照转换为整车右手系并发布给业务层。
  *
  * BMI088 原始数据保留传感器坐标，便于排查硬件；姿态角、角速度、运动加速度
  * 和零偏作为业务层输入，统一转换到 X 前、Y 左、Z 上的整车右手系。
  */
-static void IMU_Task_BuildRightHandOutput(const task_imu_state_t *internalState,
-                                          task_imu_state_t *outputState)
+static void IMU_Task_PublishState(const task_imu_state_t *internalState)
 {
+    task_imu_state_t output;
+    task_imu_state_t *outputState = &output;
+
     *outputState = *internalState;
 
     /* Z 轴镜像时，线加速度是普通向量，仅 Z 分量反号。 */
@@ -356,17 +325,10 @@ static void IMU_Task_BuildRightHandOutput(const task_imu_state_t *internalState,
     outputState->quaternion[2] = -outputState->quaternion[2];
     outputState->rollRad = -outputState->rollRad;
     outputState->pitchRad = -outputState->pitchRad;
-}
 
-/**
- * @brief 保存整车右手系 IMU 快照。
- */
-static void IMU_Task_SaveRightHandState(const task_imu_state_t *internalState)
-{
-    task_imu_state_t outputState;
-
-    IMU_Task_BuildRightHandOutput(internalState, &outputState);
-    IMU_Task_SaveState(&outputState);
+    (void)osMutexAcquire(imuStateMutex, osWaitForever);
+    imuTaskDebugState = output;
+    (void)osMutexRelease(imuStateMutex);
 }
 
 /**
@@ -390,7 +352,7 @@ static bmi088_config_t IMU_Task_GetBmi088Config(void)
     return config;
 }
 
-static void ImuTask(void *argument)
+static void IMU_Task_Entry(void *argument)
 {
     const bmi088_config_t bmi088Config = IMU_Task_GetBmi088Config();
     const algorithm_quaternion_ekf_config_t attitudeFilterConfig =
@@ -412,7 +374,7 @@ static void ImuTask(void *argument)
         if (localState.isInitialized == 0U)
         {
             BMI088_Init(&imuBmi088, &bmi088Config);
-            localState.lastErrorCode = BMI088_GetErrorCode(&imuBmi088);
+            localState.lastErrorCode = imuBmi088.lastErrorCode;
             /*
              * 初始化失败时也保留实际读回的芯片 ID，便于 Watch 判断供电、
              * SPI 片选或读写时序问题。
@@ -421,7 +383,7 @@ static void ImuTask(void *argument)
             if (localState.lastErrorCode != BMI088_ERROR_NONE)
             {
                 localState.initErrorCount++;
-                IMU_Task_SaveRightHandState(&localState);
+                IMU_Task_PublishState(&localState);
                 (void)osDelay(APP_IMU_INIT_RETRY_TICKS);
                 wakeTick = osKernelGetTickCount();
                 continue;
@@ -440,15 +402,6 @@ static void ImuTask(void *argument)
         }
 
         BMI088_Read(&imuBmi088, &localState.bmi088Data);
-        localState.lastErrorCode = BMI088_GetErrorCode(&imuBmi088);
-        if (localState.lastErrorCode != BMI088_ERROR_NONE)
-        {
-            localState.readErrorCount++;
-            __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0U);
-            localState.temperaturePidOutput = 0.0f;
-            localState.temperaturePwmCompare = 0U;
-        }
-        else
         {
             uint32_t sampleTick = osKernelGetTickCount();
 
@@ -479,7 +432,7 @@ static void ImuTask(void *argument)
             IMU_Task_UpdateMotionAcceleration(&localState);
         }
 
-        IMU_Task_SaveRightHandState(&localState);
+        IMU_Task_PublishState(&localState);
 
         wakeTick += APP_CTRL_TICKS;
         if ((int32_t)(osKernelGetTickCount() - wakeTick) >= 0)
@@ -493,26 +446,13 @@ static void ImuTask(void *argument)
 void IMU_Task_Init(void)
 {
     imuStateMutex = osMutexNew(&imuStateMutexAttributes);
-    if (imuStateMutex == NULL)
-    {
-        return;
-    }
-
     memset(&imuTaskDebugState, 0, sizeof(imuTaskDebugState));
-    imuTaskHandle = osThreadNew(ImuTask, NULL, &imuTaskAttributes);
+    imuTaskHandle = osThreadNew(IMU_Task_Entry, NULL, &imuTaskAttributes);
 }
 
 void IMU_Task_GetState(task_imu_state_t *state)
 {
-    if ((state == NULL) || (imuStateMutex == NULL))
-    {
-        return;
-    }
-
-    if (osMutexAcquire(imuStateMutex, osWaitForever) != osOK)
-    {
-        return;
-    }
+    (void)osMutexAcquire(imuStateMutex, osWaitForever);
 
     *state = imuTaskDebugState;
     (void)osMutexRelease(imuStateMutex);

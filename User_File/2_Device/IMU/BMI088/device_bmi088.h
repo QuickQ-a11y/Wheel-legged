@@ -12,13 +12,11 @@ extern "C" {
 #define BMI088_AXIS_COUNT 3U
 
 #define BMI088_ERROR_NONE 0x00000000UL
-#define BMI088_ERROR_CONFIG 0x00000001UL
 #define BMI088_ERROR_ACC_CHIP_ID 0x00000002UL
 #define BMI088_ERROR_GYRO_CHIP_ID 0x00000004UL
 #define BMI088_ERROR_ACC_POWER 0x00000008UL
 #define BMI088_ERROR_ACC_CONFIG 0x00000010UL
 #define BMI088_ERROR_GYRO_CONFIG 0x00000020UL
-#define BMI088_ERROR_SPI_TRANSFER 0x80000000UL
 
 typedef struct
 {
@@ -60,11 +58,6 @@ void BMI088_Init(bmi088_t *bmi088, const bmi088_config_t *config);
  * @brief 阻塞读取 BMI088 加速度、角速度和温度数据。
  */
 void BMI088_Read(bmi088_t *bmi088, bmi088_data_t *data);
-
-/**
- * @brief 获取最近一次初始化或读取错误码。
- */
-uint32_t BMI088_GetErrorCode(const bmi088_t *bmi088);
 
 #ifdef __cplusplus
 }

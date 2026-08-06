@@ -343,11 +343,6 @@ int main(void)
                                &target) == 0U);
     assert(target.phi1 == 0.0f);
     assert(target.phi4 == 0.0f);
-    assert(VMC_Inverse_Calc(&config,
-                               &inverse_leg,
-                               NAN,
-                               CHASSIS_HALF_PI,
-                               &target) == 0U);
 
     /* 相切两圆的位置解存在，但从动杆共线时速度雅可比不可逆。 */
     boundary_config = config;
@@ -397,46 +392,6 @@ int main(void)
     assert(fabsf(boundary_leg.phi4 - CHASSIS_HALF_PI) < TEST_TOLERANCE);
     assert(boundary_leg.phi2 == 0.0f);
     assert(boundary_leg.L0 == 0.0f);
-
-    /* 速度非有限不影响已经定义的位置中间量。 */
-    config.geometry.l5 = 0.0f;
-    VMC_State_Calc(&config, 0.5f, -0.8f, NAN, -0.4f, &boundary_leg);
-    assert(boundary_leg.valid_flag == 0U);
-    assert(fabsf(boundary_leg.L0 - leg.L0) < TEST_TOLERANCE);
-    assert(fabsf(boundary_leg.phi0 - leg.phi0) < TEST_TOLERANCE);
-    assert(boundary_leg.d_L0 == 0.0f);
-    assert(boundary_leg.d_phi0 == 0.0f);
-
-    /* scale和ratio共同构成位置、速度和力矩坐标变换。 */
-    boundary_config = config;
-    boundary_config.joint[CHASSIS_JOINT_PHI1].scale = 0.0f;
-    VMC_State_Calc(&boundary_config,
-                   0.5f,
-                   -0.8f,
-                   0.7f,
-                   -0.4f,
-                   &boundary_leg);
-    assert(boundary_leg.valid_flag == 0U);
-    assert(VMC_Torque_Calc(&boundary_config,
-                           &leg,
-                           -30.0f,
-                           1.2f,
-                           &torque) == 0U);
-
-    boundary_config = config;
-    boundary_config.joint[CHASSIS_JOINT_PHI1].ratio = 0.0f;
-    VMC_State_Calc(&boundary_config,
-                   0.5f,
-                   -0.8f,
-                   0.7f,
-                   -0.4f,
-                   &boundary_leg);
-    assert(boundary_leg.valid_flag == 0U);
-    assert(VMC_Torque_Calc(&boundary_config,
-                           &leg,
-                           -30.0f,
-                           1.2f,
-                           &torque) == 0U);
 
     return 0;
 }

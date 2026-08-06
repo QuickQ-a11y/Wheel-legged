@@ -38,12 +38,6 @@ void Driver_FDCAN_Init(FDCAN_HandleTypeDef *handle,
                        driver_fdcan_rx_callback_t rxCallback);
 
 /**
- * @brief 更新指定 FDCAN 外设的接收回调。
- */
-void Driver_FDCAN_RegisterRxCallback(FDCAN_HandleTypeDef *handle,
-                                     driver_fdcan_rx_callback_t rxCallback);
-
-/**
  * @brief 发送一帧标准 ID Classic CAN 数据帧。
  *
  * identifier 范围为 0x000..0x7FF，length 最大为 8 字节。

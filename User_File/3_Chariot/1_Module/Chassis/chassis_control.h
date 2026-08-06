@@ -9,6 +9,7 @@ extern "C" {
 #include "chassis_config.h"
 #include "chassis_observer.h"
 #include "chassis_vmc.h"
+#include "remote_input.h"
 
 #include <stdint.h>
 
@@ -93,6 +94,8 @@ typedef struct
     float fai;               /* 连续航向目标，rad。 */
     float L0;                /* 左右对称目标腿长，m。 */
     float fai_anchor;        /* 航向摇杆连续锚点，rad。 */
+    float bench_d_L0[CHASSIS_LEG_COUNT];   /* 板凳单腿腿长调节速率，m/s。 */
+    float bench_d_phi0[CHASSIS_LEG_COUNT]; /* 板凳单腿腿角调节速率，rad/s。 */
 } Chassis_Goal_t;
 
 /** @brief 整车平动和姿态状态，名称与十维模型保持一致。 */
@@ -105,8 +108,8 @@ typedef struct
     float dd_s_fused;
     float fai;
     float d_fai;
-    float theta;
-    float d_theta;
+    float theta_b;               /* 机体俯仰角，rad。 */
+    float d_theta_b;             /* 机体俯仰角速度，rad/s。 */
     float wheel_speed[CHASSIS_LEG_COUNT]; /* 轮轴角速度，rad/s。 */
     float side_speed[CHASSIS_LEG_COUNT];  /* 单侧轮腿速度估计，m/s。 */
 } Chassis_Body_t;
@@ -151,6 +154,8 @@ struct Chassis
     uint8_t remote_ready_flag;      /* 已上线且收到FOLLOW请求。 */
     uint8_t remote_target_flag;     /* 已建立过遥控目标，离线时保持腿长目标。 */
     uint8_t recovery_latch_flag;    /* 阻止持续SELF_SAVE请求重复触发。 */
+    remote_mode_request_t last_mode_request; /* 上一轮模式请求，供自救单次触发取边沿。 */
+    uint8_t yaw_stick_flag;         /* 航向摇杆已离开中位，锚点已建立。 */
     uint32_t can_error_count;
     float dt;                       /* 本轮实际控制周期，s。 */
 

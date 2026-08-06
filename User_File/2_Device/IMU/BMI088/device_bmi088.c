@@ -84,40 +84,6 @@ static const bmi088_register_config_t bmi088GyroInitTable[] = {
 };
 
 /**
- * @brief 检查 BMI088 配置是否具备必要硬件句柄和片选。
- */
-static uint8_t BMI088_IsValidConfig(const bmi088_config_t *config)
-{
-    if ((config == NULL) ||
-        (config->spiHandle == NULL) ||
-        (config->accChipSelect.gpioPort == NULL) ||
-        (config->gyroChipSelect.gpioPort == NULL))
-    {
-        return 0U;
-    }
-
-    return 1U;
-}
-
-/**
- * @brief 取得有效 SPI 超时时间。
- */
-static uint32_t BMI088_GetTimeout(const bmi088_t *bmi088)
-{
-    if ((bmi088 == NULL) || (bmi088->config.timeoutMs == 0U))
-    {
-        return BMI088_DEFAULT_TIMEOUT_MS;
-    }
-
-    return bmi088->config.timeoutMs;
-}
-
-static int16_t BMI088_MakeInt16(uint8_t lowByte, uint8_t highByte)
-{
-    return (int16_t)(((uint16_t)highByte << 8U) | (uint16_t)lowByte);
-}
-
-/**
  * @brief 按 BMI088 温度寄存器格式解析有符号 11 位温度原始值。
  */
 static int16_t BMI088_MakeTemperatureRaw(const uint8_t data[2])
@@ -137,20 +103,18 @@ static int16_t BMI088_MakeTemperatureRaw(const uint8_t data[2])
  *
  * ACC 读协议需要“命令 + dummy + 数据”处在同一次 CS 有效窗口内。
  */
-static uint8_t BMI088_ReadAccRegisters(bmi088_t *bmi088,
-                                       uint8_t reg,
-                                       uint8_t *data,
-                                       uint8_t length)
+static void BMI088_ReadAccRegisters(bmi088_t *bmi088,
+                                    uint8_t reg,
+                                    uint8_t *data,
+                                    uint8_t length)
 {
     uint8_t txBuffer[BMI088_SPI_MAX_DATA_LENGTH + BMI088_ACC_READ_OVERHEAD] = {0};
     uint8_t rxBuffer[BMI088_SPI_MAX_DATA_LENGTH + BMI088_ACC_READ_OVERHEAD] = {0};
 
-    if ((bmi088 == NULL) ||
-        (data == NULL) ||
-        (length == 0U) ||
-        (length > BMI088_SPI_MAX_DATA_LENGTH))
+    /* 收发缓冲为固定栈数组，长度超出容量时不得发起传输。 */
+    if (length > BMI088_SPI_MAX_DATA_LENGTH)
     {
-        return 0U;
+        return;
     }
 
     txBuffer[0] = BMI088_READ_BIT | reg;
@@ -159,11 +123,9 @@ static uint8_t BMI088_ReadAccRegisters(bmi088_t *bmi088,
                                txBuffer,
                                rxBuffer,
                                (uint16_t)(length + BMI088_ACC_READ_OVERHEAD),
-                               BMI088_GetTimeout(bmi088));
+                               bmi088->config.timeoutMs);
 
     memcpy(data, &rxBuffer[BMI088_ACC_READ_OVERHEAD], length);
-
-    return 1U;
 }
 
 /**
@@ -171,20 +133,18 @@ static uint8_t BMI088_ReadAccRegisters(bmi088_t *bmi088,
  *
  * GYRO 读协议为“命令 + 数据”，没有加速度计额外 dummy 字节。
  */
-static uint8_t BMI088_ReadGyroRegisters(bmi088_t *bmi088,
-                                        uint8_t reg,
-                                        uint8_t *data,
-                                        uint8_t length)
+static void BMI088_ReadGyroRegisters(bmi088_t *bmi088,
+                                     uint8_t reg,
+                                     uint8_t *data,
+                                     uint8_t length)
 {
     uint8_t txBuffer[BMI088_SPI_MAX_DATA_LENGTH + BMI088_GYRO_READ_OVERHEAD] = {0};
     uint8_t rxBuffer[BMI088_SPI_MAX_DATA_LENGTH + BMI088_GYRO_READ_OVERHEAD] = {0};
 
-    if ((bmi088 == NULL) ||
-        (data == NULL) ||
-        (length == 0U) ||
-        (length > BMI088_SPI_MAX_DATA_LENGTH))
+    /* 收发缓冲为固定栈数组，长度超出容量时不得发起传输。 */
+    if (length > BMI088_SPI_MAX_DATA_LENGTH)
     {
-        return 0U;
+        return;
     }
 
     txBuffer[0] = BMI088_READ_BIT | reg;
@@ -193,219 +153,150 @@ static uint8_t BMI088_ReadGyroRegisters(bmi088_t *bmi088,
                                txBuffer,
                                rxBuffer,
                                (uint16_t)(length + BMI088_GYRO_READ_OVERHEAD),
-                               BMI088_GetTimeout(bmi088));
+                               bmi088->config.timeoutMs);
 
     memcpy(data, &rxBuffer[BMI088_GYRO_READ_OVERHEAD], length);
-
-    return 1U;
 }
 
-static uint8_t BMI088_WriteAccRegister(bmi088_t *bmi088,
-                                       uint8_t reg,
-                                       uint8_t value)
+static void BMI088_WriteAccRegister(bmi088_t *bmi088,
+                                    uint8_t reg,
+                                    uint8_t value)
 {
     uint8_t txBuffer[2] = {reg, value};
-
-    if (bmi088 == NULL)
-    {
-        return 0U;
-    }
 
     Driver_SPI_Transmit(bmi088->config.spiHandle,
                         &bmi088->config.accChipSelect,
                         txBuffer,
                         sizeof(txBuffer),
-                        BMI088_GetTimeout(bmi088));
-
-    return 1U;
+                        bmi088->config.timeoutMs);
 }
 
-static uint8_t BMI088_WriteGyroRegister(bmi088_t *bmi088,
-                                        uint8_t reg,
-                                        uint8_t value)
+static void BMI088_WriteGyroRegister(bmi088_t *bmi088,
+                                     uint8_t reg,
+                                     uint8_t value)
 {
     uint8_t txBuffer[2] = {reg, value};
-
-    if (bmi088 == NULL)
-    {
-        return 0U;
-    }
 
     Driver_SPI_Transmit(bmi088->config.spiHandle,
                         &bmi088->config.gyroChipSelect,
                         txBuffer,
                         sizeof(txBuffer),
-                        BMI088_GetTimeout(bmi088));
-
-    return 1U;
+                        bmi088->config.timeoutMs);
 }
 
 /**
- * @brief 写入并回读校验加速度计寄存器。
+ * @brief 写入并回读校验加速度计寄存器，回读不一致时记录该寄存器的错误位。
  */
-static uint32_t BMI088_WriteAndCheckAccRegister(bmi088_t *bmi088,
-                                                const bmi088_register_config_t *config)
+static void BMI088_WriteAndCheckAccRegister(bmi088_t *bmi088,
+                                            const bmi088_register_config_t *config)
 {
     uint8_t readValue = 0U;
 
-    if (config == NULL)
-    {
-        return BMI088_ERROR_CONFIG;
-    }
-
-    if (BMI088_WriteAccRegister(bmi088, config->reg, config->value) == 0U)
-    {
-        return config->errorCode | BMI088_ERROR_SPI_TRANSFER;
-    }
-
+    BMI088_WriteAccRegister(bmi088, config->reg, config->value);
     HAL_Delay(1U);
-    if (BMI088_ReadAccRegisters(bmi088, config->reg, &readValue, 1U) == 0U)
+    BMI088_ReadAccRegisters(bmi088, config->reg, &readValue, 1U);
+    if (readValue != config->value)
     {
-        return config->errorCode | BMI088_ERROR_SPI_TRANSFER;
+        bmi088->lastErrorCode |= config->errorCode;
     }
-
-    return (readValue == config->value) ? BMI088_ERROR_NONE : config->errorCode;
 }
 
 /**
- * @brief 写入并回读校验陀螺仪寄存器。
+ * @brief 写入并回读校验陀螺仪寄存器，回读不一致时记录该寄存器的错误位。
  */
-static uint32_t BMI088_WriteAndCheckGyroRegister(bmi088_t *bmi088,
-                                                 const bmi088_register_config_t *config)
+static void BMI088_WriteAndCheckGyroRegister(bmi088_t *bmi088,
+                                             const bmi088_register_config_t *config)
 {
     uint8_t readValue = 0U;
 
-    if (config == NULL)
-    {
-        return BMI088_ERROR_CONFIG;
-    }
-
-    if (BMI088_WriteGyroRegister(bmi088, config->reg, config->value) == 0U)
-    {
-        return config->errorCode | BMI088_ERROR_SPI_TRANSFER;
-    }
-
+    BMI088_WriteGyroRegister(bmi088, config->reg, config->value);
     HAL_Delay(1U);
-    if (BMI088_ReadGyroRegisters(bmi088, config->reg, &readValue, 1U) == 0U)
+    BMI088_ReadGyroRegisters(bmi088, config->reg, &readValue, 1U);
+    if (readValue != config->value)
     {
-        return config->errorCode | BMI088_ERROR_SPI_TRANSFER;
+        bmi088->lastErrorCode |= config->errorCode;
     }
-
-    return (readValue == config->value) ? BMI088_ERROR_NONE : config->errorCode;
 }
 
 /**
  * @brief 初始化 BMI088 加速度计部分。
  */
-static uint32_t BMI088_InitAcc(bmi088_t *bmi088)
+static void BMI088_InitAcc(bmi088_t *bmi088)
 {
     uint8_t chipId = 0U;
-    uint32_t errorCode = BMI088_ERROR_NONE;
     uint32_t index;
 
     /*
      * ACC 上电后第一次 SPI 读可能只完成接口模式切换。
      * 这里按本家代码连续读两次，后续只用第二次结果判断芯片 ID。
      */
-    (void)BMI088_ReadAccRegisters(bmi088, BMI088_ACC_CHIP_ID_REG, &chipId, 1U);
+    BMI088_ReadAccRegisters(bmi088, BMI088_ACC_CHIP_ID_REG, &chipId, 1U);
     HAL_Delay(1U);
-    if (BMI088_ReadAccRegisters(bmi088, BMI088_ACC_CHIP_ID_REG, &chipId, 1U) == 0U)
-    {
-        return BMI088_ERROR_ACC_CHIP_ID | BMI088_ERROR_SPI_TRANSFER;
-    }
+    BMI088_ReadAccRegisters(bmi088, BMI088_ACC_CHIP_ID_REG, &chipId, 1U);
     HAL_Delay(1U);
 
-    if (BMI088_WriteAccRegister(bmi088, BMI088_ACC_SOFTRESET_REG, BMI088_ACC_SOFTRESET_VALUE) == 0U)
-    {
-        return BMI088_ERROR_ACC_CHIP_ID | BMI088_ERROR_SPI_TRANSFER;
-    }
+    BMI088_WriteAccRegister(bmi088, BMI088_ACC_SOFTRESET_REG, BMI088_ACC_SOFTRESET_VALUE);
     HAL_Delay(150U);
 
     /*
      * 软复位后也连续读两次，避免复位恢复阶段的首帧无效值影响初始化判断。
      */
-    (void)BMI088_ReadAccRegisters(bmi088, BMI088_ACC_CHIP_ID_REG, &chipId, 1U);
+    BMI088_ReadAccRegisters(bmi088, BMI088_ACC_CHIP_ID_REG, &chipId, 1U);
     HAL_Delay(1U);
-    if (BMI088_ReadAccRegisters(bmi088, BMI088_ACC_CHIP_ID_REG, &chipId, 1U) == 0U)
-    {
-        return BMI088_ERROR_ACC_CHIP_ID | BMI088_ERROR_SPI_TRANSFER;
-    }
+    BMI088_ReadAccRegisters(bmi088, BMI088_ACC_CHIP_ID_REG, &chipId, 1U);
 
     bmi088->data.accChipId = chipId;
     if (chipId != BMI088_ACC_CHIP_ID_VALUE)
     {
-        return BMI088_ERROR_ACC_CHIP_ID;
+        bmi088->lastErrorCode |= BMI088_ERROR_ACC_CHIP_ID;
+        return;
     }
 
     for (index = 0U; index < (sizeof(bmi088AccInitTable) / sizeof(bmi088AccInitTable[0])); index++)
     {
-        errorCode |= BMI088_WriteAndCheckAccRegister(bmi088, &bmi088AccInitTable[index]);
+        BMI088_WriteAndCheckAccRegister(bmi088, &bmi088AccInitTable[index]);
     }
-
-    return errorCode;
 }
 
 /**
  * @brief 初始化 BMI088 陀螺仪部分。
  */
-static uint32_t BMI088_InitGyro(bmi088_t *bmi088)
+static void BMI088_InitGyro(bmi088_t *bmi088)
 {
     uint8_t chipId = 0U;
-    uint32_t errorCode = BMI088_ERROR_NONE;
     uint32_t index;
 
     /*
      * GYRO 没有 ACC 的额外 dummy 字节，但本家代码同样在复位前后各读两次，
      * 这里保持相同初始化节奏，方便对照实机问题。
      */
-    (void)BMI088_ReadGyroRegisters(bmi088, BMI088_GYRO_CHIP_ID_REG, &chipId, 1U);
+    BMI088_ReadGyroRegisters(bmi088, BMI088_GYRO_CHIP_ID_REG, &chipId, 1U);
     HAL_Delay(1U);
-    if (BMI088_ReadGyroRegisters(bmi088, BMI088_GYRO_CHIP_ID_REG, &chipId, 1U) == 0U)
-    {
-        return BMI088_ERROR_GYRO_CHIP_ID | BMI088_ERROR_SPI_TRANSFER;
-    }
+    BMI088_ReadGyroRegisters(bmi088, BMI088_GYRO_CHIP_ID_REG, &chipId, 1U);
     HAL_Delay(1U);
 
-    if (BMI088_WriteGyroRegister(bmi088, BMI088_GYRO_SOFTRESET_REG, BMI088_GYRO_SOFTRESET_VALUE) == 0U)
-    {
-        return BMI088_ERROR_GYRO_CHIP_ID | BMI088_ERROR_SPI_TRANSFER;
-    }
+    BMI088_WriteGyroRegister(bmi088, BMI088_GYRO_SOFTRESET_REG, BMI088_GYRO_SOFTRESET_VALUE);
     HAL_Delay(80U);
 
-    (void)BMI088_ReadGyroRegisters(bmi088, BMI088_GYRO_CHIP_ID_REG, &chipId, 1U);
+    BMI088_ReadGyroRegisters(bmi088, BMI088_GYRO_CHIP_ID_REG, &chipId, 1U);
     HAL_Delay(1U);
-    if (BMI088_ReadGyroRegisters(bmi088, BMI088_GYRO_CHIP_ID_REG, &chipId, 1U) == 0U)
-    {
-        return BMI088_ERROR_GYRO_CHIP_ID | BMI088_ERROR_SPI_TRANSFER;
-    }
+    BMI088_ReadGyroRegisters(bmi088, BMI088_GYRO_CHIP_ID_REG, &chipId, 1U);
 
     bmi088->data.gyroChipId = chipId;
     if (chipId != BMI088_GYRO_CHIP_ID_VALUE)
     {
-        return BMI088_ERROR_GYRO_CHIP_ID;
+        bmi088->lastErrorCode |= BMI088_ERROR_GYRO_CHIP_ID;
+        return;
     }
 
     for (index = 0U; index < (sizeof(bmi088GyroInitTable) / sizeof(bmi088GyroInitTable[0])); index++)
     {
-        errorCode |= BMI088_WriteAndCheckGyroRegister(bmi088, &bmi088GyroInitTable[index]);
+        BMI088_WriteAndCheckGyroRegister(bmi088, &bmi088GyroInitTable[index]);
     }
-
-    return errorCode;
 }
 
 void BMI088_Init(bmi088_t *bmi088, const bmi088_config_t *config)
 {
-    uint32_t errorCode;
-
-    if ((bmi088 == NULL) || (BMI088_IsValidConfig(config) == 0U))
-    {
-        if (bmi088 != NULL)
-        {
-            bmi088->lastErrorCode = BMI088_ERROR_CONFIG;
-        }
-        return;
-    }
-
     memset(bmi088, 0, sizeof(*bmi088));
     bmi088->config = *config;
     if (bmi088->config.timeoutMs == 0U)
@@ -421,9 +312,8 @@ void BMI088_Init(bmi088_t *bmi088, const bmi088_config_t *config)
                       GPIO_PIN_SET);
     HAL_Delay(10U);
 
-    errorCode = BMI088_InitAcc(bmi088);
-    errorCode |= BMI088_InitGyro(bmi088);
-    bmi088->lastErrorCode = errorCode;
+    BMI088_InitAcc(bmi088);
+    BMI088_InitGyro(bmi088);
 }
 
 void BMI088_Read(bmi088_t *bmi088, bmi088_data_t *data)
@@ -433,23 +323,17 @@ void BMI088_Read(bmi088_t *bmi088, bmi088_data_t *data)
     uint8_t tempBuffer[2] = {0};
     uint32_t axis;
 
-    if (bmi088 == NULL)
-    {
-        return;
-    }
+    BMI088_ReadAccRegisters(bmi088, BMI088_ACC_XOUT_L_REG, accBuffer, sizeof(accBuffer));
+    BMI088_ReadGyroRegisters(bmi088, BMI088_GYRO_X_L_REG, gyroBuffer, sizeof(gyroBuffer));
+    BMI088_ReadAccRegisters(bmi088, BMI088_ACC_TEMP_M_REG, tempBuffer, sizeof(tempBuffer));
 
-    if ((BMI088_ReadAccRegisters(bmi088, BMI088_ACC_XOUT_L_REG, accBuffer, sizeof(accBuffer)) == 0U) ||
-        (BMI088_ReadGyroRegisters(bmi088, BMI088_GYRO_X_L_REG, gyroBuffer, sizeof(gyroBuffer)) == 0U) ||
-        (BMI088_ReadAccRegisters(bmi088, BMI088_ACC_TEMP_M_REG, tempBuffer, sizeof(tempBuffer)) == 0U))
-    {
-        bmi088->lastErrorCode = BMI088_ERROR_SPI_TRANSFER;
-        return;
-    }
-
+    /* 寄存器为低字节在前的 16 位补码。 */
     for (axis = 0U; axis < BMI088_AXIS_COUNT; axis++)
     {
-        bmi088->data.accRaw[axis] = BMI088_MakeInt16(accBuffer[axis * 2U], accBuffer[axis * 2U + 1U]);
-        bmi088->data.gyroRaw[axis] = BMI088_MakeInt16(gyroBuffer[axis * 2U], gyroBuffer[axis * 2U + 1U]);
+        bmi088->data.accRaw[axis] = (int16_t)(((uint16_t)accBuffer[axis * 2U + 1U] << 8U) |
+                                              (uint16_t)accBuffer[axis * 2U]);
+        bmi088->data.gyroRaw[axis] = (int16_t)(((uint16_t)gyroBuffer[axis * 2U + 1U] << 8U) |
+                                               (uint16_t)gyroBuffer[axis * 2U]);
         bmi088->data.accMps2[axis] = (float)bmi088->data.accRaw[axis] * BMI088_ACC_6G_SCALE;
         bmi088->data.gyroRadps[axis] = (float)bmi088->data.gyroRaw[axis] * BMI088_GYRO_2000DPS_SCALE;
     }
@@ -461,18 +345,5 @@ void BMI088_Read(bmi088_t *bmi088, bmi088_data_t *data)
     bmi088->data.lastUpdateTick = HAL_GetTick();
     bmi088->lastErrorCode = BMI088_ERROR_NONE;
 
-    if (data != NULL)
-    {
-        *data = bmi088->data;
-    }
-}
-
-uint32_t BMI088_GetErrorCode(const bmi088_t *bmi088)
-{
-    if (bmi088 == NULL)
-    {
-        return BMI088_ERROR_CONFIG;
-    }
-
-    return bmi088->lastErrorCode;
+    *data = bmi088->data;
 }

@@ -41,7 +41,7 @@ void Driver_UART_Init(UART_HandleTypeDef *handle,
 /**
  * @brief 启动或恢复指定 UART 的 Receive-to-IDLE DMA 接收。
  */
-uint8_t Driver_UART_StartRx(UART_HandleTypeDef *handle);
+void Driver_UART_StartRx(UART_HandleTypeDef *handle);
 
 #ifdef __cplusplus
 }

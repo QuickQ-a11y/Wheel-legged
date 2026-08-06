@@ -81,11 +81,6 @@ static uint8_t Remote_Task_TakePending(task_remote_pending_t *pending)
     uint32_t interruptState;
     uint8_t hasPending = 0U;
 
-    if (pending == NULL)
-    {
-        return 0U;
-    }
-
     interruptState = __get_PRIMASK();
     __disable_irq();
     __DMB();
@@ -106,14 +101,7 @@ static uint8_t Remote_Task_TakePending(task_remote_pending_t *pending)
 static void Remote_Task_Publish(const Remote_t *remote,
                                 const task_remote_state_t *state)
 {
-    if ((remote == NULL) || (state == NULL) || (remoteStateMutex == NULL))
-    {
-        return;
-    }
-    if (osMutexAcquire(remoteStateMutex, osWaitForever) != osOK)
-    {
-        return;
-    }
+    (void)osMutexAcquire(remoteStateMutex, osWaitForever);
 
     remotePublished = *remote;
     remoteTaskDebugState = *state;
@@ -194,7 +182,7 @@ static void Remote_Task_ProcessFrame(task_remote_state_t *state,
 }
 
 /** @brief 接收、校验并发布 DR16 数据，且不阻塞底盘控制任务。 */
-static void RemoteTask(void *argument)
+static void Remote_Task_Entry(void *argument)
 {
     task_remote_state_t state = {0};
     Remote_t remote = {0};
@@ -210,7 +198,7 @@ static void RemoteTask(void *argument)
                      sizeof(dr16DmaBuffer),
                      Remote_Task_RxCallback,
                      Remote_Task_ErrorCallback);
-    (void)Driver_UART_StartRx(&huart5);
+    Driver_UART_StartRx(&huart5);
 
     for (;;)
     {
@@ -240,7 +228,7 @@ static void RemoteTask(void *argument)
         }
         if (driverUart5Object.receiving == 0U)
         {
-            (void)Driver_UART_StartRx(&huart5);
+            Driver_UART_StartRx(&huart5);
         }
 
         state.rxEventCount = driverUart5Object.rxEventCount;
@@ -272,23 +260,12 @@ void Remote_Task_Init(void)
     remoteLastError = 0U;
 
     remoteStateMutex = osMutexNew(&remoteStateMutexAttributes);
-    if (remoteStateMutex == NULL)
-    {
-        return;
-    }
-    remoteTaskHandle = osThreadNew(RemoteTask, NULL, &remoteTaskAttributes);
+    remoteTaskHandle = osThreadNew(Remote_Task_Entry, NULL, &remoteTaskAttributes);
 }
 
 void Remote_Task_Update(void)
 {
-    if (remoteStateMutex == NULL)
-    {
-        return;
-    }
-    if (osMutexAcquire(remoteStateMutex, osWaitForever) != osOK)
-    {
-        return;
-    }
+    (void)osMutexAcquire(remoteStateMutex, osWaitForever);
 
     Remote = remotePublished;
     (void)osMutexRelease(remoteStateMutex);

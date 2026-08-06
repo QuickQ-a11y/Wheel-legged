@@ -11,11 +11,6 @@ static uint16_t DR16_ReadUint16(const uint8_t *data)
 }
 
 /** @brief 在不使用别名类型转换的情况下读取小端有符号 16 位字段。 */
-static int16_t DR16_ReadInt16(const uint8_t *data)
-{
-    return (int16_t)DR16_ReadUint16(data);
-}
-
 /** @brief 在减去中值前校验一个无符号 DBUS 通道原始值。 */
 static uint8_t DR16_IsChannelValid(uint16_t channel)
 {
@@ -37,11 +32,6 @@ uint8_t DR16_ParseFrame(const uint8_t frame[DR16_FRAME_LEN],
     dr16_data_t parsed = {0};
     uint16_t channels[4];
     uint16_t dialRaw;
-
-    if ((frame == NULL) || (data == NULL))
-    {
-        return 0U;
-    }
 
     channels[0] = (DR16_ReadUint16(&frame[0]) & 0x07FFU);
     channels[1] = (((uint16_t)frame[1] >> 3U) |
@@ -68,9 +58,9 @@ uint8_t DR16_ParseFrame(const uint8_t frame[DR16_FRAME_LEN],
     parsed.rightY = (int16_t)channels[1] - (int16_t)DR16_CH_MID;
     parsed.leftX = (int16_t)channels[2] - (int16_t)DR16_CH_MID;
     parsed.leftY = (int16_t)channels[3] - (int16_t)DR16_CH_MID;
-    parsed.mouse.x = DR16_ReadInt16(&frame[6]);
-    parsed.mouse.y = DR16_ReadInt16(&frame[8]);
-    parsed.mouse.z = DR16_ReadInt16(&frame[10]);
+    parsed.mouse.x = (int16_t)DR16_ReadUint16(&frame[6]);
+    parsed.mouse.y = (int16_t)DR16_ReadUint16(&frame[8]);
+    parsed.mouse.z = (int16_t)DR16_ReadUint16(&frame[10]);
     parsed.mouse.leftPressed = frame[12];
     parsed.mouse.rightPressed = frame[13];
     parsed.keyBits = DR16_ReadUint16(&frame[14]);
@@ -86,53 +76,43 @@ uint8_t DR16_ParseFrame(const uint8_t frame[DR16_FRAME_LEN],
     return 1U;
 }
 
-uint8_t DR16_IsKeyDown(const dr16_data_t *data, dr16_key_t key)
-{
-    if (data == NULL)
-    {
-        return 0U;
-    }
-
-    return ((data->keyBits & (uint16_t)key) != 0U) ? 1U : 0U;
-}
-
 float DR16_NormalizeAxis(int16_t axis, int16_t deadband)
 {
-    int32_t limited_axis = axis;
-    int32_t positive_deadband = deadband;
+    int32_t limitedAxis = axis;
+    int32_t positiveDeadband = deadband;
     int32_t magnitude;
 
-    if (limited_axis > DR16_AXIS_MAX)
+    if (limitedAxis > DR16_AXIS_MAX)
     {
-        limited_axis = DR16_AXIS_MAX;
+        limitedAxis = DR16_AXIS_MAX;
     }
-    else if (limited_axis < -DR16_AXIS_MAX)
+    else if (limitedAxis < -DR16_AXIS_MAX)
     {
-        limited_axis = -DR16_AXIS_MAX;
+        limitedAxis = -DR16_AXIS_MAX;
     }
 
-    if (positive_deadband < 0)
+    if (positiveDeadband < 0)
     {
-        positive_deadband = -positive_deadband;
+        positiveDeadband = -positiveDeadband;
     }
-    if (positive_deadband >= DR16_AXIS_MAX)
+    if (positiveDeadband >= DR16_AXIS_MAX)
     {
         return 0.0f;
     }
 
-    magnitude = (limited_axis >= 0) ? limited_axis : -limited_axis;
-    if (magnitude <= positive_deadband)
+    magnitude = (limitedAxis >= 0) ? limitedAxis : -limitedAxis;
+    if (magnitude <= positiveDeadband)
     {
         return 0.0f;
     }
 
-    magnitude -= positive_deadband;
-    if (limited_axis < 0)
+    magnitude -= positiveDeadband;
+    if (limitedAxis < 0)
     {
-        return -(float)magnitude / (float)(DR16_AXIS_MAX - positive_deadband);
+        return -(float)magnitude / (float)(DR16_AXIS_MAX - positiveDeadband);
     }
 
-    return (float)magnitude / (float)(DR16_AXIS_MAX - positive_deadband);
+    return (float)magnitude / (float)(DR16_AXIS_MAX - positiveDeadband);
 }
 
 static Remote_Switch_t DR16_ConvertSwitch(dr16_switch_t value)
@@ -160,16 +140,6 @@ void DR16_MakeRemote(const dr16_data_t *data,
                      Remote_t *remote)
 {
     Remote_t converted = {0};
-
-    if (remote == NULL)
-    {
-        return;
-    }
-    if (data == NULL)
-    {
-        *remote = converted;
-        return;
-    }
 
     converted.leftStick.x = DR16_NormalizeAxis(data->leftX, deadband);
     converted.leftStick.y = DR16_NormalizeAxis(data->leftY, deadband);

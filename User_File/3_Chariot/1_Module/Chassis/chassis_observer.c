@@ -1,30 +1,15 @@
 #include "chassis_control.h"
 
+#include "Limit.h"
+
 #include <math.h>
 #include <string.h>
 
 #define CHASSIS_OBS_EPS 1.0e-6f
 
-static float Observer_Limit(float value, float limit)
-{
-    float positive_limit = fabsf(limit);
-
-    if ((!isfinite(value)) || (!isfinite(positive_limit)) ||
-        (positive_limit <= 0.0f))
-    {
-        return 0.0f;
-    }
-    if (value > positive_limit)
-    {
-        return positive_limit;
-    }
-    if (value < -positive_limit)
-    {
-        return -positive_limit;
-    }
-    return value;
-}
-
+/**
+ * @brief 一阶低通，时间常数或周期非正时直接透传当前值。
+ */
 static float Observer_Filter(float value,
                              float previous,
                              float time_constant_s,
@@ -32,10 +17,6 @@ static float Observer_Filter(float value,
 {
     float ratio;
 
-    if ((!isfinite(value)) || (!isfinite(previous)))
-    {
-        return 0.0f;
-    }
     if ((time_constant_s <= 0.0f) || (dt <= 0.0f))
     {
         return value;
@@ -48,16 +29,18 @@ static float Observer_Filter(float value,
     return previous + ratio * (value - previous);
 }
 
+/**
+ * @brief 清空观测量并标记当前使用标称模型参数。
+ */
 void Chassis_Observer_Init(Chassis_Observer_t *observer)
 {
-    if (observer == NULL)
-    {
-        return;
-    }
     memset(observer, 0, sizeof(*observer));
     observer->nominal_model_flag = 1U;
 }
 
+/**
+ * @brief 由轮速与整车偏航残差判定单侧打滑，带进入和退出双时间迟滞。
+ */
 static void Observer_Slip_Update(
     const Chassis_Observer_Config_t *config,
     const Chassis_Wheel_Config_t *wheel_config,
@@ -94,9 +77,6 @@ static void Observer_Slip_Update(
 
     for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
     {
-        uint8_t enter_flag;
-        uint8_t exit_flag;
-
         observer->wheel_residual_mps[side] =
             chassis->body.side_speed[side] -
             observer->expected_side_speed_mps[side];
@@ -118,26 +98,18 @@ static void Observer_Slip_Update(
                 chassis->body.dd_s * chassis->dt;
         }
 
-        enter_flag =
+        observer->slip_candidate_flag[side] =
             ((fabsf(observer->wheel_residual_filtered_mps[side]) >=
               config->slip_speed_enter_mps) &&
              ((fabsf(observer->yaw_residual_filtered_radps) >=
                config->slip_yaw_enter_radps) ||
               (fabsf(observer->delta_residual_mps[side]) >=
                config->slip_delta_enter_mps))) ? 1U : 0U;
-        exit_flag =
-            ((fabsf(observer->wheel_residual_filtered_mps[side]) <=
-              config->slip_speed_exit_mps) &&
-             (fabsf(observer->yaw_residual_filtered_radps) <=
-              config->slip_yaw_exit_radps) &&
-             (fabsf(observer->delta_residual_mps[side]) <=
-              config->slip_delta_exit_mps)) ? 1U : 0U;
-        observer->slip_candidate_flag[side] = enter_flag;
 
         if (observer->slip_flag[side] == 0U)
         {
             observer->slip_exit_elapsed_s[side] = 0.0f;
-            if (enter_flag != 0U)
+            if (observer->slip_candidate_flag[side] != 0U)
             {
                 observer->slip_enter_elapsed_s[side] += chassis->dt;
                 if (observer->slip_enter_elapsed_s[side] >=
@@ -155,7 +127,12 @@ static void Observer_Slip_Update(
         else
         {
             observer->slip_enter_elapsed_s[side] = 0.0f;
-            if (exit_flag != 0U)
+            if ((fabsf(observer->wheel_residual_filtered_mps[side]) <=
+                 config->slip_speed_exit_mps) &&
+                (fabsf(observer->yaw_residual_filtered_radps) <=
+                 config->slip_yaw_exit_radps) &&
+                (fabsf(observer->delta_residual_mps[side]) <=
+                 config->slip_delta_exit_mps))
             {
                 observer->slip_exit_elapsed_s[side] += chassis->dt;
                 if (observer->slip_exit_elapsed_s[side] >=
@@ -173,6 +150,9 @@ static void Observer_Slip_Update(
     }
 }
 
+/**
+ * @brief 由关节反馈力矩反解支撑力并判定单腿离地与落地。
+ */
 static void Observer_Force_Update(
     const Chassis_Observer_Config_t *config,
     const Chassis_Leg_Config_t leg_config[CHASSIS_LEG_COUNT],
@@ -196,7 +176,6 @@ static void Observer_Force_Update(
             leg_config[side].joint[CHASSIS_JOINT_PHI1].motor_index;
         uint8_t phi4_index =
             leg_config[side].joint[CHASSIS_JOINT_PHI4].motor_index;
-        uint8_t force_flag;
 
         if (chassis->dt > CHASSIS_OBS_EPS)
         {
@@ -220,14 +199,13 @@ static void Observer_Force_Update(
             config->residual_filter_s,
             chassis->dt);
 
-        force_flag = VMC_Force_Calc(
+        observer->force_valid_flag[side] = VMC_Force_Calc(
             &leg_config[side],
             &chassis->leg[side],
             chassis->dm_motor[phi1_index].torque_nm,
             chassis->dm_motor[phi4_index].torque_nm,
             &observer->feedback_force[side]);
-        observer->force_valid_flag[side] = force_flag;
-        if ((force_flag == 0U) ||
+        if ((observer->force_valid_flag[side] == 0U) ||
             (fabsf(chassis->leg[side].L0) <= CHASSIS_OBS_EPS))
         {
             observer->off_candidate_flag[side] = 0U;
@@ -238,7 +216,7 @@ static void Observer_Force_Update(
         }
 
         leg_accel =
-            chassis->imu.body_accel[2] -
+            chassis->imu.body_accel[Chassis_Config.imu.vertical_accel_axis] -
             observer->dd_L0[side] *
                 cosf(chassis->leg[side].theta) +
             2.0f * chassis->leg[side].d_L0 *
@@ -329,6 +307,9 @@ static void Observer_Force_Update(
          (observer->off_ground_flag[CHASSIS_RIGHT] != 0U)) ? 1U : 0U;
 }
 
+/**
+ * @brief 由横向加速度估算转向所需的左右支撑力差，并按标称静载限幅。
+ */
 static void Observer_Turn_Update(
     const Chassis_Observer_Config_t *config,
     const Chassis_Wheel_Config_t *wheel_config,
@@ -342,7 +323,8 @@ static void Observer_Turn_Update(
                         config->turn_force_limit_ratio;
     float denominator = 2.0f * wheel_config->half_track;
 
-    observer->lateral_accel_imu_mps2 = chassis->imu.body_accel[1];
+    observer->lateral_accel_imu_mps2 =
+        chassis->imu.body_accel[Chassis_Config.imu.lateral_accel_axis];
     observer->lateral_accel_kinematic_mps2 =
         chassis->body.d_s * chassis->body.d_fai;
     observer->lateral_accel_filtered_mps2 = Observer_Filter(
@@ -377,27 +359,24 @@ static void Observer_Turn_Update(
         observer->turn_support_imu_raw_n = 0.0f;
         observer->turn_support_kin_raw_n = 0.0f;
     }
-    observer->turn_support_imu_limited_n = Observer_Limit(
+    observer->turn_support_imu_limited_n = Algorithm_LimitSymmetric(
         observer->turn_support_imu_raw_n,
         force_limit);
-    observer->turn_support_kin_limited_n = Observer_Limit(
+    observer->turn_support_kin_limited_n = Algorithm_LimitSymmetric(
         observer->turn_support_kin_raw_n,
         force_limit);
 }
 
+/**
+ * @brief 更新打滑、离地和转向支撑力三组只读观测量。
+ *
+ * 只写 Chassis.observer，不回写任何控制量；首轮先用当前反馈建立差分基准。
+ */
 void Chassis_Observer_Update(const Chassis_Config_t *config,
                              Chassis_t *chassis)
 {
-    Chassis_Observer_t *observer;
+    Chassis_Observer_t *observer = &chassis->observer;
     uint32_t side;
-
-    if ((config == NULL) || (chassis == NULL) ||
-        (!isfinite(chassis->dt)) ||
-        (chassis->dt <= 0.0f))
-    {
-        return;
-    }
-    observer = &chassis->observer;
 
     if (observer->init_flag == 0U)
     {
@@ -413,17 +392,17 @@ void Chassis_Observer_Update(const Chassis_Config_t *config,
     }
 
     Observer_Slip_Update(&config->observer,
-                         &config->wheel,
-                         chassis,
-                         observer);
+                                 &config->wheel,
+                                 chassis,
+                                 observer);
     Observer_Force_Update(&config->observer,
-                          config->leg,
-                          chassis,
-                          observer);
+                                  config->leg,
+                                  chassis,
+                                  observer);
     Observer_Turn_Update(&config->observer,
-                         &config->wheel,
-                         chassis,
-                         observer);
+                                 &config->wheel,
+                                 chassis,
+                                 observer);
     for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
     {
         observer->last_side_speed[side] =

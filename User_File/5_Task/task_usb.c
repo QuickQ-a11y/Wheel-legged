@@ -28,7 +28,6 @@ typedef struct
 } task_usb_tx_queue_t;
 
 static osThreadId_t usbTaskHandle;
-static task_usb_control_handler_t usbControlHandler;
 
 static uint8_t usbReceiveBuffer[APP_USB_RX_BUF_SIZE];
 static volatile uint16_t usbReceiveWriteIndex;
@@ -153,13 +152,6 @@ static void USB_Task_FrameReceived(uint16_t commandId,
     usbTaskDebugState.recentControlCmdId = commandId;
     usbTaskDebugState.recentControlSeq = sequence;
     usbTaskDebugState.rxControlCount++;
-
-    if (usbControlHandler != NULL)
-    {
-        usbControlHandler(commandId,
-                          sequence,
-                          &usbTaskDebugState.recentControl);
-    }
 }
 
 /**
@@ -310,7 +302,7 @@ static void USB_Task_Transmit(void)
     usbTransmitLength = 0U;
 }
 
-static void UsbTask(void *argument)
+static void USB_Task_Entry(void *argument)
 {
     task_imu_state_t imuState = {0};
     uint32_t statusTick = HAL_GetTick();
@@ -406,12 +398,7 @@ void USB_Task_Init(void)
     Driver_USB_Init(USB_Task_ReceiveCallback,
                     USB_Task_TransmitCallback,
                     USB_Task_DisconnectCallback);
-    usbTaskHandle = osThreadNew(UsbTask, NULL, &usbTaskAttributes);
-}
-
-void USB_Task_SetControlHandler(task_usb_control_handler_t controlHandler)
-{
-    usbControlHandler = controlHandler;
+    usbTaskHandle = osThreadNew(USB_Task_Entry, NULL, &usbTaskAttributes);
 }
 
 void USB_Task_SendStatus(uint16_t commandId,

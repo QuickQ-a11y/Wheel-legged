@@ -72,11 +72,6 @@ uint8_t DR16_ParseFrame(const uint8_t frame[DR16_FRAME_LEN],
                         dr16_data_t *data);
 
 /**
- * @brief 判断参考工程定义的一个或多个键位是否按下。
- */
-uint8_t DR16_IsKeyDown(const dr16_data_t *data, dr16_key_t key);
-
-/**
  * @brief 将已去中值的 DBUS 摇杆轴转换为带死区的 -1..1 归一化量。
  *
  * 输入超出物理范围时按端点限幅；死区外重新映射，保证满杆仍为 1。

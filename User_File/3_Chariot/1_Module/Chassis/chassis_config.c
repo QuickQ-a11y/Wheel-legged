@@ -4,7 +4,8 @@
  * 整车业务坐标使用右手系：X 前、Y 左、Z 上。
  * IMU 任务已经完成坐标转换，本文件中的 scale 匹配控制模型正方向，ratio
  * 描述同步带传动的角度比例。
- * DM 顺序为左前、左后、右前、右后；DJI 顺序为左轮、右轮。
+ * DM 顺序为0左前、1左后、2右前、3右后；DJI 顺序为0左轮、1右轮。
+ * 另外，前髋关节电机统一控制phi4对应的主动杆，后髋关节电机统一控制phi1对应的主动杆。
  */
 const Chassis_Config_t Chassis_Config = {
     /* 左右腿尺寸相同，但电机索引和后续实机标定值分别保存。 */
@@ -71,6 +72,8 @@ const Chassis_Config_t Chassis_Config = {
         .yaw_rate_scale = 1.0f,
         .forward_accel_axis = 0U,
         .forward_accel_scale = 1.0f,
+        .lateral_accel_axis = 1U,
+        .vertical_accel_axis = 2U,
     },
     /* 左右scale同时约束反馈和命令，避免同一轮方向在两处独立维护。 */
     .wheel = {
@@ -113,19 +116,19 @@ const Chassis_Config_t Chassis_Config = {
     },
     /* 腿长PID输出作为虚拟支撑力修正，反馈速度直接作为阻尼项。 */
     .leg_length_pid = {
-        .kp = 400.0f,
-        .ki = 2.0f,
-        .kd = 8000.0f,
-        .integralLimit = 50.0f,
-        .outputLimit = 300.0f,
+        .kp = 4.0f,
+        .ki = 0.0f,
+        .kd = 0.0f,
+        .integralLimit = 5.0f,
+        .outputLimit = 10.0f,
     },
     /* roll PID输出以左右腿差动支撑力的形式作用。 */
     .roll_pid = {
-        .kp = 3000.0f,
-        .ki = 1.0f,
-        .kd = 100.0f,
-        .integralLimit = 30.0f,
-        .outputLimit = 300.0f,
+        .kp = 3.0f,
+        .ki = 0.0f,
+        .kd = 0.0f,
+        .integralLimit = 5.0f,
+        .outputLimit = 10.0f,
     },
     /* 倒地转腿、小板凳准备和关节串级位置控制参数。 */
     .recovery = {
@@ -155,6 +158,11 @@ const Chassis_Config_t Chassis_Config = {
         .stand_phi0_min = 0.40f,
         .stand_phi0_max = 2.80f,
         .joint_T_limit = 3.5f,
+        /* 板凳模式下用左右摇杆分别微调两条腿，范围保守收在机构可达区内。 */
+        .bench_L0_rate = 0.80f,
+        .bench_phi0_rate = 3.20f,
+        .bench_L0_min = 0.09f,
+        .bench_L0_max = 0.25f,
         .joint_angle_pid = {
             .kp = 8.0f,
             .ki = 0.0f,
@@ -176,15 +184,15 @@ const Chassis_Config_t Chassis_Config = {
         .max_d_fai = 2.0f,
         .scale = {
             [CHASSIS_STATE_S] = 0.0f,
-            [CHASSIS_STATE_DOT_S] = 1.0f,
+            [CHASSIS_STATE_D_S] = 1.0f,
             [CHASSIS_STATE_FAI] = 0.0f,
-            [CHASSIS_STATE_DOT_FAI] = 1.0f,
+            [CHASSIS_STATE_D_FAI] = 1.0f,
             [CHASSIS_STATE_THETA_L] = 1.0f,
-            [CHASSIS_STATE_DOT_THETA_L] = 1.0f,
+            [CHASSIS_STATE_D_THETA_L] = 1.0f,
             [CHASSIS_STATE_THETA_R] = 1.0f,
-            [CHASSIS_STATE_DOT_THETA_R] = 1.0f,
+            [CHASSIS_STATE_D_THETA_R] = 1.0f,
             [CHASSIS_STATE_THETA_B] = 1.0f,
-            [CHASSIS_STATE_DOT_THETA_B] = 1.0f,
+            [CHASSIS_STATE_D_THETA_B] = 1.0f,
         },
     },
     /* 当前均为输出封锁阶段的保守调试初值。 */
@@ -239,64 +247,64 @@ const Chassis_Config_t Chassis_Config = {
     },
     /*
      * 四路输出、十个状态分别保存一组双腿长poly22系数。
-     * 现有MATLAB脚本实际采样0.12~0.31 m；重新生成系数前按真实
-     * 采样边界限幅，禁止0.31 m以上继续外推。
+     * 当前MATLAB脚本实际采样0.11~0.25 m，运行时按该边界限幅，
+     * 禁止在采样范围外继续外推。
      */
     .lqr = {
-        .L0_min = 0.12f,
-        .L0_max = 0.31f,
+        .L0_min = 0.11f,
+        .L0_max = 0.25f,
         /*
          * MATLAB poly22 顺序：p00、p10、p01、p20、p11、p02。
          * 两个输入依次为左腿长和右腿长，单位 m。
          */
         .coefficients = {
             [CHASSIS_OUTPUT_LEFT_WHEEL] = {
-                [CHASSIS_STATE_S] = {-1.3234f, -1.9453f, 1.6626f, 4.8831f, -5.6891f, 1.0139f},
-                [CHASSIS_STATE_DOT_S] = {-7.6994f, -1.4783f, 15.042f, 20.99f, -44.595f, 1.5428f},
-                [CHASSIS_STATE_FAI] = {-152.92f, 83.871f, -71.285f, -103.26f, 3.6875f, 86.762f},
-                [CHASSIS_STATE_DOT_FAI] = {-20.254f, 13.973f, -11.695f, -16.855f, 1.6244f, 14.372f},
-                [CHASSIS_STATE_THETA_L] = {-34.165f, -73.688f, 34.495f, 97.998f, -10.286f, -54.874f},
-                [CHASSIS_STATE_DOT_THETA_L] = {-2.1215f, -9.1199f, 4.9015f, 5.7824f, -3.9746f, -4.9331f},
-                [CHASSIS_STATE_THETA_R] = {-23.668f, 23.189f, -38.537f, -59.188f, 28.886f, 65.787f},
-                [CHASSIS_STATE_DOT_THETA_R] = {-1.6902f, 3.6341f, -5.288f, -3.4481f, -2.5243f, 6.529f},
-                [CHASSIS_STATE_THETA_B] = {-100.46f, 133.41f, 125.05f, -161.02f, 16.828f, -146.83f},
-                [CHASSIS_STATE_DOT_THETA_B] = {-3.789f, 5.7114f, 5.7979f, -4.6568f, -4.6315f, -5.2809f},
+                [CHASSIS_STATE_S] = {-1.2125f, -0.75857f, 1.4572f, 4.7369f, -9.7781f, 2.298f},
+                [CHASSIS_STATE_D_S] = {-7.8236f, 7.3862f, 17.967f, 21.668f, -85.008f, 7.924f},
+                [CHASSIS_STATE_FAI] = {-155.05f, 38.018f, -31.416f, -39.098f, 1.2544f, 32.948f},
+                [CHASSIS_STATE_D_FAI] = {-20.27f, 8.2017f, -7.3579f, -8.3126f, -0.716f, 8.9617f},
+                [CHASSIS_STATE_THETA_L] = {-22.158f, -82.33f, 30.231f, 117.52f, -13.138f, -46.914f},
+                [CHASSIS_STATE_D_THETA_L] = {-2.5816f, -5.7576f, 8.3528f, 8.172f, -15.318f, -5.717f},
+                [CHASSIS_STATE_THETA_R] = {-20.115f, 32.773f, -50.669f, -55.369f, -10.951f, 82.976f},
+                [CHASSIS_STATE_D_THETA_R] = {-2.5054f, 7.026f, -2.6441f, -2.4952f, -17.992f, 7.386f},
+                [CHASSIS_STATE_THETA_B] = {-154.37f, 100.43f, 80.457f, -82.492f, 47.532f, -68.928f},
+                [CHASSIS_STATE_D_THETA_B] = {-2.4906f, 2.5371f, 2.5951f, -1.7526f, -2.9345f, -2.0565f},
             },
             [CHASSIS_OUTPUT_RIGHT_WHEEL] = {
-                [CHASSIS_STATE_S] = {-1.3234f, 1.6626f, -1.9453f, 1.0139f, -5.6891f, 4.8831f},
-                [CHASSIS_STATE_DOT_S] = {-7.6994f, 15.042f, -1.4783f, 1.5428f, -44.595f, 20.99f},
-                [CHASSIS_STATE_FAI] = {152.92f, 71.285f, -83.871f, -86.762f, -3.6875f, 103.26f},
-                [CHASSIS_STATE_DOT_FAI] = {20.254f, 11.695f, -13.973f, -14.372f, -1.6244f, 16.855f},
-                [CHASSIS_STATE_THETA_L] = {-23.668f, -38.537f, 23.189f, 65.787f, 28.886f, -59.188f},
-                [CHASSIS_STATE_DOT_THETA_L] = {-1.6902f, -5.288f, 3.6341f, 6.529f, -2.5243f, -3.4481f},
-                [CHASSIS_STATE_THETA_R] = {-34.165f, 34.495f, -73.688f, -54.874f, -10.286f, 97.998f},
-                [CHASSIS_STATE_DOT_THETA_R] = {-2.1215f, 4.9015f, -9.1199f, -4.9331f, -3.9746f, 5.7824f},
-                [CHASSIS_STATE_THETA_B] = {-100.46f, 125.05f, 133.41f, -146.83f, 16.828f, -161.02f},
-                [CHASSIS_STATE_DOT_THETA_B] = {-3.789f, 5.7979f, 5.7114f, -5.2809f, -4.6315f, -4.6568f},
+                [CHASSIS_STATE_S] = {-1.2125f, 1.4572f, -0.75857f, 2.298f, -9.7781f, 4.7369f},
+                [CHASSIS_STATE_D_S] = {-7.8236f, 17.967f, 7.3862f, 7.924f, -85.008f, 21.668f},
+                [CHASSIS_STATE_FAI] = {155.05f, 31.416f, -38.018f, -32.948f, -1.2544f, 39.098f},
+                [CHASSIS_STATE_D_FAI] = {20.27f, 7.3579f, -8.2017f, -8.9617f, 0.716f, 8.3126f},
+                [CHASSIS_STATE_THETA_L] = {-20.115f, -50.669f, 32.773f, 82.976f, -10.951f, -55.369f},
+                [CHASSIS_STATE_D_THETA_L] = {-2.5054f, -2.6441f, 7.026f, 7.386f, -17.992f, -2.4952f},
+                [CHASSIS_STATE_THETA_R] = {-22.158f, 30.231f, -82.33f, -46.914f, -13.138f, 117.52f},
+                [CHASSIS_STATE_D_THETA_R] = {-2.5816f, 8.3528f, -5.7576f, -5.717f, -15.318f, 8.172f},
+                [CHASSIS_STATE_THETA_B] = {-154.37f, 80.457f, 100.43f, -68.928f, 47.532f, -82.492f},
+                [CHASSIS_STATE_D_THETA_B] = {-2.4906f, 2.5951f, 2.5371f, -2.0565f, -2.9345f, -1.7526f},
             },
             [CHASSIS_OUTPUT_LEFT_LEG] = {
-                [CHASSIS_STATE_S] = {0.17577f, 2.0837f, -2.2709f, -2.6948f, 0.48182f, 2.1801f},
-                [CHASSIS_STATE_DOT_S] = {0.9936f, 8.7965f, -11.408f, -12.985f, 4.4663f, 11.466f},
-                [CHASSIS_STATE_FAI] = {-10.428f, -20.157f, -4.948f, 36.103f, -19.834f, 12.698f},
-                [CHASSIS_STATE_DOT_FAI] = {-1.7101f, -4.8711f, -1.8786f, 7.517f, -6.0799f, 3.1898f},
-                [CHASSIS_STATE_THETA_L] = {19.063f, 9.1258f, 4.5482f, 7.4727f, 45.51f, -18.01f},
-                [CHASSIS_STATE_DOT_THETA_L] = {1.4704f, 2.4036f, 0.33937f, 2.1008f, 5.023f, -1.3049f},
-                [CHASSIS_STATE_THETA_R] = {-5.7809f, -20.444f, -19.528f, 41.5f, -54.433f, 5.7709f},
-                [CHASSIS_STATE_DOT_THETA_R] = {-0.56498f, -2.2252f, -1.8392f, 3.5152f, -5.397f, -2.5115f},
-                [CHASSIS_STATE_THETA_B] = {-73.53f, -60.329f, 17.952f, 79.705f, 6.1753f, -27.54f},
-                [CHASSIS_STATE_DOT_THETA_B] = {-2.8907f, -4.6372f, 2.0337f, 4.7791f, 1.0743f, -2.3467f},
+                [CHASSIS_STATE_S] = {0.27653f, 3.6527f, -3.0729f, -6.5234f, 0.9018f, 3.7349f},
+                [CHASSIS_STATE_D_S] = {1.9305f, 13.996f, -17.857f, -31.846f, 16.038f, 20.3f},
+                [CHASSIS_STATE_FAI] = {-1.9765f, -34.802f, -0.28435f, 52.274f, -18.155f, 11.331f},
+                [CHASSIS_STATE_D_FAI] = {-0.30364f, -6.8657f, -0.1079f, 8.9093f, -3.4484f, 0.7038f},
+                [CHASSIS_STATE_THETA_L] = {22.554f, 4.889f, -1.8511f, -3.463f, 13.151f, -5.1166f},
+                [CHASSIS_STATE_D_THETA_L] = {1.9959f, 3.8029f, -2.3357f, -3.0134f, 3.4635f, 3.0271f},
+                [CHASSIS_STATE_THETA_R] = {-2.5045f, -38.323f, 19.851f, 59.608f, -17.956f, -47.186f},
+                [CHASSIS_STATE_D_THETA_R] = {-0.12988f, -3.1528f, -1.1109f, 0.99243f, 2.4422f, -2.645f},
+                [CHASSIS_STATE_THETA_B] = {-53.483f, -49.159f, -26.229f, 56.988f, 6.0632f, 15.025f},
+                [CHASSIS_STATE_D_THETA_B] = {-0.82815f, -1.6525f, -0.65872f, 1.4711f, 1.1762f, 0.42385f},
             },
             [CHASSIS_OUTPUT_RIGHT_LEG] = {
-                [CHASSIS_STATE_S] = {0.17577f, -2.2709f, 2.0837f, 2.1801f, 0.48182f, -2.6948f},
-                [CHASSIS_STATE_DOT_S] = {0.9936f, -11.408f, 8.7965f, 11.466f, 4.4663f, -12.985f},
-                [CHASSIS_STATE_FAI] = {10.428f, 4.948f, 20.157f, -12.698f, 19.834f, -36.103f},
-                [CHASSIS_STATE_DOT_FAI] = {1.7101f, 1.8786f, 4.8711f, -3.1898f, 6.0799f, -7.517f},
-                [CHASSIS_STATE_THETA_L] = {-5.7809f, -19.528f, -20.444f, 5.7709f, -54.433f, 41.5f},
-                [CHASSIS_STATE_DOT_THETA_L] = {-0.56498f, -1.8392f, -2.2252f, -2.5115f, -5.397f, 3.5152f},
-                [CHASSIS_STATE_THETA_R] = {19.063f, 4.5482f, 9.1258f, -18.01f, 45.51f, 7.4727f},
-                [CHASSIS_STATE_DOT_THETA_R] = {1.4704f, 0.33937f, 2.4036f, -1.3049f, 5.023f, 2.1008f},
-                [CHASSIS_STATE_THETA_B] = {-73.53f, 17.952f, -60.329f, -27.54f, 6.1753f, 79.705f},
-                [CHASSIS_STATE_DOT_THETA_B] = {-2.8907f, 2.0337f, -4.6372f, -2.3467f, 1.0743f, 4.7791f},
+                [CHASSIS_STATE_S] = {0.27653f, -3.0729f, 3.6527f, 3.7349f, 0.9018f, -6.5234f},
+                [CHASSIS_STATE_D_S] = {1.9305f, -17.857f, 13.996f, 20.3f, 16.038f, -31.846f},
+                [CHASSIS_STATE_FAI] = {1.9765f, 0.28435f, 34.802f, -11.331f, 18.155f, -52.274f},
+                [CHASSIS_STATE_D_FAI] = {0.30364f, 0.1079f, 6.8657f, -0.7038f, 3.4484f, -8.9093f},
+                [CHASSIS_STATE_THETA_L] = {-2.5045f, 19.851f, -38.323f, -47.186f, -17.956f, 59.608f},
+                [CHASSIS_STATE_D_THETA_L] = {-0.12988f, -1.1109f, -3.1528f, -2.645f, 2.4422f, 0.99243f},
+                [CHASSIS_STATE_THETA_R] = {22.554f, -1.8511f, 4.889f, -5.1166f, 13.151f, -3.463f},
+                [CHASSIS_STATE_D_THETA_R] = {1.9959f, -2.3357f, 3.8029f, 3.0271f, 3.4635f, -3.0134f},
+                [CHASSIS_STATE_THETA_B] = {-53.483f, -26.229f, -49.159f, 15.025f, 6.0632f, 56.988f},
+                [CHASSIS_STATE_D_THETA_B] = {-0.82815f, -0.65872f, -1.6525f, 0.42385f, 1.1762f, 1.4711f},
             },
         },
     },

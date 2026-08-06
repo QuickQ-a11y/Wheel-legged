@@ -143,198 +143,6 @@ static void Algorithm_Kalman_InitMatrices(algorithm_kalman_t *kalman)
                      kalman->tempMeasurementMatrix);
 }
 
-/**
- * @brief 量测更新失败时使用预测值作为本轮后验值。
- */
-static void Algorithm_Kalman_UsePrediction(algorithm_kalman_t *kalman)
-{
-    uint32_t stateDataCount;
-
-    stateDataCount = (uint32_t)kalman->stateCount * kalman->stateCount;
-    memcpy(kalman->state,
-           kalman->statePredict,
-           sizeof(float) * kalman->stateCount);
-    memcpy(kalman->covariance,
-           kalman->covariancePredict,
-           sizeof(float) * stateDataCount);
-}
-
-/**
- * @brief 预测状态 x'(k) = F * x(k-1)。
- */
-static arm_status Algorithm_Kalman_PredictState(algorithm_kalman_t *kalman)
-{
-    algorithm_kalman_matrix_t *matrix = &kalman->matrix;
-
-    return arm_mat_mult_f32(&matrix->stateTransition,
-                            &matrix->state,
-                            &matrix->statePredict);
-}
-
-/**
- * @brief 预测协方差 P'(k) = F * P(k-1) * F^T + Q。
- */
-static arm_status Algorithm_Kalman_PredictCovariance(algorithm_kalman_t *kalman)
-{
-    arm_status matrixStatus;
-    algorithm_kalman_matrix_t *matrix = &kalman->matrix;
-
-    matrixStatus = arm_mat_trans_f32(&matrix->stateTransition,
-                                     &matrix->stateTransitionTranspose);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        return matrixStatus;
-    }
-
-    matrixStatus = arm_mat_mult_f32(&matrix->stateTransition,
-                                    &matrix->covariance,
-                                    &matrix->tempStateMatrixA);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        return matrixStatus;
-    }
-
-    matrixStatus = arm_mat_mult_f32(&matrix->tempStateMatrixA,
-                                    &matrix->stateTransitionTranspose,
-                                    &matrix->tempStateMatrixB);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        return matrixStatus;
-    }
-
-    return arm_mat_add_f32(&matrix->tempStateMatrixB,
-                           &matrix->processNoise,
-                           &matrix->covariancePredict);
-}
-
-/**
- * @brief 计算卡尔曼增益 K = P' * H^T * inv(H * P' * H^T + R)。
- */
-static arm_status Algorithm_Kalman_CalculateGain(algorithm_kalman_t *kalman)
-{
-    arm_status matrixStatus;
-    algorithm_kalman_matrix_t *matrix = &kalman->matrix;
-
-    matrixStatus = arm_mat_trans_f32(&matrix->measurementMatrix,
-                                     &matrix->measurementTranspose);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        return matrixStatus;
-    }
-
-    matrixStatus = arm_mat_mult_f32(&matrix->measurementMatrix,
-                                    &matrix->covariancePredict,
-                                    &matrix->tempMeasurementStateMatrix);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        return matrixStatus;
-    }
-
-    matrixStatus = arm_mat_mult_f32(&matrix->tempMeasurementStateMatrix,
-                                    &matrix->measurementTranspose,
-                                    &matrix->tempMeasurementMatrix);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        return matrixStatus;
-    }
-
-    matrixStatus = arm_mat_add_f32(&matrix->tempMeasurementMatrix,
-                                   &matrix->measurementNoise,
-                                   &matrix->innovationCovariance);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        return matrixStatus;
-    }
-
-    /*
-     * S 不能求逆时，说明当前噪声或协方差配置不适合本轮量测更新，
-     * 上层会退化为纯预测，避免输出异常跳变。
-     */
-    matrixStatus = arm_mat_inverse_f32(&matrix->innovationCovariance,
-                                       &matrix->innovationCovarianceInverse);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        return matrixStatus;
-    }
-
-    matrixStatus = arm_mat_mult_f32(&matrix->covariancePredict,
-                                    &matrix->measurementTranspose,
-                                    &matrix->tempStateMeasurementMatrix);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        return matrixStatus;
-    }
-
-    return arm_mat_mult_f32(&matrix->tempStateMeasurementMatrix,
-                            &matrix->innovationCovarianceInverse,
-                            &matrix->kalmanGain);
-}
-
-/**
- * @brief 融合状态 x(k) = x'(k) + K * (z - H * x'(k))。
- */
-static arm_status Algorithm_Kalman_CorrectState(algorithm_kalman_t *kalman)
-{
-    arm_status matrixStatus;
-    algorithm_kalman_matrix_t *matrix = &kalman->matrix;
-
-    matrixStatus = arm_mat_mult_f32(&matrix->measurementMatrix,
-                                    &matrix->statePredict,
-                                    &matrix->predictedMeasurement);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        return matrixStatus;
-    }
-
-    matrixStatus = arm_mat_sub_f32(&matrix->measurement,
-                                   &matrix->predictedMeasurement,
-                                   &matrix->innovation);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        return matrixStatus;
-    }
-
-    matrixStatus = arm_mat_mult_f32(&matrix->kalmanGain,
-                                    &matrix->innovation,
-                                    &matrix->tempStateVector);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        return matrixStatus;
-    }
-
-    return arm_mat_add_f32(&matrix->statePredict,
-                           &matrix->tempStateVector,
-                           &matrix->state);
-}
-
-/**
- * @brief 修正协方差 P(k) = P'(k) - K * H * P'(k)。
- */
-static arm_status Algorithm_Kalman_CorrectCovariance(algorithm_kalman_t *kalman)
-{
-    arm_status matrixStatus;
-    algorithm_kalman_matrix_t *matrix = &kalman->matrix;
-
-    matrixStatus = arm_mat_mult_f32(&matrix->kalmanGain,
-                                    &matrix->measurementMatrix,
-                                    &matrix->tempStateMatrixA);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        return matrixStatus;
-    }
-
-    matrixStatus = arm_mat_mult_f32(&matrix->tempStateMatrixA,
-                                    &matrix->covariancePredict,
-                                    &matrix->tempStateMatrixB);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        return matrixStatus;
-    }
-
-    return arm_mat_sub_f32(&matrix->covariancePredict,
-                           &matrix->tempStateMatrixB,
-                           &matrix->covariance);
-}
 
 void Algorithm_Kalman_Init(algorithm_kalman_t *kalman,
                            uint8_t stateCount,
@@ -365,10 +173,22 @@ void Algorithm_Kalman_Init(algorithm_kalman_t *kalman,
     Algorithm_Kalman_SetIdentity(kalman->measurementNoise, measurementCount);
 }
 
+/**
+ * @brief 执行一轮标准线性卡尔曼五式，顺序与 SPR 参考实现一致。
+ *
+ * 1. x' = F * x
+ * 2. P' = F * P * F^T + Q
+ * 3. K  = P' * H^T * inv(H * P' * H^T + R)
+ * 4. x  = x' + K * (z - H * x')
+ * 5. P  = P' - K * H * P'
+ *
+ * S 不可逆时说明当前噪声或协方差配置不适合本轮量测更新，退化为纯预测，
+ * 避免输出异常跳变。
+ */
 void Algorithm_Kalman_Update(algorithm_kalman_t *kalman,
                              const float measurement[ALGORITHM_KALMAN_MAX_MEASUREMENT_COUNT])
 {
-    arm_status matrixStatus;
+    algorithm_kalman_matrix_t *matrix = &kalman->matrix;
 
     if ((kalman->stateCount == 0U) || (kalman->measurementCount == 0U))
     {
@@ -379,54 +199,78 @@ void Algorithm_Kalman_Update(algorithm_kalman_t *kalman,
            measurement,
            sizeof(float) * kalman->measurementCount);
 
-    /*
-     * 1. 先验状态预测。
-     * 这里失败通常表示矩阵维度被破坏，直接保持上一帧后验状态。
-     */
-    matrixStatus = Algorithm_Kalman_PredictState(kalman);
-    if (matrixStatus != ARM_MATH_SUCCESS)
+    /* 1. 先验状态预测。 */
+    (void)arm_mat_mult_f32(&matrix->stateTransition,
+                           &matrix->state,
+                           &matrix->statePredict);
+
+    /* 2. 先验协方差预测。 */
+    (void)arm_mat_trans_f32(&matrix->stateTransition,
+                            &matrix->stateTransitionTranspose);
+    (void)arm_mat_mult_f32(&matrix->stateTransition,
+                           &matrix->covariance,
+                           &matrix->tempStateMatrixA);
+    (void)arm_mat_mult_f32(&matrix->tempStateMatrixA,
+                           &matrix->stateTransitionTranspose,
+                           &matrix->tempStateMatrixB);
+    (void)arm_mat_add_f32(&matrix->tempStateMatrixB,
+                          &matrix->processNoise,
+                          &matrix->covariancePredict);
+
+    /* 3. 计算卡尔曼增益。 */
+    (void)arm_mat_trans_f32(&matrix->measurementMatrix,
+                            &matrix->measurementTranspose);
+    (void)arm_mat_mult_f32(&matrix->measurementMatrix,
+                           &matrix->covariancePredict,
+                           &matrix->tempMeasurementStateMatrix);
+    (void)arm_mat_mult_f32(&matrix->tempMeasurementStateMatrix,
+                           &matrix->measurementTranspose,
+                           &matrix->tempMeasurementMatrix);
+    (void)arm_mat_add_f32(&matrix->tempMeasurementMatrix,
+                          &matrix->measurementNoise,
+                          &matrix->innovationCovariance);
+    if (arm_mat_inverse_f32(&matrix->innovationCovariance,
+                            &matrix->innovationCovarianceInverse) !=
+        ARM_MATH_SUCCESS)
     {
+        /* S 不可逆，本轮只使用预测结果。 */
+        memcpy(kalman->state,
+               kalman->statePredict,
+               sizeof(float) * kalman->stateCount);
+        memcpy(kalman->covariance,
+               kalman->covariancePredict,
+               sizeof(float) * (uint32_t)kalman->stateCount * kalman->stateCount);
         return;
     }
+    (void)arm_mat_mult_f32(&matrix->covariancePredict,
+                           &matrix->measurementTranspose,
+                           &matrix->tempStateMeasurementMatrix);
+    (void)arm_mat_mult_f32(&matrix->tempStateMeasurementMatrix,
+                           &matrix->innovationCovarianceInverse,
+                           &matrix->kalmanGain);
 
-    /*
-     * 2. 先验协方差预测。
-     * 协方差预测失败时没有可靠 P'，因此不进入量测更新。
-     */
-    matrixStatus = Algorithm_Kalman_PredictCovariance(kalman);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        return;
-    }
+    /* 4. 用测量值修正状态。 */
+    (void)arm_mat_mult_f32(&matrix->measurementMatrix,
+                           &matrix->statePredict,
+                           &matrix->predictedMeasurement);
+    (void)arm_mat_sub_f32(&matrix->measurement,
+                          &matrix->predictedMeasurement,
+                          &matrix->innovation);
+    (void)arm_mat_mult_f32(&matrix->kalmanGain,
+                           &matrix->innovation,
+                           &matrix->tempStateVector);
+    (void)arm_mat_add_f32(&matrix->statePredict,
+                          &matrix->tempStateVector,
+                          &matrix->state);
 
-    /*
-     * 3. 计算卡尔曼增益。
-     * S 不能求逆时，本轮只使用预测结果。
-     */
-    matrixStatus = Algorithm_Kalman_CalculateGain(kalman);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        Algorithm_Kalman_UsePrediction(kalman);
-        return;
-    }
-
-    /*
-     * 4. 用测量值修正状态。
-     */
-    matrixStatus = Algorithm_Kalman_CorrectState(kalman);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        Algorithm_Kalman_UsePrediction(kalman);
-        return;
-    }
-
-    /*
-     * 5. 修正协方差。
-     * 公式保持和 SPR 黄金五式一致，便于后续对照调参。
-     */
-    matrixStatus = Algorithm_Kalman_CorrectCovariance(kalman);
-    if (matrixStatus != ARM_MATH_SUCCESS)
-    {
-        Algorithm_Kalman_UsePrediction(kalman);
-    }
+    /* 5. 修正协方差。 */
+    (void)arm_mat_mult_f32(&matrix->kalmanGain,
+                           &matrix->measurementMatrix,
+                           &matrix->tempStateMatrixA);
+    (void)arm_mat_mult_f32(&matrix->tempStateMatrixA,
+                           &matrix->covariancePredict,
+                           &matrix->tempStateMatrixB);
+    (void)arm_mat_sub_f32(&matrix->covariancePredict,
+                          &matrix->tempStateMatrixB,
+                          &matrix->covariance);
 }

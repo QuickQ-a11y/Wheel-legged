@@ -25,9 +25,7 @@ void CAN_Task_UpdateTxFrame(FDCAN_HandleTypeDef *handle,
                             const uint8_t *data,
                             uint8_t length);
 void CAN_Task_RequestTx(void);
-uint32_t CAN_Task_GetTxBusyCount(void);
 uint32_t CAN_Task_GetTxErrorCount(void);
-uint32_t CAN_Task_GetRxOverflowCount(void);
 void CAN_Task_RxMessageCallback(const task_can_rx_message_t *message);
 
 #ifdef __cplusplus

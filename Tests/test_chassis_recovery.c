@@ -193,10 +193,11 @@ static void test_bench_control(void)
 
     Chassis_Bench();
     assert(Chassis.state == CHASSIS_BENCH);
-    assert(fabsf(Chassis.leg[CHASSIS_LEFT].target_L0 - 0.15f) <
-           TEST_TOLERANCE);
-    assert(fabsf(Chassis.leg[CHASSIS_RIGHT].target_L0 - 0.15f) <
-           TEST_TOLERANCE);
+    /* 进入板凳锁存当前实际姿态，遥控调节速率为零时目标保持不动。 */
+    assert(fabsf(Chassis.leg[CHASSIS_LEFT].target_L0 -
+                 Chassis.leg[CHASSIS_LEFT].L0) < TEST_TOLERANCE);
+    assert(fabsf(Chassis.leg[CHASSIS_RIGHT].target_L0 -
+                 Chassis.leg[CHASSIS_RIGHT].L0) < TEST_TOLERANCE);
     assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_FAI] - 0.70f) <
            TEST_TOLERANCE);
     assert(Chassis.leg[CHASSIS_LEFT].Tp == 0.0f);
@@ -666,13 +667,13 @@ static void test_remote_goal(void)
 
     Chassis_Control();
 
-    assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_DOT_S] -
+    assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_D_S] -
                  APP_RC_VEL_RATE * Chassis.dt) < TEST_TOLERANCE);
     assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_FAI] -
                  (initial_yaw_target_rad +
                   APP_RC_YAW_RATE * Chassis.dt)) < TEST_TOLERANCE);
     assert(Chassis.lqr.target[CHASSIS_STATE_FAI] > CHASSIS_PI);
-    assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_DOT_FAI] -
+    assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_D_FAI] -
                  APP_RC_YAW_RATE) < TEST_TOLERANCE);
     assert(fabsf(Chassis.leg[CHASSIS_LEFT].target_L0 -
                  (initial_leg_target_m -
@@ -705,18 +706,18 @@ static void test_top_projection(void)
 
     assert(fabsf(Chassis.top_d_s + 0.10f) <
            TEST_TOLERANCE);
-    assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_DOT_S] +
+    assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_D_S] +
                  APP_RC_VEL_RATE * Chassis.dt) <
            TEST_TOLERANCE);
-    assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_DOT_FAI] -
+    assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_D_FAI] -
                  APP_RC_YAW_RATE * Chassis.dt) <
            TEST_TOLERANCE);
     assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_FAI] -
                  Chassis.imu.yaw_total) < TEST_TOLERANCE);
     assert(Chassis.lqr.scale[CHASSIS_STATE_S] == 0.0f);
     assert(Chassis.lqr.scale[CHASSIS_STATE_FAI] == 0.0f);
-    assert(Chassis.lqr.scale[CHASSIS_STATE_DOT_S] == 1.0f);
-    assert(Chassis.lqr.scale[CHASSIS_STATE_DOT_FAI] == 1.0f);
+    assert(Chassis.lqr.scale[CHASSIS_STATE_D_S] == 1.0f);
+    assert(Chassis.lqr.scale[CHASSIS_STATE_D_FAI] == 1.0f);
     assert_zero_output();
 }
 

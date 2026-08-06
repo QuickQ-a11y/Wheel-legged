@@ -9,10 +9,6 @@ extern "C" {
 
 #include <stdint.h>
 
-typedef void (*task_usb_control_handler_t)(uint16_t commandId,
-                                           uint8_t sequence,
-                                           const usb_control_payload_t *control);
-
 typedef struct
 {
     usb_protocol_parser_t rxParser;       /* 接收流解析状态，以及 CRC8、CRC16 和长度错误累计值。 */
@@ -53,7 +49,6 @@ void USB_Task_Init(void);
 /**
  * @brief 注册视觉控制帧处理函数。
  */
-void USB_Task_SetControlHandler(task_usb_control_handler_t controlHandler);
 
 /**
  * @brief 将一帧下位机状态加入 USB 发送队列。

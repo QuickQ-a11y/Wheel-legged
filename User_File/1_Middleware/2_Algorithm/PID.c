@@ -1,43 +1,12 @@
 #include "PID.h"
 
+#include "Limit.h"
+
 #include <math.h>
 #include <string.h>
 
-/* PID 输出和积分采用对称限幅，limit 小于等于 0 时表示该项不允许输出。 */
-static float Algorithm_PID_LimitFloat(float value, float minValue, float maxValue)
-{
-    if (value < minValue)
-    {
-        return minValue;
-    }
-
-    if (value > maxValue)
-    {
-        return maxValue;
-    }
-
-    return value;
-}
-
-static float Algorithm_PID_LimitSymmetric(float value, float limit)
-{
-    float positiveLimit = fabsf(limit);
-
-    if (positiveLimit <= 0.0f)
-    {
-        return 0.0f;
-    }
-
-    return Algorithm_PID_LimitFloat(value, -positiveLimit, positiveLimit);
-}
-
 void Algorithm_PID_Init(algorithm_pid_state_t *state)
 {
-    if (state == NULL)
-    {
-        return;
-    }
-
     memset(state, 0, sizeof(*state));
 }
 
@@ -53,7 +22,8 @@ void Algorithm_PID_UpdateByFeedbackRate(const algorithm_pid_config_t *config,
     float derivative;
     float outputValue;
 
-    if ((config == NULL) || (state == NULL) || (output == NULL) || (dtSec <= 0.0f))
+    /* dt 非正时积分无定义，本轮不更新控制器。 */
+    if (dtSec <= 0.0f)
     {
         return;
     }
@@ -65,13 +35,13 @@ void Algorithm_PID_UpdateByFeedbackRate(const algorithm_pid_config_t *config,
 
     /* 积分按真实周期累加，避免控制任务周期抖动直接改变积分强度。 */
     state->integral += error * dtSec;
-    state->integral = Algorithm_PID_LimitSymmetric(state->integral,
-                                                   config->integralLimit);
+    state->integral = Algorithm_LimitSymmetric(state->integral,
+                                               config->integralLimit);
 
     outputValue = (config->kp * error) +
                   (config->ki * state->integral) +
                   (config->kd * derivative);
-    state->lastOutput = Algorithm_PID_LimitSymmetric(outputValue,
-                                                     config->outputLimit);
+    state->lastOutput = Algorithm_LimitSymmetric(outputValue,
+                                                 config->outputLimit);
     *output = state->lastOutput;
 }

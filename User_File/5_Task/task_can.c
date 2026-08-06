@@ -22,7 +22,6 @@ static osMutexId_t canTxMutex;
 static osMessageQueueId_t canRxQueue;
 
 static task_can_tx_frame_t canTxFrames[APP_CAN_TX_CAP];
-static volatile uint32_t canTxBusyCount;
 static volatile uint32_t canTxErrorCount;
 static volatile uint32_t canRxOverflowCount;
 
@@ -96,11 +95,6 @@ static void CAN_Task_RxCallback(FDCAN_HandleTypeDef *handle,
     task_can_rx_message_t message = {0};
     uint32_t flags;
 
-    if ((frame == NULL) || (canRxQueue == NULL))
-    {
-        return;
-    }
-
     message.bus = CAN_Task_GetBus(handle);
     message.identifier = frame->header.Identifier;
     message.length = Driver_FDCAN_DlcToLength(frame->header.DataLength);
@@ -117,13 +111,10 @@ static void CAN_Task_RxCallback(FDCAN_HandleTypeDef *handle,
         return;
     }
 
-    if (canTaskHandle != NULL)
+    flags = osThreadFlagsSet(canTaskHandle, CAN_TASK_FLAG_RX);
+    if ((flags & (uint32_t)osFlagsError) != 0U)
     {
-        flags = osThreadFlagsSet(canTaskHandle, CAN_TASK_FLAG_RX);
-        if ((flags & (uint32_t)osFlagsError) != 0U)
-        {
-            canRxOverflowCount++;
-        }
+        canRxOverflowCount++;
     }
 }
 
@@ -138,11 +129,7 @@ static void CAN_Task_SendFrames(void)
     {
         task_can_tx_frame_t frame = {0};
 
-        if (osMutexAcquire(canTxMutex, osWaitForever) != osOK)
-        {
-            canTxBusyCount++;
-            continue;
-        }
+        (void)osMutexAcquire(canTxMutex, osWaitForever);
 
         frame = canTxFrames[index];
         (void)osMutexRelease(canTxMutex);
@@ -169,7 +156,7 @@ static void CAN_Task_DispatchRx(void)
     }
 }
 
-static void CanTask(void *argument)
+static void CAN_Task_Entry(void *argument)
 {
     uint32_t wakeTick = osKernelGetTickCount();
 
@@ -217,12 +204,7 @@ void CAN_Task_Init(void)
                                    sizeof(task_can_rx_message_t),
                                    NULL);
 
-    if ((canTxMutex == NULL) || (canRxQueue == NULL))
-    {
-        return;
-    }
-
-    canTaskHandle = osThreadNew(CanTask, NULL, &canTaskAttributes);
+    canTaskHandle = osThreadNew(CAN_Task_Entry, NULL, &canTaskAttributes);
 }
 
 void CAN_Task_SetDjiCurrent(const int16_t current[APP_WHEEL_COUNT])
@@ -247,17 +229,13 @@ void CAN_Task_UpdateTxFrame(FDCAN_HandleTypeDef *handle,
 {
     int32_t frameIndex;
 
-    if ((length > APP_CAN_DATA_MAX_BYTES) || (canTxMutex == NULL))
+    if (length > APP_CAN_DATA_MAX_BYTES)
     {
         canTxErrorCount++;
         return;
     }
 
-    if (osMutexAcquire(canTxMutex, osWaitForever) != osOK)
-    {
-        canTxBusyCount++;
-        return;
-    }
+    (void)osMutexAcquire(canTxMutex, osWaitForever);
 
     frameIndex = CAN_Task_FindTxFrame(handle, identifier);
     if (frameIndex < 0)
@@ -285,11 +263,6 @@ void CAN_Task_RequestTx(void)
 {
     uint32_t flags;
 
-    if (canTaskHandle == NULL)
-    {
-        return;
-    }
-
     flags = osThreadFlagsSet(canTaskHandle, CAN_TASK_FLAG_TX);
     if ((flags & (uint32_t)osFlagsError) != 0U)
     {
@@ -297,19 +270,9 @@ void CAN_Task_RequestTx(void)
     }
 }
 
-uint32_t CAN_Task_GetTxBusyCount(void)
-{
-    return canTxBusyCount;
-}
-
 uint32_t CAN_Task_GetTxErrorCount(void)
 {
     return canTxErrorCount;
-}
-
-uint32_t CAN_Task_GetRxOverflowCount(void)
-{
-    return canRxOverflowCount;
 }
 
 __weak void CAN_Task_RxMessageCallback(const task_can_rx_message_t *message)

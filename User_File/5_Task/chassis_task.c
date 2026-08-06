@@ -4,7 +4,6 @@
 #include "device_motor_dji.h"
 #include "device_motor_dm.h"
 #include "task_can.h"
-#include "task_can_dispatch.h"
 #include "task_imu.h"
 #include "task_remote.h"
 
@@ -12,7 +11,7 @@
 
 #include <string.h>
 
-static const osThreadAttr_t chassis_task_attributes = {
+static const osThreadAttr_t chassisTaskAttributes = {
     .name = "ChassisTask",
     .stack_size = 1024U * 4U,
     .priority = (osPriority_t)osPriorityHigh,
@@ -23,27 +22,27 @@ static const osThreadAttr_t chassis_task_attributes = {
  */
 static void Chassis_Feedback_Update(void)
 {
-    task_imu_state_t imu_state = {0};
-    uint32_t now_tick = HAL_GetTick();
+    task_imu_state_t imuState = {0};
+    uint32_t nowTick = HAL_GetTick();
     uint32_t index;
 
     /* IMU任务已经完成传感器坐标到整车右手系的转换。 */
-    IMU_Task_GetState(&imu_state);
-    Chassis.imu.init_flag = imu_state.isInitialized;
-    Chassis.imu.attitude_flag = imu_state.isAttitudeReady;
-    Chassis.imu.error_code = imu_state.lastErrorCode;
-    Chassis.imu.roll = imu_state.rollRad;
-    Chassis.imu.pitch = imu_state.pitchRad;
-    Chassis.imu.yaw = imu_state.yawRad;
-    Chassis.imu.yaw_total = imu_state.yawTotalRad;
+    IMU_Task_GetState(&imuState);
+    Chassis.imu.init_flag = imuState.isInitialized;
+    Chassis.imu.attitude_flag = imuState.isAttitudeReady;
+    Chassis.imu.error_code = imuState.lastErrorCode;
+    Chassis.imu.roll = imuState.rollRad;
+    Chassis.imu.pitch = imuState.pitchRad;
+    Chassis.imu.yaw = imuState.yawRad;
+    Chassis.imu.yaw_total = imuState.yawTotalRad;
     memcpy(Chassis.imu.gyro,
-           imu_state.filteredGyroRadps,
+           imuState.filteredGyroRadps,
            sizeof(Chassis.imu.gyro));
     memcpy(Chassis.imu.body_accel,
-           imu_state.bodyMotionAccMps2,
+           imuState.bodyMotionAccMps2,
            sizeof(Chassis.imu.body_accel));
     memcpy(Chassis.imu.accel,
-           imu_state.motionAccMps2,
+           imuState.motionAccMps2,
            sizeof(Chassis.imu.accel));
 
     /* 遥控输入在任务层转换为模式和物理目标，不接触LQR或电机输出。 */
@@ -53,23 +52,26 @@ static void Chassis_Feedback_Update(void)
     /* DM状态保留最后一次反馈值，online只表示本周期是否超时。 */
     for (index = 0U; index < MOTOR_DM_COUNT; index++)
     {
-        motor_dm_state_t motor_state = {0};
+        motor_dm_state_t motorState = {0};
 
-        Motor_DM_GetState((motor_dm_index_t)index, &motor_state);
+        Motor_DM_GetState((motor_dm_index_t)index, &motorState);
         Chassis.dm_motor[index].online_flag =
-            Motor_DM_IsOnline((motor_dm_index_t)index, now_tick);
-        Chassis.dm_motor[index].position_rad = motor_state.positionRad;
-        Chassis.dm_motor[index].speed_radps = motor_state.velocityRadps;
-        Chassis.dm_motor[index].torque_nm = motor_state.torqueNm;
+            Motor_DM_IsOnline((motor_dm_index_t)index, nowTick);
+        Chassis.dm_motor[index].position_rad = motorState.positionRad;
+        Chassis.dm_motor[index].speed_radps = motorState.velocityRadps;
+        Chassis.dm_motor[index].torque_nm = motorState.torqueNm;
     }
 
     /* DJI轮电机同样分开保存反馈值和在线判定。 */
     for (index = 0U; index < APP_WHEEL_COUNT; index++)
     {
+        motor_dji_state_t wheelState = {0};
+
+        Motor_DJI_GetState((motor_dji_index_t)index, &wheelState);
         Chassis.wheel_motor[index].online_flag =
-            Motor_DJI_IsOnline(&chassisDjiWheels[index], now_tick);
-        Chassis.wheel_motor[index].speed_rpm = chassisDjiWheels[index].speedRpm;
-        Chassis.wheel_motor[index].current = chassisDjiWheels[index].currentRaw;
+            Motor_DJI_IsOnline((motor_dji_index_t)index, nowTick);
+        Chassis.wheel_motor[index].speed_rpm = wheelState.speedRpm;
+        Chassis.wheel_motor[index].current = wheelState.currentRaw;
     }
 
     Chassis.can_error_count = CAN_Task_GetTxErrorCount();
@@ -123,9 +125,9 @@ static void Chassis_Command_Send(void)
  */
 static void Chassis_Task_Entry(void *argument)
 {
-    const float tick_sec = 1.0f / (float)osKernelGetTickFreq();
-    uint32_t control_last_tick = 0U;
-    uint32_t wake_tick = osKernelGetTickCount();
+    const float tickSec = 1.0f / (float)osKernelGetTickFreq();
+    uint32_t controlLastTick = 0U;
+    uint32_t wakeTick = osKernelGetTickCount();
 
     (void)argument;
 
@@ -139,37 +141,31 @@ static void Chassis_Task_Entry(void *argument)
 
     for (;;)
     {
-        uint32_t control_tick = osKernelGetTickCount();
+        uint32_t controlTick = osKernelGetTickCount();
 
         /* 底盘PID、速度Kalman和位移积分只使用底盘自己的实际周期。 */
-        if (control_last_tick == 0U)
+        if (controlLastTick == 0U)
         {
             Chassis.dt = Chassis_Config.default_dt;
         }
         else
         {
             Chassis.dt =
-                (float)(control_tick - control_last_tick) * tick_sec;
+                (float)(controlTick - controlLastTick) * tickSec;
             if ((Chassis.dt < Chassis_Config.dt_min) ||
                 (Chassis.dt > Chassis_Config.dt_max))
             {
                 Chassis.dt = Chassis_Config.default_dt;
             }
         }
-        control_last_tick = control_tick;
+        controlLastTick = controlTick;
 
         /* 反馈 -> 状态选择 -> 控制 -> 电机命令，保持单向数据流。 */
         Chassis_Feedback_Update();
         Chassis_Leg_Update();
-
-        if ((Remote.leftSwitch == REMOTE_SWITCH_UP) &&
-            (Remote.rightSwitch == REMOTE_SWITCH_UP))
-        {
-            Chassis.mode = CHASSIS_MODE_BENCH;
-        }
         Chassis_State_Update();
 
-        /* 内部state只决定本周期调用哪条控制链，外部mode不会在此修改。 */
+        /* 内部state只决定本周期调用哪条控制链，外部mode由遥控模块拥有。 */
         switch (Chassis.state)
         {
         case CHASSIS_STANDING:
@@ -197,12 +193,12 @@ static void Chassis_Task_Entry(void *argument)
 
         Chassis_Command_Send();
 
-        wake_tick += APP_CTRL_TICKS;
-        if ((int32_t)(osKernelGetTickCount() - wake_tick) >= 0)
+        wakeTick += APP_CTRL_TICKS;
+        if ((int32_t)(osKernelGetTickCount() - wakeTick) >= 0)
         {
-            wake_tick = osKernelGetTickCount() + APP_CTRL_TICKS;
+            wakeTick = osKernelGetTickCount() + APP_CTRL_TICKS;
         }
-        (void)osDelayUntil(wake_tick);
+        (void)osDelayUntil(wakeTick);
     }
 }
 
@@ -210,5 +206,5 @@ void Chassis_Task_Init(void)
 {
     Chassis_Init();
     Chassis_Remote_Init();
-    (void)osThreadNew(Chassis_Task_Entry, NULL, &chassis_task_attributes);
+    (void)osThreadNew(Chassis_Task_Entry, NULL, &chassisTaskAttributes);
 }

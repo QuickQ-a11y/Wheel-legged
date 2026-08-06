@@ -126,7 +126,7 @@ static void testExtremesMouseAndKeys(void)
     for (index = 0U; index < 16U; index++)
     {
         assert((uint16_t)keys[index] == (uint16_t)(1U << index));
-        assert(DR16_IsKeyDown(&data, keys[index]) == 1U);
+        assert((data.keyBits & (uint16_t)keys[index]) != 0U);
     }
 }
 
@@ -183,12 +183,9 @@ static void testReservedDialCompatibility(void)
     assert(DR16_ParseFrame(frame, &data) == 1U);
     assert(data.dial == 0);
     assert(data.dialValid == 0U);
-    assert(DR16_IsKeyDown(&data, DR16_KEY_Q) == 1U);
-    assert(DR16_IsKeyDown(&data, DR16_KEY_E) == 1U);
-    assert(DR16_IsKeyDown(&data, DR16_KEY_W) == 0U);
-    assert(DR16_IsKeyDown(NULL, DR16_KEY_W) == 0U);
-    assert(DR16_ParseFrame(NULL, &data) == 0U);
-    assert(DR16_ParseFrame(frame, NULL) == 0U);
+    assert((data.keyBits & (uint16_t)DR16_KEY_Q) != 0U);
+    assert((data.keyBits & (uint16_t)DR16_KEY_E) != 0U);
+    assert((data.keyBits & (uint16_t)DR16_KEY_W) == 0U);
 }
 
 static void testAxisNormalization(void)
@@ -261,11 +258,6 @@ static void testGenericInputMapping(void)
     assert(remote.dial == 0.0f);
     assert(remote.dialValid == 0U);
     assert(remote.legRequest == REMOTE_LEG_KEEP);
-
-    remote.leftStick.x = 1.0f;
-    DR16_MakeRemote(NULL, 10, 400, &remote);
-    assert(remote.leftStick.x == 0.0f);
-    assert(remote.leftSwitch == REMOTE_SWITCH_UNKNOWN);
 }
 
 int main(void)

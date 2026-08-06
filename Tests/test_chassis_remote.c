@@ -21,13 +21,15 @@ int main(void)
         .modeRequest = REMOTE_MODE_BENCH,
         .legRequest = REMOTE_LEG_MIDDLE,
     };
+    Remote_t offline_remote = {0};
 
     memset(&Chassis, 0, sizeof(Chassis));
     Chassis_Remote_Init();
     Chassis.imu.yaw_total = 0.30f;
     Chassis.goal.L0 = APP_RC_LEG_M;
 
-    Chassis_Remote_Update(NULL);
+    /* 遥控离线时不建立控制许可。 */
+    Chassis_Remote_Update(&offline_remote);
     assert(Chassis.remote_online_flag == 0U);
     assert(Chassis.remote_ready_flag == 0U);
     assert(Chassis.enable_flag == 0U);

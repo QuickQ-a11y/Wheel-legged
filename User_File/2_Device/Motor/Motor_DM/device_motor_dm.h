@@ -69,9 +69,7 @@ void Motor_DM_GetState(motor_dm_index_t index,
                        motor_dm_state_t *state);
 
 void Motor_DM_SetSafe(uint8_t safe);
-uint8_t Motor_DM_IsSafe(void);
 void Motor_DM_SetEnable(uint8_t enable);
-uint8_t Motor_DM_IsEnabled(void);
 uint8_t Motor_DM_IsOnline(motor_dm_index_t index, uint32_t nowTick);
 
 /** @brief 清空软件保存的四路力矩命令，不修改电机零点。 */

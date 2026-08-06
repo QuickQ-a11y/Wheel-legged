@@ -2,35 +2,28 @@
 
 #include "app_config.h"
 
-#include <stddef.h>
-
-static remote_mode_request_t previous_mode = REMOTE_MODE_NONE;
-static uint8_t yaw_stick_flag;
-
-/** @brief 取得十维模型使用的连续整车航向。 */
-static float Model_Yaw_Get(void)
-{
-    return Chassis.imu.yaw_total * Chassis_Config.imu.yaw_angle_scale;
-}
+#include <string.h>
 
 /** @brief 急停或离线时清零运动命令并从当前连续航向重新锚定。 */
 static void Remote_Hold(void)
 {
-    float yaw = Model_Yaw_Get();
+    float yaw = Chassis.imu.yaw_total * Chassis_Config.imu.yaw_angle_scale;
 
     Chassis.goal.d_s = 0.0f;
     Chassis.goal.d_y = 0.0f;
     Chassis.goal.d_fai = 0.0f;
     Chassis.goal.fai_anchor = yaw;
     Chassis.goal.fai = yaw;
-    yaw_stick_flag = 0U;
+    Chassis.yaw_stick_flag = 0U;
+    memset(Chassis.goal.bench_d_L0, 0, sizeof(Chassis.goal.bench_d_L0));
+    memset(Chassis.goal.bench_d_phi0, 0, sizeof(Chassis.goal.bench_d_phi0));
 }
 
 /** @brief 将通用遥控输入转换为底盘物理运动目标。 */
 static void Remote_Goal_Update(const Remote_t *remote)
 {
     float yaw_axis = remote->rightStick.x;
-    float yaw = Model_Yaw_Get();
+    float yaw = Chassis.imu.yaw_total * Chassis_Config.imu.yaw_angle_scale;
 
     if (remote->modeRequest == REMOTE_MODE_TOP)
     {
@@ -44,7 +37,7 @@ static void Remote_Goal_Update(const Remote_t *remote)
             -yaw_axis * Chassis_Config.top.max_d_fai;
         Chassis.goal.fai_anchor = yaw;
         Chassis.goal.fai = yaw;
-        yaw_stick_flag = 0U;
+        Chassis.yaw_stick_flag = 0U;
     }
     else
     {
@@ -55,26 +48,36 @@ static void Remote_Goal_Update(const Remote_t *remote)
 
         if (yaw_axis != 0.0f)
         {
-            if (yaw_stick_flag == 0U)
+            if (Chassis.yaw_stick_flag == 0U)
             {
                 Chassis.goal.fai_anchor = yaw;
             }
-            yaw_stick_flag = 1U;
+            Chassis.yaw_stick_flag = 1U;
             Chassis.goal.fai =
                 Chassis.goal.fai_anchor -
                 yaw_axis * APP_RC_MAX_YAW;
         }
         else
         {
-            if (yaw_stick_flag != 0U)
+            if (Chassis.yaw_stick_flag != 0U)
             {
                 Chassis.goal.fai_anchor = yaw;
             }
-            yaw_stick_flag = 0U;
+            Chassis.yaw_stick_flag = 0U;
             Chassis.goal.fai =
                 Chassis.goal.fai_anchor;
         }
     }
+
+    /* 板凳模式用左右摇杆分别微调两条腿，控制层按本速率积分目标。 */
+    Chassis.goal.bench_d_L0[CHASSIS_LEFT] =
+        remote->leftStick.y * Chassis_Config.recovery.bench_L0_rate;
+    Chassis.goal.bench_d_L0[CHASSIS_RIGHT] =
+        remote->rightStick.y * Chassis_Config.recovery.bench_L0_rate;
+    Chassis.goal.bench_d_phi0[CHASSIS_LEFT] =
+        remote->leftStick.x * Chassis_Config.recovery.bench_phi0_rate;
+    Chassis.goal.bench_d_phi0[CHASSIS_RIGHT] =
+        remote->rightStick.x * Chassis_Config.recovery.bench_phi0_rate;
 
     switch (remote->legRequest)
     {
@@ -96,37 +99,35 @@ static void Remote_Goal_Update(const Remote_t *remote)
     }
 }
 
+/**
+ * @brief 复位遥控模式边沿和航向摇杆锚点状态。
+ */
 void Chassis_Remote_Init(void)
 {
-    previous_mode = REMOTE_MODE_NONE;
-    yaw_stick_flag = 0U;
+    Chassis.last_mode_request = REMOTE_MODE_NONE;
+    Chassis.yaw_stick_flag = 0U;
 }
 
+/**
+ * @brief 将通用遥控输入转换为底盘运动目标和外层模式。
+ *
+ * 离线或急停只关闭输出许可并回中运动目标，控制中间量继续计算。上电、
+ * 重新上线或解除急停后必须先收到FOLLOW请求才重新建立控制许可。
+ */
 void Chassis_Remote_Update(const Remote_t *remote)
 {
-    remote_mode_request_t mode_request;
+    remote_mode_request_t mode_request = remote->modeRequest;
 
-    if (remote == NULL)
-    {
-        mode_request = REMOTE_MODE_NONE;
-    }
-    else
-    {
-        mode_request = remote->modeRequest;
-    }
-
-    Chassis.remote_online_flag =
-        ((remote != NULL) && (remote->online != 0U)) ? 1U : 0U;
+    Chassis.remote_online_flag = (remote->online != 0U) ? 1U : 0U;
     Chassis.remote_stop_flag =
-        ((remote != NULL) &&
-         (remote->rightSwitch == REMOTE_SWITCH_DOWN)) ? 1U : 0U;
+        (remote->rightSwitch == REMOTE_SWITCH_DOWN) ? 1U : 0U;
 
     if ((Chassis.remote_online_flag == 0U) || (Chassis.remote_stop_flag != 0U))
     {
         Chassis.enable_flag = 0U;
         Chassis.remote_ready_flag = 0U;
         Remote_Hold();
-        previous_mode = mode_request;
+        Chassis.last_mode_request = mode_request;
         return;
     }
 
@@ -136,13 +137,14 @@ void Chassis_Remote_Update(const Remote_t *remote)
         Remote_Hold();
         if (mode_request != REMOTE_MODE_FOLLOW)
         {
-            previous_mode = mode_request;
+            Chassis.last_mode_request = mode_request;
             return;
         }
 
         Chassis.remote_ready_flag = 1U;
         Chassis.remote_target_flag = 1U;
-        Chassis.goal.fai_anchor = Model_Yaw_Get();
+        Chassis.goal.fai_anchor =
+            Chassis.imu.yaw_total * Chassis_Config.imu.yaw_angle_scale;
         Chassis.goal.fai =
             Chassis.goal.fai_anchor;
         if (Chassis.mode != CHASSIS_MODE_SELF_SAVE)
@@ -164,7 +166,7 @@ void Chassis_Remote_Update(const Remote_t *remote)
 
     if (Chassis.mode == CHASSIS_MODE_SELF_SAVE)
     {
-        previous_mode = mode_request;
+        Chassis.last_mode_request = mode_request;
         return;
     }
 
@@ -176,7 +178,7 @@ void Chassis_Remote_Update(const Remote_t *remote)
         {
             Chassis.recovery_latch_flag = 0U;
         }
-        previous_mode = mode_request;
+        Chassis.last_mode_request = mode_request;
         return;
     }
 
@@ -199,8 +201,8 @@ void Chassis_Remote_Update(const Remote_t *remote)
         break;
 
     case REMOTE_MODE_SELF_SAVE:
-        if ((previous_mode != REMOTE_MODE_SELF_SAVE) &&
-            (previous_mode != REMOTE_MODE_NONE))
+        if ((Chassis.last_mode_request != REMOTE_MODE_SELF_SAVE) &&
+            (Chassis.last_mode_request != REMOTE_MODE_NONE))
         {
             Chassis.recovery_latch_flag = 1U;
             Chassis.mode = CHASSIS_MODE_SELF_SAVE;
@@ -212,5 +214,5 @@ void Chassis_Remote_Update(const Remote_t *remote)
         break;
     }
 
-    previous_mode = mode_request;
+    Chassis.last_mode_request = mode_request;
 }

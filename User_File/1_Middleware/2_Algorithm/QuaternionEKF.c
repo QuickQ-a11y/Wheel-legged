@@ -1,29 +1,13 @@
 #include "QuaternionEKF.h"
 
+#include "Limit.h"
+
 #include <math.h>
 #include <string.h>
 
 #define ALGORITHM_QUATERNION_EKF_PI 3.14159265358979323846f
 #define ALGORITHM_QUATERNION_EKF_TWO_PI 6.28318530717958647692f
 #define ALGORITHM_QUATERNION_EKF_EPSILON 1.0e-6f
-
-/**
- * @brief 限制浮点值范围。
- */
-static float Algorithm_QuaternionEKF_Limit(float value, float minValue, float maxValue)
-{
-    if (value > maxValue)
-    {
-        return maxValue;
-    }
-
-    if (value < minValue)
-    {
-        return minValue;
-    }
-
-    return value;
-}
 
 /**
  * @brief 把矩阵清零并写入单位阵。
@@ -454,11 +438,11 @@ static void Algorithm_QuaternionEKF_CorrectByAccel(algorithm_quaternion_ekf_t *f
     {
         correctionLimit = filter->config.gyroBiasCorrectionLimitRadps;
         stateDelta[4] =
-            Algorithm_QuaternionEKF_Limit(stateDelta[4],
+            Algorithm_LimitRange(stateDelta[4],
                                           -correctionLimit,
                                           correctionLimit);
         stateDelta[5] =
-            Algorithm_QuaternionEKF_Limit(stateDelta[5],
+            Algorithm_LimitRange(stateDelta[5],
                                           -correctionLimit,
                                           correctionLimit);
     }
@@ -517,7 +501,7 @@ static void Algorithm_QuaternionEKF_UpdateEuler(algorithm_quaternion_ekf_t *filt
     filter->rollRad = atan2f(2.0f * ((q0 * q1) + (q2 * q3)),
                              (q0 * q0) - (q1 * q1) - (q2 * q2) + (q3 * q3));
     pitchSin = 2.0f * ((q0 * q2) - (q1 * q3));
-    pitchSin = Algorithm_QuaternionEKF_Limit(pitchSin, -1.0f, 1.0f);
+    pitchSin = Algorithm_LimitRange(pitchSin, -1.0f, 1.0f);
     filter->pitchRad = asinf(pitchSin);
     filter->yawRad = atan2f(2.0f * ((q0 * q3) + (q1 * q2)),
                             (q0 * q0) + (q1 * q1) - (q2 * q2) - (q3 * q3));

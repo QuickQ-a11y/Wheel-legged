@@ -34,16 +34,16 @@ typedef enum
 
 typedef enum
 {
-    CHASSIS_STATE_S = 0,          /* 整车水平位移 s，单位 m。 */
-    CHASSIS_STATE_DOT_S,          /* 整车水平速度 dot_s，单位 m/s。 */
-    CHASSIS_STATE_FAI,            /* 整车偏航角 fai，单位 rad。 */
-    CHASSIS_STATE_DOT_FAI,        /* 整车偏航角速度 dot_fai，单位 rad/s。 */
-    CHASSIS_STATE_THETA_L,        /* 左虚拟腿倾角 theta_l，单位 rad。 */
-    CHASSIS_STATE_DOT_THETA_L,    /* 左虚拟腿倾角速度 dot_theta_l，单位 rad/s。 */
-    CHASSIS_STATE_THETA_R,        /* 右虚拟腿倾角 theta_r，单位 rad。 */
-    CHASSIS_STATE_DOT_THETA_R,    /* 右虚拟腿倾角速度 dot_theta_r，单位 rad/s。 */
-    CHASSIS_STATE_THETA_B,        /* 机体俯仰角 theta_b，单位 rad。 */
-    CHASSIS_STATE_DOT_THETA_B,    /* 机体俯仰角速度 dot_theta_b，单位 rad/s。 */
+    CHASSIS_STATE_S = 0,       /* 整车水平位移 s，单位 m。 */
+    CHASSIS_STATE_D_S,         /* 整车水平速度 d_s，单位 m/s。 */
+    CHASSIS_STATE_FAI,         /* 整车偏航角 fai，单位 rad。 */
+    CHASSIS_STATE_D_FAI,       /* 整车偏航角速度 d_fai，单位 rad/s。 */
+    CHASSIS_STATE_THETA_L,     /* 左虚拟腿倾角 theta_l，单位 rad。 */
+    CHASSIS_STATE_D_THETA_L,   /* 左虚拟腿倾角速度 d_theta_l，单位 rad/s。 */
+    CHASSIS_STATE_THETA_R,     /* 右虚拟腿倾角 theta_r，单位 rad。 */
+    CHASSIS_STATE_D_THETA_R,   /* 右虚拟腿倾角速度 d_theta_r，单位 rad/s。 */
+    CHASSIS_STATE_THETA_B,     /* 机体俯仰角 theta_b，单位 rad。 */
+    CHASSIS_STATE_D_THETA_B,   /* 机体俯仰角速度 d_theta_b，单位 rad/s。 */
 } Chassis_State_Index_t;
 
 typedef enum
@@ -95,6 +95,8 @@ typedef struct
     float yaw_rate_scale;
     uint8_t forward_accel_axis;       /* 前向运动加速度数组下标。 */
     float forward_accel_scale;        /* IMU前向加速度到整车X正方向的比例。 */
+    uint8_t lateral_accel_axis;       /* 横向运动加速度数组下标，供转向观测。 */
+    uint8_t vertical_accel_axis;      /* 竖直运动加速度数组下标，供支撑力观测。 */
 } Chassis_IMU_Config_t;
 
 /** @brief 轮组几何、反馈极性和轮力矩到DJI电流值的换算。 */
@@ -151,6 +153,10 @@ typedef struct
     float stand_phi0_min;    /* 站立phi0保护下限，rad。 */
     float stand_phi0_max;    /* 站立phi0保护上限，rad。 */
     float joint_T_limit;     /* 恢复与板凳关节力矩限幅，N*m。 */
+    float bench_L0_rate;     /* 板凳摇杆满杆的腿长调节速率，m/s。 */
+    float bench_phi0_rate;   /* 板凳摇杆满杆的腿角调节速率，rad/s。 */
+    float bench_L0_min;      /* 板凳可调腿长下限，m。 */
+    float bench_L0_max;      /* 板凳可调腿长上限，m。 */
     algorithm_pid_config_t joint_angle_pid; /* 关节角度到目标速度控制器。 */
     algorithm_pid_config_t joint_speed_pid; /* 关节速度到几何力矩控制器。 */
 } Chassis_Recovery_Config_t;

@@ -1,9 +1,8 @@
 #include "task_can_dispatch.h"
 
 #include "task_can.h"
+#include "device_motor_dji.h"
 #include "device_motor_dm.h"
-
-motor_dji_t chassisDjiWheels[APP_WHEEL_COUNT] = {0};
 
 /**
  * @brief 分发应用层 CAN 接收报文。
@@ -14,11 +13,6 @@ motor_dji_t chassisDjiWheels[APP_WHEEL_COUNT] = {0};
  */
 void CAN_Task_RxMessageCallback(const task_can_rx_message_t *message)
 {
-    if (message == NULL)
-    {
-        return;
-    }
-
     if ((message->bus == APP_CAN_BUS_FDCAN1) &&
         (message->length == APP_DM_FRAME_LEN))
     {
@@ -35,11 +29,11 @@ void CAN_Task_RxMessageCallback(const task_can_rx_message_t *message)
     switch (message->identifier)
     {
     case APP_DJI_LEFT_RX_ID:
-        Motor_DJI_UpdateFeedback(&chassisDjiWheels[0U], message->data);
+        Motor_DJI_UpdateFeedback(MOTOR_DJI_LEFT, message->data);
         break;
 
     case APP_DJI_RIGHT_RX_ID:
-        Motor_DJI_UpdateFeedback(&chassisDjiWheels[1U], message->data);
+        Motor_DJI_UpdateFeedback(MOTOR_DJI_RIGHT, message->data);
         break;
 
     default:

@@ -1,24 +1,8 @@
 #include "LQR.h"
 
+#include "Limit.h"
+
 #include <stddef.h>
-
-/**
- * @brief 将拟合输入限制在有效采样范围内。
- */
-static float Algorithm_LQR_LimitFloat(float value, float minValue, float maxValue)
-{
-    if (value < minValue)
-    {
-        return minValue;
-    }
-
-    if (value > maxValue)
-    {
-        return maxValue;
-    }
-
-    return value;
-}
 
 /**
  * @brief 计算单个 poly22 多项式元素。
@@ -54,28 +38,13 @@ void Algorithm_LQR_FitLqrKPoly22(const float *lqrKFitCoefficients,
     float limitedX;
     float limitedY;
 
-    if ((lqrKFitCoefficients == NULL) || (lqrKMatrix == NULL) ||
-        (outputCount == 0U) || (stateCount == 0U) ||
-        (minInput <= 0.0f) || (maxInput < minInput))
-    {
-        return;
-    }
+    /* 腿长必须夹紧到系数实际采样区间，禁止在采样范围外外推。 */
+    limitedX = Algorithm_LimitRange(inputX, minInput, maxInput);
+    limitedY = Algorithm_LimitRange(inputY, minInput, maxInput);
 
-    limitedX = Algorithm_LQR_LimitFloat(inputX, minInput, maxInput);
-    limitedY = Algorithm_LQR_LimitFloat(inputY, minInput, maxInput);
-
-    if (limitedInputX != NULL)
-    {
-        *limitedInputX = limitedX;
-    }
-    if (limitedInputY != NULL)
-    {
-        *limitedInputY = limitedY;
-    }
-    if (isInputLimited != NULL)
-    {
-        *isInputLimited = ((limitedX != inputX) || (limitedY != inputY)) ? 1U : 0U;
-    }
+    *limitedInputX = limitedX;
+    *limitedInputY = limitedY;
+    *isInputLimited = ((limitedX != inputX) || (limitedY != inputY)) ? 1U : 0U;
 
     for (outputIndex = 0U; outputIndex < outputCount; outputIndex++)
     {
