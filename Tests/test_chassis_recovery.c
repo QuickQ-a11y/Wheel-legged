@@ -208,8 +208,9 @@ static void test_bench_control(void)
     {
         float request_nm = fabsf(Chassis.output.T_joint_req[index]);
 
+        /* 请求量不再限幅，其量级由串级PID的输出限幅界定。 */
         assert(request_nm <=
-               Chassis_Config.recovery.joint_T_limit +
+               Chassis_Config.recovery.joint_speed_pid.outputLimit +
                    TEST_TOLERANCE);
         if (request_nm > maximum_request_nm)
         {
@@ -225,7 +226,10 @@ static void test_bench_control(void)
         {
             current_request = -current_request;
         }
-        assert(current_request <= Chassis_Config.wheel.I_limit);
+        /* 轮通道唯一限幅在力矩侧，电流上限由换算得到。 */
+        assert((float)current_request <=
+               Chassis_Config.wheel.T_limit * Chassis_Config.wheel.T_to_I +
+                   TEST_TOLERANCE);
         if (current_request > maximum_wheel_current_request)
         {
             maximum_wheel_current_request = current_request;
@@ -408,6 +412,37 @@ static void test_recovery_posture(void)
     assert_zero_output();
 }
 
+/*
+ * 轮输出关闭时不驱动轮电机，其在线状态不应参与输出封锁，
+ * 否则只调髋关节时轮电调未上电就会连带封锁关节力矩。
+ */
+static void test_wheel_offline_gate(void)
+{
+    Chassis_Init();
+    set_online_feedback();
+    set_symmetric_leg_pose(0.25f, CHASSIS_HALF_PI);
+    Chassis.mode = CHASSIS_MODE_FOLLOW;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_STANDING);
+
+    Chassis.wheel_motor[CHASSIS_LEFT].online_flag = 0U;
+    Chassis.wheel_motor[CHASSIS_RIGHT].online_flag = 0U;
+    Chassis_Control();
+    if (Chassis_Config.output.wheel_flag == 0U)
+    {
+        assert((Chassis.fault & CHASSIS_FAULT_DJI_MOTOR) == 0U);
+    }
+    else
+    {
+        assert((Chassis.fault & CHASSIS_FAULT_DJI_MOTOR) != 0U);
+    }
+
+    /* DM 离线在任何配置下都必须封锁。 */
+    Chassis.dm_motor[0].online_flag = 0U;
+    Chassis_Control();
+    assert((Chassis.fault & CHASSIS_FAULT_DM_MOTOR) != 0U);
+}
+
 static void test_fault_calculation(void)
 {
     uint8_t left_phi1_index;
@@ -436,8 +471,12 @@ static void test_fault_calculation(void)
     output_fault = CHASSIS_FAULT_DISABLED |
                     CHASSIS_FAULT_IMU |
                     CHASSIS_FAULT_DM_MOTOR |
-                    CHASSIS_FAULT_DJI_MOTOR |
                     CHASSIS_FAULT_CAN;
+    /* 轮离线是否封锁取决于轮输出是否打开。 */
+    if (Chassis_Config.output.wheel_flag != 0U)
+    {
+        output_fault |= CHASSIS_FAULT_DJI_MOTOR;
+    }
     assert((Chassis.fault & output_fault) == output_fault);
     assert(fabsf(Chassis.leg[CHASSIS_LEFT].L0 - 0.25f) <
            TEST_TOLERANCE);
@@ -480,8 +519,9 @@ static void test_lqr_realtime_leg_length(void)
 {
     Chassis_Init();
     set_online_feedback();
-    set_leg_pose(CHASSIS_LEFT, 0.22f, CHASSIS_HALF_PI);
-    set_leg_pose(CHASSIS_RIGHT, 0.29f, CHASSIS_HALF_PI);
+    /* 两条腿都落在K的采样范围内时，拟合腿长直接取实时L0，不限幅。 */
+    set_leg_pose(CHASSIS_LEFT, 0.14f, CHASSIS_HALF_PI);
+    set_leg_pose(CHASSIS_RIGHT, 0.24f, CHASSIS_HALF_PI);
     Chassis_Leg_Update();
     assert(Chassis.leg[CHASSIS_LEFT].valid_flag == 1U);
     assert(Chassis.leg[CHASSIS_RIGHT].valid_flag == 1U);
@@ -498,6 +538,17 @@ static void test_lqr_realtime_leg_length(void)
     assert(fabsf(Chassis.leg[CHASSIS_LEFT].K_L0_fit -
                   Chassis.leg[CHASSIS_RIGHT].K_L0_fit) > 0.05f);
     assert(Chassis.lqr.limit_flag == 0U);
+    assert_zero_output();
+
+    /* 超出采样范围时必须限幅到边界并置位标志，禁止外推。 */
+    set_leg_pose(CHASSIS_RIGHT, 0.29f, CHASSIS_HALF_PI);
+    Chassis_Leg_Update();
+    Chassis_Control();
+    assert(Chassis.leg[CHASSIS_RIGHT].L0 >
+           Chassis_Config.lqr.L0_max + TEST_TOLERANCE);
+    assert(fabsf(Chassis.leg[CHASSIS_RIGHT].K_L0_fit -
+                  Chassis_Config.lqr.L0_max) < TEST_TOLERANCE);
+    assert(Chassis.lqr.limit_flag == 1U);
     assert_zero_output();
 }
 
@@ -783,9 +834,19 @@ static void test_step_phases(void)
     }
     assert(maximum_wheel_request > 0);
 
+    /* CLIMB两段摆腿：先摆过后摆退出角，再回到前摆退出角以内才允许归正。 */
+    assert(Chassis.swing[CHASSIS_LEFT] == CHASSIS_SWING_BACK);
+    assert(Chassis.swing[CHASSIS_RIGHT] == CHASSIS_SWING_BACK);
     set_symmetric_leg_pose(Chassis_Config.step.retract_L0,
                            CHASSIS_HALF_PI +
-                               Chassis_Config.step.peak_theta);
+                               Chassis_Config.step.back_theta_exit + 0.10f);
+    Chassis_Step();
+    assert(Chassis.swing[CHASSIS_LEFT] == CHASSIS_SWING_FRONT);
+    assert(Chassis.swing[CHASSIS_RIGHT] == CHASSIS_SWING_FRONT);
+
+    set_symmetric_leg_pose(Chassis_Config.step.retract_L0,
+                           CHASSIS_HALF_PI +
+                               Chassis_Config.step.front_theta_exit - 0.10f);
     for (iteration = 0U; iteration < 150U; iteration++)
     {
         Chassis_Step();
@@ -794,6 +855,8 @@ static void test_step_phases(void)
             break;
         }
     }
+    assert(Chassis.swing[CHASSIS_LEFT] == CHASSIS_SWING_HOME);
+    assert(Chassis.swing[CHASSIS_RIGHT] == CHASSIS_SWING_HOME);
     assert(Chassis.step_phase == CHASSIS_STEP_RECOVER);
     assert_zero_output();
 
@@ -906,6 +969,7 @@ int main(void)
     test_invalid_leg_feedback();
     test_invalid_leg_recovery();
     test_recovery_posture();
+    test_wheel_offline_gate();
     test_fault_calculation();
     test_lqr_realtime_leg_length();
     test_vertical_theta_balance();

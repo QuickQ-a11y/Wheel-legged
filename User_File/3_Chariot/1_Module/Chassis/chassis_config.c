@@ -9,6 +9,7 @@
  */
 const Chassis_Config_t Chassis_Config = {
     /* 左右腿尺寸相同，但电机索引和后续实机标定值分别保存。 */
+    /* 小轮腿 */
     .leg = {
         [CHASSIS_LEFT] = {
             .geometry = {
@@ -32,7 +33,7 @@ const Chassis_Config_t Chassis_Config = {
                     .ratio = 0.75f,
                 },
             },
-            .target_L0 = 0.25f,
+            .target_L0 = 0.15f,
         },
         [CHASSIS_RIGHT] = {
             .geometry = {
@@ -56,8 +57,73 @@ const Chassis_Config_t Chassis_Config = {
                     .ratio = 0.75f,
                 },
             },
-            .target_L0 = 0.25f,
+            .target_L0 = 0.15f,
         },
+    },
+    /* 大轮腿 */
+    // .leg = {
+    //     [CHASSIS_LEFT] = {
+    //         .geometry = {
+    //             .l1 = 0.13787f,
+    //             .l2 = 0.15817f,
+    //             .l3 = 0.15817f,
+    //             .l4 = 0.13787f,
+    //             .l5 = 0.0f,
+    //         },
+    //         .joint = {
+    //             [CHASSIS_JOINT_PHI1] = {
+    //                 .motor_index = 1U,
+    //                 .angle_offset_rad = CHASSIS_HALF_PI,
+    //                 .scale = 1.0f,
+    //                 .ratio = 1.0f,
+    //             },
+    //             [CHASSIS_JOINT_PHI4] = {
+    //                 .motor_index = 0U,
+    //                 .angle_offset_rad = CHASSIS_HALF_PI,
+    //                 .scale = 1.0f,
+    //                 .ratio = 1.0f,
+    //             },
+    //         },
+    //         .target_L0 = 0.25f,
+    //     },
+    //     [CHASSIS_RIGHT] = {
+    //         .geometry = {
+    //             .l1 = 0.13787f,
+    //             .l2 = 0.15817f,
+    //             .l3 = 0.15817f,
+    //             .l4 = 0.13787f,
+    //             .l5 = 0.0f,
+    //         },
+    //         .joint = {
+    //             [CHASSIS_JOINT_PHI1] = {
+    //                 .motor_index = 3U,
+    //                 .angle_offset_rad = CHASSIS_HALF_PI,
+    //                 .scale = -1.0f,
+    //                 .ratio = 1.0f,
+    //             },
+    //             [CHASSIS_JOINT_PHI4] = {
+    //                 .motor_index = 2U,
+    //                 .angle_offset_rad = CHASSIS_HALF_PI,
+    //                 .scale = -1.0f,
+    //                 .ratio = 1.0f,
+    //             },
+    //         },
+    //         .target_L0 = 0.25f,
+    //     },
+    // },
+    /*
+     * 整车质量与质心参数，与生成K的 ABK_LQR.m 保持一一对应，
+     * 重力前馈和全部力类观测阈值都由这里推出。
+     * 换机器人时本块和 leg.geometry、wheel 一起改，按比例定义的阈值自动跟随。
+     *
+     * 整车合计 3.043 + 2*1.054 + 2*0.455 = 6.061 kg，单腿静载 29.7 N。
+     */
+    .model = {
+        .gravity = 9.81f,     /* g_ac */
+        .body_mass = 3.043f,  /* m_b_ac */
+        .leg_mass = 1.054f,   /* m_l_ac */
+        .wheel_mass = 0.455f, /* m_w_ac */
+        .cg_to_hip = 0.060f,  /* l_c_ac */
     },
     /* IMU任务已输出整车右手系数据，此处只匹配控制模型的轴和正方向。 */
     .imu = {
@@ -76,23 +142,48 @@ const Chassis_Config_t Chassis_Config = {
         .vertical_accel_axis = 2U,
     },
     /* 左右scale同时约束反馈和命令，避免同一轮方向在两处独立维护。 */
+    /* 小轮腿配置 */
     .wheel = {
-        .R = 0.10f,
+        .R = 0.052f,
         .half_track = 0.1965f,
-        .left_scale = 1.0f,
+        /*
+         * 当前轮电机：24 V 配减速箱，传动比 268/17，电机转矩常数约0.01562
+         * N*m/A（对应输出轴等效0.2463 N*m/A）。
+         * C620 反馈的speed_rpm是电机转子转速，轮轴角速度=speed_rpm/gear_ratio；
+         * 直驱轮电机改这里为1.0。
+         */
+        .gear_ratio = 268.0f / 17.0f,
+        .left_scale = -1.0f,
         .right_scale = 1.0f,
         /*
-         * 当前轮电机：24 V 直驱，传动比 1，转矩常数 0.02 N*m/A。
-         * 空载 9400 rpm/0.6 A，额定 9085 rpm/0.16 N*m/10 A。
-         * C620 的 16384 对应 20 A：
-         * T_to_I = 16384 / (20 * 0.02) = 40960 count/(N*m)
-         * I_limit = 16384 * 10 / 20 = 8192 count
-         * 更换轮电机时在此处重算转矩换算、连续转矩和额定电流限幅。
+         * C620 的 16384 对应 20 A，故 T_to_I = 16384/(20*0.2463f) = 3326.02517 count/(N*m)，
+         * 已按gear_ratio折算到轮轴等效转矩常数，T_to_I不再重复乘gear_ratio。
+         *
+         * 轮通道只保留 T_limit 一个限幅点，电调命令由 T_limit*T_to_I 推出。
+         * 当前纯电机额定扭矩（最大连续转矩）为0.16N*m， 0.16*268/17 N*m
+         * 换电机时改 T_to_I 和 T_limit，并自行确认换算结果不超过 16384。
          */
-        .T_limit = 0.16f,
-        .T_to_I = 40960.0f,
-        .I_limit = 8192,
+        .T_limit = 2.522f,
+        .T_to_I = 3326.02517f,
     },
+    // /* 大轮腿配置 */
+    // .wheel = {
+    //     .R = 0.10f,
+    //     .half_track = 0.1965f,
+    //     .gear_ratio = 268.0f / 17.0f,
+    //     .left_scale = 1.0f,
+    //     .right_scale = 1.0f,
+    //     /*
+    //      * 当前轮电机：24 V 配减速箱，传动比 268/17，转矩常数 0.2463f N*m/A。
+    //      * C620 的 16384 对应 20 A，故 T_to_I = 16384/(20*0.2463f) = 3326.02517 count/(N*m)。
+    //      *
+    //      * 轮通道只保留 T_limit 一个限幅点，电调命令由 T_limit*T_to_I 推出。
+    //      * 当前纯电机额定扭矩（最大连续转矩）为0.16N*m， 0.16*268/17 N*m
+    //      * 换电机时改 T_to_I 和 T_limit，并自行确认换算结果不超过 16384。
+    //      */
+    //     .T_limit = 2.522f,
+    //     .T_to_I = 3326.02517f,
+    // },
     /* 状态为前进速度和前进加速度，矩阵按2x2行优先顺序填写。 */
     .speed_kalman = {
         .enable_flag = 1U,
@@ -116,11 +207,11 @@ const Chassis_Config_t Chassis_Config = {
     },
     /* 腿长PID输出作为虚拟支撑力修正，反馈速度直接作为阻尼项。 */
     .leg_length_pid = {
-        .kp = 4.0f,
+        .kp = 350.0f,
         .ki = 0.0f,
         .kd = 0.0f,
         .integralLimit = 5.0f,
-        .outputLimit = 10.0f,
+        .outputLimit = 30.0f,
     },
     /* roll PID输出以左右腿差动支撑力的形式作用。 */
     .roll_pid = {
@@ -157,7 +248,6 @@ const Chassis_Config_t Chassis_Config = {
         .pitch_limit = 1.60f,
         .stand_phi0_min = 0.40f,
         .stand_phi0_max = 2.80f,
-        .joint_T_limit = 3.5f,
         /* 板凳模式下用左右摇杆分别微调两条腿，范围保守收在机构可达区内。 */
         .bench_L0_rate = 0.80f,
         .bench_phi0_rate = 3.20f,
@@ -204,7 +294,6 @@ const Chassis_Config_t Chassis_Config = {
         .contact_T_fb = 0.08f,
         .contact_theta = 0.30f,
         .contact_time = 0.05f,
-        .peak_theta = 0.80f,
         .recover_theta = 0.0f,
         .L0_tol = 0.02f,
         .angle_tol = 0.10f,
@@ -213,6 +302,25 @@ const Chassis_Config_t Chassis_Config = {
         .approach_timeout = 10.0f,
         .climb_timeout = 3.0f,
         .recover_timeout = 2.0f,
+        /*
+         * 两段摆腿结构取自HERO_LEG的磕台阶控制，角度按本车机构缩小：
+         * 原车腿杆角用到1.32/1.22 rad，本车站立phi0保护范围换算到相对角
+         * 只有约-1.17~+1.23 rad，因此后摆保持角收到1.00/0.90。
+         * 力矩按原车6.0/-15.0的比例缩放到本车关节限幅3.5 N*m量级。
+         */
+        .back_phi0_max = 1.00f,
+        .back_phi0_hold = 0.90f,
+        .back_Tp = 0.80f,
+        .back_theta_exit = 0.90f,
+        .front_theta_max = 0.95f,
+        .front_phi0_hold = 0.85f,
+        .front_Tp = -2.00f,
+        .front_theta_exit = 0.45f,
+        .home_phi0 = 0.15f,
+        /* 相对站立的1.60/0.40/2.80适当放宽，避免磕台阶瞬间误判倒地。 */
+        .pitch_limit = 1.80f,
+        .phi0_min = 0.30f,
+        .phi0_max = 2.90f,
         .leg_angle_pid = {
             .kp = 4.0f,
             .ki = 0.0f,
@@ -221,29 +329,40 @@ const Chassis_Config_t Chassis_Config = {
             .outputLimit = 1.0f,
         },
     },
-    /* 质量来自现有MATLAB名义模型，仅用于生成Watch估计量。 */
+    /*
+     * 只读观测阈值。凡是随整车重量或执行器能力等比缩放的量一律写成比例：
+     * 力类以单腿静载 0.5*model.mass*model.gravity 为基准，
+     * 力矩类以 wheel.T_limit 为基准。换机器人时改 model 和 wheel 即可跟随，
+     * 不需要重算这些比例。角度、时间和速度是运动学量，换车需要单独整定。
+     */
     .observer = {
-        .gravity_mps2 = 9.81f,
-        .body_mass_kg = 10.0f,
-        .leg_mass_kg = 0.5f,
-        .wheel_mass_kg = 1.0f,
-        .body_cg_to_hip_m = 0.04f,
         .residual_filter_s = 0.02f,
         .turn_filter_s = 0.05f,
         .normal_force_filter_s = 0.02f,
-        .slip_speed_enter_mps = 0.20f,
-        .slip_speed_exit_mps = 0.10f,
-        .slip_yaw_enter_radps = 0.80f,
-        .slip_yaw_exit_radps = 0.40f,
-        .slip_delta_enter_mps = 0.03f,
-        .slip_delta_exit_mps = 0.015f,
+        .slip_gate_yaw = 0.90f,
+        /* 闸门速度差应高于常用行驶速度，避免正常加减速误判。 */
+        .slip_gate_v = 0.60f,
+        .slip_v_enter = 0.20f,
+        .slip_yaw_enter = 0.80f,
+        /* dt为1 ms，0.02 m/s对应约20 m/s^2的轮加速度突变。 */
+        .slip_dv_enter = 0.02f,
         .slip_enter_s = 0.05f,
-        .slip_exit_s = 0.20f,
         .off_force_ratio = 0.20f,
         .land_force_ratio = 0.35f,
         .off_hold_s = 0.03f,
         .land_hold_s = 0.05f,
+        .off_F_comp_ratio = 0.28f,
+        .turn_v_diff = 0.20f,
         .turn_force_limit_ratio = 0.50f,
+        .stuck_T_ratio = 0.75f,
+        .stuck_theta_enter = 0.50f,
+        .stuck_theta_exit = 0.15f,
+        .stuck_time = 0.05f,
+        /* 补偿力约0.5 s爬到上限。 */
+        .stuck_F0_coef_ratio = 0.38f,
+        .stuck_F0_max_ratio = 0.19f,
+        .stuck_L0_coef = 0.06f,
+        .stuck_L0_max = 0.04f,
     },
     /*
      * 四路输出、十个状态分别保存一组双腿长poly22系数。
@@ -254,58 +373,78 @@ const Chassis_Config_t Chassis_Config = {
         .L0_min = 0.11f,
         .L0_max = 0.25f,
         /*
-         * MATLAB poly22 顺序：p00、p10、p01、p20、p11、p02。
-         * 两个输入依次为左腿长和右腿长，单位 m。
+         * 误差限幅在进K点乘之前生效，防止位移积累或姿态瞬时越界时
+         * 单一状态项主导四路输出。只限位置类，速度类留0表示不限幅。
+         * 这里是输出封锁阶段的保守初值，实机站起来后按需要放宽。
+         */
+        .error_limit = {
+            [CHASSIS_STATE_S] = 0.30f,        /* m */
+            [CHASSIS_STATE_D_S] = 0.0f,
+            [CHASSIS_STATE_FAI] = 0.50f,      /* rad */
+            [CHASSIS_STATE_D_FAI] = 0.0f,
+            [CHASSIS_STATE_THETA_L] = 0.30f,  /* rad */
+            [CHASSIS_STATE_D_THETA_L] = 0.0f,
+            [CHASSIS_STATE_THETA_R] = 0.30f,  /* rad */
+            [CHASSIS_STATE_D_THETA_R] = 0.0f,
+            [CHASSIS_STATE_THETA_B] = 0.20f,  /* rad */
+            [CHASSIS_STATE_D_THETA_B] = 0.0f,
+        },
+        /*
+         * 直接粘贴 MATLAB ABK_LQR.m 的 K_Fit_Coefficients 输出，整块替换本花括号内容。
+         * 每行6个系数，顺序 p00、p10、p01、p20、p11、p02；两个输入依次为左腿长和右腿长，单位 m。
+         * 40行按输出优先排列，每10行对应一路输出的十个状态，顺序必须与
+         * CHASSIS_OUTPUT_* 和 CHASSIS_STATE_* 枚举一致：
+         *   行 1~10 左轮力矩
+         *   行11~20 右轮力矩
+         *   行21~30 左腿摆力矩
+         *   行31~40 右腿摆力矩
+         * 状态顺序: s, d_s, fai, d_fai, theta_l, d_theta_l, theta_r, d_theta_r, theta_b, d_theta_b
          */
         .coefficients = {
-            [CHASSIS_OUTPUT_LEFT_WHEEL] = {
-                [CHASSIS_STATE_S] = {-1.2125f, -0.75857f, 1.4572f, 4.7369f, -9.7781f, 2.298f},
-                [CHASSIS_STATE_D_S] = {-7.8236f, 7.3862f, 17.967f, 21.668f, -85.008f, 7.924f},
-                [CHASSIS_STATE_FAI] = {-155.05f, 38.018f, -31.416f, -39.098f, 1.2544f, 32.948f},
-                [CHASSIS_STATE_D_FAI] = {-20.27f, 8.2017f, -7.3579f, -8.3126f, -0.716f, 8.9617f},
-                [CHASSIS_STATE_THETA_L] = {-22.158f, -82.33f, 30.231f, 117.52f, -13.138f, -46.914f},
-                [CHASSIS_STATE_D_THETA_L] = {-2.5816f, -5.7576f, 8.3528f, 8.172f, -15.318f, -5.717f},
-                [CHASSIS_STATE_THETA_R] = {-20.115f, 32.773f, -50.669f, -55.369f, -10.951f, 82.976f},
-                [CHASSIS_STATE_D_THETA_R] = {-2.5054f, 7.026f, -2.6441f, -2.4952f, -17.992f, 7.386f},
-                [CHASSIS_STATE_THETA_B] = {-154.37f, 100.43f, 80.457f, -82.492f, 47.532f, -68.928f},
-                [CHASSIS_STATE_D_THETA_B] = {-2.4906f, 2.5371f, 2.5951f, -1.7526f, -2.9345f, -2.0565f},
-            },
-            [CHASSIS_OUTPUT_RIGHT_WHEEL] = {
-                [CHASSIS_STATE_S] = {-1.2125f, 1.4572f, -0.75857f, 2.298f, -9.7781f, 4.7369f},
-                [CHASSIS_STATE_D_S] = {-7.8236f, 17.967f, 7.3862f, 7.924f, -85.008f, 21.668f},
-                [CHASSIS_STATE_FAI] = {155.05f, 31.416f, -38.018f, -32.948f, -1.2544f, 39.098f},
-                [CHASSIS_STATE_D_FAI] = {20.27f, 7.3579f, -8.2017f, -8.9617f, 0.716f, 8.3126f},
-                [CHASSIS_STATE_THETA_L] = {-20.115f, -50.669f, 32.773f, 82.976f, -10.951f, -55.369f},
-                [CHASSIS_STATE_D_THETA_L] = {-2.5054f, -2.6441f, 7.026f, 7.386f, -17.992f, -2.4952f},
-                [CHASSIS_STATE_THETA_R] = {-22.158f, 30.231f, -82.33f, -46.914f, -13.138f, 117.52f},
-                [CHASSIS_STATE_D_THETA_R] = {-2.5816f, 8.3528f, -5.7576f, -5.717f, -15.318f, 8.172f},
-                [CHASSIS_STATE_THETA_B] = {-154.37f, 80.457f, 100.43f, -68.928f, 47.532f, -82.492f},
-                [CHASSIS_STATE_D_THETA_B] = {-2.4906f, 2.5951f, 2.5371f, -2.0565f, -2.9345f, -1.7526f},
-            },
-            [CHASSIS_OUTPUT_LEFT_LEG] = {
-                [CHASSIS_STATE_S] = {0.27653f, 3.6527f, -3.0729f, -6.5234f, 0.9018f, 3.7349f},
-                [CHASSIS_STATE_D_S] = {1.9305f, 13.996f, -17.857f, -31.846f, 16.038f, 20.3f},
-                [CHASSIS_STATE_FAI] = {-1.9765f, -34.802f, -0.28435f, 52.274f, -18.155f, 11.331f},
-                [CHASSIS_STATE_D_FAI] = {-0.30364f, -6.8657f, -0.1079f, 8.9093f, -3.4484f, 0.7038f},
-                [CHASSIS_STATE_THETA_L] = {22.554f, 4.889f, -1.8511f, -3.463f, 13.151f, -5.1166f},
-                [CHASSIS_STATE_D_THETA_L] = {1.9959f, 3.8029f, -2.3357f, -3.0134f, 3.4635f, 3.0271f},
-                [CHASSIS_STATE_THETA_R] = {-2.5045f, -38.323f, 19.851f, 59.608f, -17.956f, -47.186f},
-                [CHASSIS_STATE_D_THETA_R] = {-0.12988f, -3.1528f, -1.1109f, 0.99243f, 2.4422f, -2.645f},
-                [CHASSIS_STATE_THETA_B] = {-53.483f, -49.159f, -26.229f, 56.988f, 6.0632f, 15.025f},
-                [CHASSIS_STATE_D_THETA_B] = {-0.82815f, -1.6525f, -0.65872f, 1.4711f, 1.1762f, 0.42385f},
-            },
-            [CHASSIS_OUTPUT_RIGHT_LEG] = {
-                [CHASSIS_STATE_S] = {0.27653f, -3.0729f, 3.6527f, 3.7349f, 0.9018f, -6.5234f},
-                [CHASSIS_STATE_D_S] = {1.9305f, -17.857f, 13.996f, 20.3f, 16.038f, -31.846f},
-                [CHASSIS_STATE_FAI] = {1.9765f, 0.28435f, 34.802f, -11.331f, 18.155f, -52.274f},
-                [CHASSIS_STATE_D_FAI] = {0.30364f, 0.1079f, 6.8657f, -0.7038f, 3.4484f, -8.9093f},
-                [CHASSIS_STATE_THETA_L] = {-2.5045f, 19.851f, -38.323f, -47.186f, -17.956f, 59.608f},
-                [CHASSIS_STATE_D_THETA_L] = {-0.12988f, -1.1109f, -3.1528f, -2.645f, 2.4422f, 0.99243f},
-                [CHASSIS_STATE_THETA_R] = {22.554f, -1.8511f, 4.889f, -5.1166f, 13.151f, -3.463f},
-                [CHASSIS_STATE_D_THETA_R] = {1.9959f, -2.3357f, 3.8029f, 3.0271f, 3.4635f, -3.0134f},
-                [CHASSIS_STATE_THETA_B] = {-53.483f, -26.229f, -49.159f, 15.025f, 6.0632f, 56.988f},
-                [CHASSIS_STATE_D_THETA_B] = {-0.82815f, -0.65872f, -1.6525f, 0.42385f, 1.1762f, 1.4711f},
-            },
+            /* ---- 左轮力矩 ---- */
+               -1.2118,    -2.9102,     3.6044,     7.8047,    -10.055,   -0.48894,  /* s */
+               -7.8202,    -2.7233,     28.056,     37.496,    -86.151,    -6.7412,  /* d_s */
+               -154.27,     94.937,    -39.494,    -135.45,     24.803,     59.311,  /* fai */
+               -20.374,     22.265,    -14.852,     -24.24,     -2.758,     24.881,  /* d_fai */
+               -26.118,    -97.667,     22.107,     140.46,    -20.104,    -34.288,  /* theta_l */
+               -2.7408,    -8.0339,     9.3281,      9.564,    -13.891,    -8.4993,  /* d_theta_l */
+               -16.153,     36.579,    -31.026,    -61.176,    -4.6762,     53.922,  /* theta_r */
+               -2.3451,     5.7889,   -0.11228,    0.82895,    -19.852,       5.89,  /* d_theta_r */
+               -154.38,     141.35,     39.585,    -111.96,      51.18,    -43.166,  /* theta_b */
+               -2.4907,     2.8444,     2.2885,    -1.7187,    -2.8814,    -2.1441,  /* d_theta_b */
+            /* ---- 右轮力矩 ---- */
+               -1.2118,     3.6044,    -2.9102,   -0.48894,    -10.055,     7.8047,  /* s */
+               -7.8202,     28.056,    -2.7233,    -6.7412,    -86.151,     37.496,  /* d_s */
+                154.27,     39.494,    -94.937,    -59.311,    -24.803,     135.45,  /* fai */
+                20.374,     14.852,    -22.265,    -24.881,      2.758,      24.24,  /* d_fai */
+               -16.153,    -31.026,     36.579,     53.922,    -4.6762,    -61.176,  /* theta_l */
+               -2.3451,   -0.11228,     5.7889,       5.89,    -19.852,    0.82895,  /* d_theta_l */
+               -26.118,     22.107,    -97.667,    -34.288,    -20.104,     140.46,  /* theta_r */
+               -2.7408,     9.3281,    -8.0339,    -8.4993,    -13.891,      9.564,  /* d_theta_r */
+               -154.38,     39.585,     141.35,    -43.166,      51.18,    -111.96,  /* theta_b */
+               -2.4907,     2.2885,     2.8444,    -2.1441,    -2.8814,    -1.7187,  /* d_theta_b */
+            /* ---- 左腿摆力矩 ---- */
+               0.27605,     3.5179,    -2.9356,    -6.5794,     1.2394,     3.4528,  /* s */
+                1.9282,     13.345,    -17.194,    -31.829,     17.434,     18.884,  /* d_s */
+               -9.8147,    -86.375,     3.1326,     132.02,    -41.156,     19.923,  /* fai */
+               -1.6015,    -18.228,    0.23373,     23.826,    -8.5089,    0.44332,  /* d_fai */
+                22.487,      1.283,    -2.2456,    0.61767,     10.133,    -2.8034,  /* theta_l */
+                1.9937,     3.4972,    -2.2957,     -2.986,     3.5042,     2.9229,  /* d_theta_l */
+               -2.4392,    -34.755,     20.296,     54.242,    -13.514,    -49.651,  /* theta_r */
+              -0.12837,     -3.019,    -0.9756,    0.74909,     2.9617,    -2.8849,  /* d_theta_r */
+               -53.478,    -48.242,     -27.18,     58.635,     1.1854,     18.293,  /* theta_b */
+               -0.8281,    -1.6396,   -0.67206,     1.5161,     1.0988,    0.45671,  /* d_theta_b */
+            /* ---- 右腿摆力矩 ---- */
+               0.27605,    -2.9356,     3.5179,     3.4528,     1.2394,    -6.5794,  /* s */
+                1.9282,    -17.194,     13.345,     18.884,     17.434,    -31.829,  /* d_s */
+                9.8147,    -3.1326,     86.375,    -19.923,     41.156,    -132.02,  /* fai */
+                1.6015,   -0.23373,     18.228,   -0.44332,     8.5089,    -23.826,  /* d_fai */
+               -2.4392,     20.296,    -34.755,    -49.651,    -13.514,     54.242,  /* theta_l */
+              -0.12837,    -0.9756,     -3.019,    -2.8849,     2.9617,    0.74909,  /* d_theta_l */
+                22.487,    -2.2456,      1.283,    -2.8034,     10.133,    0.61767,  /* theta_r */
+                1.9937,    -2.2957,     3.4972,     2.9229,     3.5042,     -2.986,  /* d_theta_r */
+               -53.478,     -27.18,    -48.242,     18.293,     1.1854,     58.635,  /* theta_b */
+               -0.8281,   -0.67206,    -1.6396,    0.45671,     1.0988,     1.5161,  /* d_theta_b */
         },
     },
     /* 最终物理输出开关；关闭不影响请求量和控制中间量计算。 */
@@ -315,14 +454,19 @@ const Chassis_Config_t Chassis_Config = {
          * 11/12.5 N*m 峰值未配置持续时间保护，因此暂不作为运行限幅。
          * MIT 协议映射量程在 app_config.h 中配置，当前为 +/-40 N*m。
          */
-        .joint_flag = 1U,
-        .wheel_flag = 0U,
+        .joint_flag = 0U,
+        .wheel_flag = 1U,
         .joint_T_limit = 3.5f,
     },
     /* 整车公共目标、支撑力前馈和控制周期边界。 */
     .phi0_offset = CHASSIS_HALF_PI,
     .roll_target = 0.0f,
-    .F0_base = -30.0f,
+    /*
+     * 重力前馈按 0.5*mass*gravity*cos(theta) 计算，随腿摆角投影。
+     * 1.0表示按实测质量足额补偿；实机若发现腿长稳态偏差，先调这个系数，
+     * 不要回头改 model.mass。
+     */
+    .F0_gravity_scale = 1.0f,
     .F0_left = 0.0f,
     .F0_right = 0.0f,
     .default_dt = APP_CTRL_DT_S,

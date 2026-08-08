@@ -68,9 +68,9 @@ extern "C" {
 #define APP_RC_MAX_YAW 1.0f
 #define APP_RC_VEL_RATE 1.0f
 #define APP_RC_YAW_RATE 2.0f
-#define APP_RC_LEG_S 0.15f
-#define APP_RC_LEG_M 0.20f
-#define APP_RC_LEG_L 0.25f
+#define APP_RC_LEG_S 0.12f
+#define APP_RC_LEG_M 0.15f
+#define APP_RC_LEG_L 0.20f
 
 /*
  * 控制器第一阶段只计算中间状态和安全输出。

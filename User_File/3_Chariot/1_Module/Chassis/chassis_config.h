@@ -104,11 +104,11 @@ typedef struct
 {
     float R;               /* 轮半径，m。 */
     float half_track;      /* 半轮距，m。 */
+    float gear_ratio;      /* 电机转子转速/轮轴转速传动比，直驱为1。 */
     float left_scale;      /* 左轮反馈和命令到模型正方向的比例。 */
     float right_scale;     /* 右轮反馈和命令到模型正方向的比例。 */
-    float T_limit;         /* 单轮LQR力矩请求限幅，N*m。 */
-    float T_to_I;          /* 轮力矩绝对方向到DJI原始电流的比例。 */
-    int16_t I_limit;       /* 单轮原始电流绝对值限幅。 */
+    float T_limit;         /* 单轮力矩限幅，N*m。轮通道唯一限幅点。 */
+    float T_to_I;          /* 轮力矩绝对方向到DJI原始电流的比例，已计入gear_ratio。 */
 } Chassis_Wheel_Config_t;
 
 /** @brief 前进速度和加速度二维Kalman滤波配置。 */
@@ -126,7 +126,7 @@ typedef struct
 {
     uint8_t joint_flag;
     uint8_t wheel_flag;
-    float joint_T_limit;
+    float joint_T_limit;   /* 关节力矩限幅，N*m。关节通道唯一限幅点。 */
 } Chassis_Output_Config_t;
 
 typedef struct
@@ -152,7 +152,6 @@ typedef struct
     float pitch_limit;       /* 站立pitch保护阈值，rad。 */
     float stand_phi0_min;    /* 站立phi0保护下限，rad。 */
     float stand_phi0_max;    /* 站立phi0保护上限，rad。 */
-    float joint_T_limit;     /* 恢复与板凳关节力矩限幅，N*m。 */
     float bench_L0_rate;     /* 板凳摇杆满杆的腿长调节速率，m/s。 */
     float bench_phi0_rate;   /* 板凳摇杆满杆的腿角调节速率，rad/s。 */
     float bench_L0_min;      /* 板凳可调腿长下限，m。 */
@@ -179,7 +178,6 @@ typedef struct
     float contact_T_fb;
     float contact_theta;
     float contact_time;
-    float peak_theta;
     float recover_theta;
     float L0_tol;
     float angle_tol;
@@ -188,33 +186,84 @@ typedef struct
     float approach_timeout;
     float climb_timeout;
     float recover_timeout;
+    /*
+     * CLIMB 两段摆腿：先后摆蓄势再前摆越过台阶，最后归正。
+     * phi0 为腿杆相对车体角，theta 为含pitch的腿摆绝对角，单位均为 rad。
+     */
+    float back_phi0_max;    /* 后摆腿杆角上限，超过改用PID保持。 */
+    float back_phi0_hold;   /* 后摆超限后的PID保持角。 */
+    float back_Tp;          /* 后摆虚拟腿摆力矩，N*m。 */
+    float back_theta_exit;  /* 后摆转前摆的腿摆绝对角。 */
+    float front_theta_max;  /* 前摆腿摆角上限，超过改用PID保持。 */
+    float front_phi0_hold;  /* 前摆超限后的PID保持角。 */
+    float front_Tp;         /* 前摆虚拟腿摆力矩，N*m。 */
+    float front_theta_exit; /* 前摆转归正的腿摆绝对角。 */
+    float home_phi0;        /* 归正目标腿杆角。 */
+    /* 台阶模式姿态保护，比站立放宽，对应HERO_LEG磕台阶抬高倒地阈值。 */
+    float pitch_limit;
+    float phi0_min;
+    float phi0_max;
     algorithm_pid_config_t leg_angle_pid;
 } Chassis_Step_Config_t;
 
-/** @brief 只用于Watch的打滑、离地和高速转向观测参数。 */
+/**
+ * @brief 整车实测机械与质量参数，控制前馈和观测统一从这里取。
+ *
+ * 每项注释同时记录MATLAB模型 ABK_LQR.m 的对应取值。两边不一致时，
+ * 固件里的K不是本车的最优增益，必须重新生成后才谈得上最终整定。
+ */
 typedef struct
 {
-    float gravity_mps2;
-    float body_mass_kg;
-    float leg_mass_kg;
-    float wheel_mass_kg;
-    float body_cg_to_hip_m;
+    float gravity;     /* 重力加速度，m/s^2。对应 g_ac。 */
+    float body_mass;   /* 机体质量，kg。对应 m_b_ac。 */
+    float leg_mass;    /* 单腿质量，kg。对应 m_l_ac。 */
+    float wheel_mass;  /* 单轮质量，kg。对应 m_w_ac。 */
+    float cg_to_hip;   /* 机体质心到腿部关节中心距离，m。对应 l_c_ac。 */
+} Chassis_Model_Config_t;
+
+/**
+ * @brief 整车总质量，与MATLAB模型的质量分解保持一致。
+ *
+ * 重力前馈和全部力类观测阈值都以它为基准，只在这里算一次。
+ */
+static inline float Chassis_Model_Mass(const Chassis_Model_Config_t *config)
+{
+    return config->body_mass +
+           2.0f * config->leg_mass +
+           2.0f * config->wheel_mass;
+}
+
+/** @brief 只用于Watch的打滑、离地、转向和卡腿观测参数。 */
+typedef struct
+{
     float residual_filter_s;
     float turn_filter_s;
     float normal_force_filter_s;
-    float slip_speed_enter_mps;
-    float slip_speed_exit_mps;
-    float slip_yaw_enter_radps;
-    float slip_yaw_exit_radps;
-    float slip_delta_enter_mps;
-    float slip_delta_exit_mps;
-    float slip_enter_s;
-    float slip_exit_s;
-    float off_force_ratio;
-    float land_force_ratio;
+    /* 打滑：先过闸门再判进入，退出由起始轮速锁存决定，不再用退出计时。 */
+    float slip_gate_yaw;      /* 闸门偏航残差阈值，rad/s。 */
+    float slip_gate_v;        /* 闸门轮速与整车速度差阈值，m/s。 */
+    float slip_v_enter;       /* 速度残差进入阈值，m/s。 */
+    float slip_yaw_enter;     /* 偏航残差进入阈值，rad/s。 */
+    float slip_dv_enter;      /* 轮速增量与加速度增量差进入阈值，m/s。 */
+    float slip_enter_s;       /* 进入条件连续满足时间，s。 */
+    /* 离地。 */
+    float off_force_ratio;    /* 判离地的支撑力/标称静载比。 */
+    float land_force_ratio;   /* 判落地的支撑力/标称静载比。 */
     float off_hold_s;
     float land_hold_s;
+    float off_F_comp_ratio;   /* 整车离地后建议下压推力，相对单腿静载的比例。 */
+    /* 转向。 */
+    float turn_v_diff;        /* 触发转弯半径计算的左右轮速差阈值，m/s。 */
     float turn_force_limit_ratio;
+    /* 卡腿。 */
+    float stuck_T_ratio;      /* 判卡腿的轮力矩阈值，相对wheel.T_limit的比例。 */
+    float stuck_theta_enter;  /* 判卡腿的腿摆角阈值，rad。 */
+    float stuck_theta_exit;   /* 退出卡腿计时的腿摆角阈值，rad。 */
+    float stuck_time;         /* 卡腿条件连续满足时间，s。 */
+    float stuck_F0_coef_ratio;/* 补偿轴向力增长速率，相对单腿静载的比例每秒。 */
+    float stuck_F0_max_ratio; /* 补偿轴向力上限，相对单腿静载的比例。 */
+    float stuck_L0_coef;      /* 建议收腿量随卡腿时间增长的速率，m/s。 */
+    float stuck_L0_max;       /* 建议收腿量上限，m。 */
 } Chassis_Observer_Config_t;
 
 /** @brief 双腿长poly22增益拟合的范围和系数表。 */
@@ -222,14 +271,24 @@ typedef struct
 {
     float L0_min; /* 当前系数实际采样腿长下限，m。 */
     float L0_max; /* 当前系数实际采样腿长上限，m。 */
-    float coefficients[CHASSIS_OUTPUT_COUNT][CHASSIS_STATE_COUNT]
-                      [ALGORITHM_LQR_POLY22_COEFFICIENT_COUNT];
+    /*
+     * 十维状态各自的误差限幅，进K点乘之前生效，0表示该项不限幅。
+     * 只限位置类状态，速度类保持不限，与参考工程一致。
+     */
+    float error_limit[CHASSIS_STATE_COUNT];
+    /*
+     * 展平成一维是为了能直接粘贴MATLAB输出，内存布局与[4][10][6]完全一致。
+     * 下标 = (输出序号 * CHASSIS_STATE_COUNT + 状态序号) * 系数个数 + 系数序号。
+     */
+    float coefficients[CHASSIS_OUTPUT_COUNT * CHASSIS_STATE_COUNT *
+                       ALGORITHM_LQR_POLY22_COEFFICIENT_COUNT];
 } Chassis_LQR_Config_t;
 
 /** @brief 底盘控制唯一只读配置，集中保存机械、模型和安全参数。 */
 typedef struct
 {
     Chassis_Leg_Config_t leg[CHASSIS_LEG_COUNT];
+    Chassis_Model_Config_t model;
     Chassis_IMU_Config_t imu;
     Chassis_Wheel_Config_t wheel;
     Chassis_Kalman_Config_t speed_kalman;
@@ -243,7 +302,7 @@ typedef struct
     Chassis_Output_Config_t output;
     float phi0_offset;                /* phi0换算theta时的竖直零点，rad。 */
     float roll_target;                /* 机体横滚目标，rad。 */
-    float F0_base;                    /* 两腿公共基础支撑力，N。 */
+    float F0_gravity_scale;           /* 重力前馈整定系数，1.0为按实测质量足额补偿。 */
     float F0_left;                    /* 左腿支撑力静态修正，N。 */
     float F0_right;                   /* 右腿支撑力静态修正，N。 */
     float default_dt;               /* 控制周期异常时采用的默认dt，s。 */

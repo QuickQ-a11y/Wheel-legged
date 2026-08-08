@@ -112,6 +112,9 @@ static void Chassis_Command_Send(void)
     }
 
     /* 更新两类发送缓存后只提交最新命令，不等待ACK或重发旧帧。 */
+    // Chassis.output.I_wheel[0] = 400;
+    // Chassis.output.I_wheel[0] = 0;
+    // Chassis.output.I_wheel[1] = 0;
     CAN_Task_SetDjiCurrent(Chassis.output.I_wheel);
     Motor_DM_UpdateTxFrames();
     CAN_Task_RequestTx();

@@ -56,6 +56,14 @@ typedef enum
     CHASSIS_STEP_RECOVER,
 } Chassis_Step_Phase_t;
 
+/* CLIMB阶段单腿摆动子步，两段摆腿结构取自HERO_LEG磕台阶控制。 */
+typedef enum
+{
+    CHASSIS_SWING_BACK = 0, /* 后摆蓄势。 */
+    CHASSIS_SWING_FRONT,    /* 前摆越过台阶。 */
+    CHASSIS_SWING_HOME,     /* 归正到常规腿角。 */
+} Chassis_Swing_t;
+
 typedef struct
 {
     uint8_t init_flag;           /* BMI088硬件初始化完成。 */
@@ -119,6 +127,7 @@ typedef struct
 {
     float x[CHASSIS_STATE_COUNT];
     float target[CHASSIS_STATE_COUNT];
+    float error[CHASSIS_STATE_COUNT]; /* 限幅后实际进K点乘的误差。 */
     float scale[CHASSIS_STATE_COUNT];
     float K[CHASSIS_OUTPUT_COUNT][CHASSIS_STATE_COUNT];
     uint8_t limit_flag;
@@ -165,13 +174,19 @@ struct Chassis
     Chassis_Leg_t leg[CHASSIS_LEG_COUNT];
     Chassis_Body_t body;
     Chassis_LQR_t lqr;
-    Chassis_Observer_t observer;
+
+    /* 四套互不依赖的只读观测，各自拥有一份状态，不参与控制输出。 */
+    Chassis_Slip_t slip;
+    Chassis_Ground_t ground;
+    Chassis_Turn_t turn;
+    Chassis_Stuck_t stuck;
 
     /* 小陀螺与爬台阶模式的最小跨周期状态。 */
     float top_fai;
     float top_d_s;
     float step_fai;
     Chassis_Step_Phase_t step_phase;
+    Chassis_Swing_t swing[CHASSIS_LEG_COUNT]; /* CLIMB阶段单腿摆动子步。 */
     float contact_time[CHASSIS_LEG_COUNT];
     uint8_t step_contact_flag[CHASSIS_LEG_COUNT];
     uint8_t step_contact_latch_flag[CHASSIS_LEG_COUNT];
