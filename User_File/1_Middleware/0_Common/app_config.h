@@ -64,13 +64,13 @@ extern "C" {
 #define APP_DR16_DIAL 400
 
 /* 与具体遥控协议无关的底盘运动目标。 */
-#define APP_RC_MAX_VEL 0.5f
+#define APP_RC_MAX_VEL 2.0f
 #define APP_RC_MAX_YAW 1.0f
 #define APP_RC_VEL_RATE 1.0f
 #define APP_RC_YAW_RATE 2.0f
-#define APP_RC_LEG_S 0.12f
-#define APP_RC_LEG_M 0.15f
-#define APP_RC_LEG_L 0.20f
+#define APP_RC_LEG_S 0.08f
+#define APP_RC_LEG_M 0.10f
+#define APP_RC_LEG_L 0.15f
 
 /*
  * 控制器第一阶段只计算中间状态和安全输出。

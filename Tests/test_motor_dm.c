@@ -27,9 +27,19 @@ void CAN_Task_UpdateTxFrame(FDCAN_HandleTypeDef *handle,
                             const uint8_t *data,
                             uint8_t length)
 {
-    assert(handle == &hfdcan1);
+    assert((handle == &hfdcan1) || (handle == &hfdcan2));
     assert(length == APP_DM_FRAME_LEN);
     assert(captured_count < MOTOR_DM_COUNT);
+    if ((identifier == APP_DM_LF_ID) || (identifier == APP_DM_LB_ID))
+    {
+        assert(handle == &hfdcan1);
+    }
+    else
+    {
+        assert((identifier == APP_DM_RF_ID) ||
+               (identifier == APP_DM_RB_ID));
+        assert(handle == &hfdcan2);
+    }
     captured_identifier[captured_count] = identifier;
     memcpy(captured_data[captured_count], data, APP_DM_FRAME_LEN);
     captured_count++;
@@ -96,6 +106,12 @@ static void testFeedbackRoutingAndRawMapping(void)
         APP_DM_RF_FB,
         APP_DM_RB_FB,
     };
+    const app_can_bus_t buses[MOTOR_DM_COUNT] = {
+        APP_CAN_BUS_FDCAN1,
+        APP_CAN_BUS_FDCAN1,
+        APP_CAN_BUS_FDCAN2,
+        APP_CAN_BUS_FDCAN2,
+    };
     uint8_t data[APP_DM_FRAME_LEN];
     uint32_t index;
 
@@ -107,9 +123,9 @@ static void testFeedbackRoutingAndRawMapping(void)
 
         test_tick++;
         makeFeedback(motor_id, 1U, 1.0f, 3.0f, 2.0f, data);
-        Motor_DM_UpdateFeedback(APP_CAN_BUS_FDCAN1,
-                                feedback_ids[index],
-                                data);
+        assert(Motor_DM_UpdateFeedback(buses[index],
+                                       feedback_ids[index],
+                                       data) != 0U);
         Motor_DM_GetState(indices[index], &state);
         assert(state.feedbackCount == 1U);
         assert(state.state == 1U);
@@ -122,9 +138,9 @@ static void testFeedbackRoutingAndRawMapping(void)
     }
 
     makeFeedback(1U, 1U, 0.0f, 0.0f, 0.0f, data);
-    Motor_DM_UpdateFeedback(APP_CAN_BUS_FDCAN1,
-                            APP_DM_RB_FB + 1U,
-                            data);
+    assert(Motor_DM_UpdateFeedback(APP_CAN_BUS_FDCAN1,
+                                   APP_DM_RB_FB + 1U,
+                                   data) == 0U);
     {
         motor_dm_state_t state = {0};
         Motor_DM_GetState(MOTOR_DM_LEFT_FRONT, &state);
@@ -133,13 +149,24 @@ static void testFeedbackRoutingAndRawMapping(void)
 
     Motor_DM_Init();
     makeFeedback(2U, 1U, 0.0f, 0.0f, 0.0f, data);
-    Motor_DM_UpdateFeedback(APP_CAN_BUS_FDCAN1,
-                            APP_DM_LF_FB,
-                            data);
+    assert(Motor_DM_UpdateFeedback(APP_CAN_BUS_FDCAN1,
+                                   APP_DM_LF_FB,
+                                   data) == 0U);
     for (index = 0U; index < MOTOR_DM_COUNT; index++)
     {
         motor_dm_state_t state = {0};
         Motor_DM_GetState((motor_dm_index_t)index, &state);
+        assert(state.feedbackCount == 0U);
+    }
+
+    Motor_DM_Init();
+    makeFeedback(3U, 1U, 0.0f, 0.0f, 0.0f, data);
+    assert(Motor_DM_UpdateFeedback(APP_CAN_BUS_FDCAN1,
+                                   APP_DM_RF_FB,
+                                   data) == 0U);
+    {
+        motor_dm_state_t state = {0};
+        Motor_DM_GetState(MOTOR_DM_RIGHT_FRONT, &state);
         assert(state.feedbackCount == 0U);
     }
 }
@@ -308,9 +335,9 @@ static void testEnableRetryOnlyForDisabledMotor(void)
     makeFeedback(2U, 0U, 0.0f, 0.0f, 0.0f, data);
     Motor_DM_UpdateFeedback(APP_CAN_BUS_FDCAN1, APP_DM_LB_FB, data);
     makeFeedback(3U, 8U, 0.0f, 0.0f, 0.0f, data);
-    Motor_DM_UpdateFeedback(APP_CAN_BUS_FDCAN1, APP_DM_RF_FB, data);
+    Motor_DM_UpdateFeedback(APP_CAN_BUS_FDCAN2, APP_DM_RF_FB, data);
     makeFeedback(4U, 1U, 0.0f, 0.0f, 0.0f, data);
-    Motor_DM_UpdateFeedback(APP_CAN_BUS_FDCAN1, APP_DM_RB_FB, data);
+    Motor_DM_UpdateFeedback(APP_CAN_BUS_FDCAN2, APP_DM_RB_FB, data);
 
     test_tick += APP_DM_EN_RETRY;
     captured_count = 0U;

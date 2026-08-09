@@ -231,6 +231,7 @@ static inline float Chassis_Model_Mass(const Chassis_Model_Config_t *config)
     return config->body_mass +
            2.0f * config->leg_mass +
            2.0f * config->wheel_mass;
+    // return config->body_mass;
 }
 
 /** @brief 只用于Watch的打滑、离地、转向和卡腿观测参数。 */

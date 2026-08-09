@@ -50,11 +50,11 @@ typedef struct
 void Motor_DM_Init(void);
 
 /**
- * @brief 解析一帧 DM MIT 反馈。
+ * @brief 尝试解析一帧 DM MIT 反馈，成功匹配并更新状态时返回 1。
  */
-void Motor_DM_UpdateFeedback(app_can_bus_t bus,
-                             uint32_t identifier,
-                             const uint8_t data[APP_DM_FRAME_LEN]);
+uint8_t Motor_DM_UpdateFeedback(app_can_bus_t bus,
+                                uint32_t identifier,
+                                const uint8_t data[APP_DM_FRAME_LEN]);
 
 /**
  * @brief 设置单个 DM 电机命令缓存。

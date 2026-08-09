@@ -93,11 +93,11 @@ void Motor_DM_Init(void)
                             APP_DM_LB_ID,
                             APP_DM_LB_FB};
     dmMotors[MOTOR_DM_RIGHT_FRONT].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN1,
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN2,
                             APP_DM_RF_ID,
                             APP_DM_RF_FB};
     dmMotors[MOTOR_DM_RIGHT_BACK].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN1,
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN2,
                             APP_DM_RB_ID,
                             APP_DM_RB_FB};
 
@@ -107,9 +107,9 @@ void Motor_DM_Init(void)
     memset(dmEnableTick, 0, sizeof(dmEnableTick));
 }
 
-void Motor_DM_UpdateFeedback(app_can_bus_t bus,
-                             uint32_t identifier,
-                             const uint8_t data[APP_DM_FRAME_LEN])
+uint8_t Motor_DM_UpdateFeedback(app_can_bus_t bus,
+                                uint32_t identifier,
+                                const uint8_t data[APP_DM_FRAME_LEN])
 {
     uint8_t feedbackMotorId;
     uint32_t nowTick;
@@ -128,7 +128,7 @@ void Motor_DM_UpdateFeedback(app_can_bus_t bus,
         }
         if ((motor->config.commandId & 0x0FU) != feedbackMotorId)
         {
-            return;
+            return 0U;
         }
 
         uint16_t positionRaw = ((uint16_t)data[1] << 8U) | (uint16_t)data[2];
@@ -170,8 +170,10 @@ void Motor_DM_UpdateFeedback(app_can_bus_t bus,
         motor->state.lastUpdateTick = nowTick;
         motor->state.isOnline = 1U;
 
-        return;
+        return 1U;
     }
+
+    return 0U;
 }
 
 void Motor_DM_SetCommand(motor_dm_index_t index,

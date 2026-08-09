@@ -951,15 +951,15 @@ static void LQR_Calc(void)
         }
     }
 
-    Chassis.lqr.scale[CHASSIS_STATE_FAI] = 0.0;
-    Chassis.lqr.scale[CHASSIS_STATE_D_FAI] = 0.0f;
+    // Chassis.lqr.scale[CHASSIS_STATE_FAI] = 0.0;
+    // Chassis.lqr.scale[CHASSIS_STATE_D_FAI] = 0.0f;
     // Chassis.lqr.scale[CHASSIS_STATE_S] = 0.0f;
     // Chassis.lqr.scale[CHASSIS_STATE_D_S] = 1.0f;
     // Chassis.lqr.scale[CHASSIS_STATE_THETA_L] = 0.0f;
     // Chassis.lqr.scale[CHASSIS_STATE_D_THETA_L] = 0.0f;
 
-    Chassis.lqr.scale[CHASSIS_STATE_THETA_B] = 0.0f;
-    Chassis.lqr.scale[CHASSIS_STATE_D_THETA_B] = 0.0f;
+    // Chassis.lqr.scale[CHASSIS_STATE_THETA_B] = 0.0f;
+    // Chassis.lqr.scale[CHASSIS_STATE_D_THETA_B] = 0.0f;
     /*
      * 误差先按状态限幅再进K点乘，防止位移积累或姿态瞬时越界时单一状态项
      * 主导四路输出。限幅只作用在误差输入端，不改K、不改状态顺序。
@@ -1312,17 +1312,22 @@ void Chassis_Control(void)
                 Chassis_Config.model.gravity *
                 Chassis_Config.F0_gravity_scale *
                 cosf(Chassis.leg[side].theta);
+            // gravity_force[side] =
+            //     -0.5f * Chassis_Config.model.body_mass *
+            //     Chassis_Config.model.gravity *
+            //     Chassis_Config.F0_gravity_scale *
+            //     cosf(Chassis.leg[side].theta);
         }
         Chassis.leg[CHASSIS_LEFT].F0 =
             // -roll_force + 
-            length_force[CHASSIS_LEFT];
-            // gravity_force[CHASSIS_LEFT] +
-            // Chassis_Config.F0_left;
+            length_force[CHASSIS_LEFT] -
+            gravity_force[CHASSIS_LEFT] +
+            Chassis_Config.F0_left;
         Chassis.leg[CHASSIS_RIGHT].F0 =
             // roll_force + 
-            length_force[CHASSIS_RIGHT];
-            // gravity_force[CHASSIS_RIGHT] -
-            // Chassis_Config.F0_right;
+            length_force[CHASSIS_RIGHT] -
+            gravity_force[CHASSIS_RIGHT] -
+            Chassis_Config.F0_right;
     }
 
     /* 4. 始终根据左右实时腿长拟合K，固定目标腿长不伪造K输入。 */
