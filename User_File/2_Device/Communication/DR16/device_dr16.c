@@ -153,24 +153,40 @@ void DR16_MakeRemote(const dr16_data_t *data,
         converted.dial = DR16_NormalizeAxis(data->dial, deadband);
     }
 
-    switch (data->leftSwitch)
+    /*
+     * 右拨杆决定使能级别，右上时才由左拨杆选模式。
+     * 具体档位对应哪个模式全部由 remote_input.h 的 REMOTE_MAP_* 决定，
+     * 改拨杆分配不需要动这里。右下急停由 rightSwitch 字段单独上报。
+     */
+    if (converted.rightSwitch == REMOTE_SWITCH_MID)
     {
-    case DR16_SWITCH_UP:
-        converted.modeRequest = REMOTE_MODE_FOLLOW;
-        break;
+        converted.modeRequest = REMOTE_MAP_RIGHT_MID;
+    }
+    else if (converted.rightSwitch == REMOTE_SWITCH_UP)
+    {
+        switch (converted.leftSwitch)
+        {
+        case REMOTE_SWITCH_UP:
+            converted.modeRequest = REMOTE_MAP_LEFT_UP;
+            break;
 
-    case DR16_SWITCH_MID:
-        converted.modeRequest = REMOTE_MODE_BENCH;
-        break;
+        case REMOTE_SWITCH_MID:
+            converted.modeRequest = REMOTE_MAP_LEFT_MID;
+            break;
 
-    case DR16_SWITCH_DOWN:
-        converted.modeRequest = REMOTE_MODE_SELF_SAVE;
-        break;
+        case REMOTE_SWITCH_DOWN:
+            converted.modeRequest = REMOTE_MAP_LEFT_DOWN;
+            break;
 
-    case DR16_SWITCH_UNKNOWN:
-    default:
+        case REMOTE_SWITCH_UNKNOWN:
+        default:
+            converted.modeRequest = REMOTE_MODE_NONE;
+            break;
+        }
+    }
+    else
+    {
         converted.modeRequest = REMOTE_MODE_NONE;
-        break;
     }
 
     if (data->dialValid == 0U)

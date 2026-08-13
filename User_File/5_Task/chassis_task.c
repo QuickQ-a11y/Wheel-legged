@@ -33,7 +33,6 @@ static void Chassis_Feedback_Update(void)
     Chassis.imu.error_code = imuState.lastErrorCode;
     Chassis.imu.roll = imuState.rollRad;
     Chassis.imu.pitch = imuState.pitchRad;
-    Chassis.imu.yaw = imuState.yawRad;
     Chassis.imu.yaw_total = imuState.yawTotalRad;
     memcpy(Chassis.imu.gyro,
            imuState.filteredGyroRadps,
@@ -57,6 +56,7 @@ static void Chassis_Feedback_Update(void)
         Motor_DM_GetState((motor_dm_index_t)index, &motorState);
         Chassis.dm_motor[index].online_flag =
             Motor_DM_IsOnline((motor_dm_index_t)index, nowTick);
+        Chassis.dm_motor[index].err_state = motorState.state;
         Chassis.dm_motor[index].position_rad = motorState.positionRad;
         Chassis.dm_motor[index].speed_radps = motorState.velocityRadps;
         Chassis.dm_motor[index].torque_nm = motorState.torqueNm;
@@ -208,6 +208,5 @@ static void Chassis_Task_Entry(void *argument)
 void Chassis_Task_Init(void)
 {
     Chassis_Init();
-    Chassis_Remote_Init();
     (void)osThreadNew(Chassis_Task_Entry, NULL, &chassisTaskAttributes);
 }

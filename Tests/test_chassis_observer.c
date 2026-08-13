@@ -141,13 +141,14 @@ int main(void)
     chassis.body.side_speed[CHASSIS_LEFT] = 1.0f;
     chassis.body.side_speed[CHASSIS_RIGHT] = 1.0f;
     chassis.imu.body_accel[0] = 20.0f;
-    set_feedback_force(&config, &chassis, -80.0f);
+    /* F0大于零为伸腿撑地，正常承载用正值。 */
+    set_feedback_force(&config, &chassis, 80.0f);
     run_observers(&config, &chassis);
     assert(chassis.slip.init_flag == 1U);
     assert(chassis.ground.init_flag == 1U);
     assert(chassis.slip.dv_res[CHASSIS_LEFT] == 0.0f);
     assert(chassis.ground.valid_flag[CHASSIS_LEFT] == 1U);
-    assert(fabsf(chassis.ground.force[CHASSIS_LEFT].F0 + 80.0f) <
+    assert(fabsf(chassis.ground.force[CHASSIS_LEFT].F0 - 80.0f) <
            TEST_TOLERANCE);
 
     /* 左轮加速打滑：轮速残差和偏航残差同时超阈值，闸门成立后判定打滑。 */
@@ -230,7 +231,7 @@ int main(void)
     assert(chassis.ground.all_off_flag == 0U);
     chassis.state = CHASSIS_STANDING;
 
-    set_feedback_force(&config, &chassis, -80.0f);
+    set_feedback_force(&config, &chassis, 80.0f);
     for (iteration = 0U; iteration < 6U; iteration++)
     {
         run_observers(&config, &chassis);

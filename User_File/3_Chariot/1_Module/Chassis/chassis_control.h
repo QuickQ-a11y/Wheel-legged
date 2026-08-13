@@ -24,6 +24,7 @@ extern "C" {
 #define CHASSIS_FAULT_RECOVERY_TIMEOUT 0x00000080UL /* 恢复动作阶段超时。 */
 #define CHASSIS_FAULT_REMOTE 0x00000100UL         /* 遥控器离线或收到急停请求。 */
 #define CHASSIS_FAULT_STEP_TIMEOUT 0x00000200UL   /* 爬台阶动作阶段超时。 */
+#define CHASSIS_FAULT_DM_ERROR 0x00000400UL       /* 至少一个髋关节报错误状态。 */
 
 /* 外部请求模式：表示操作者想让底盘执行的行为。 */
 typedef enum
@@ -71,7 +72,6 @@ typedef struct
     uint32_t error_code;         /* IMU任务最近错误码。 */
     float roll;                  /* 整车右手系横滚角，rad。 */
     float pitch;                 /* 整车右手系俯仰角，rad。 */
-    float yaw;                   /* 归一化偏航角，rad。 */
     float yaw_total;             /* 本次上电期间连续偏航角，rad。 */
     float gyro[APP_IMU_AXIS_COUNT];       /* rad/s。 */
     float body_accel[APP_IMU_AXIS_COUNT]; /* 整车坐标运动加速度，m/s^2。 */
@@ -81,6 +81,7 @@ typedef struct
 typedef struct
 {
     uint8_t online_flag;         /* 最近超时窗口内收到反馈。 */
+    uint8_t err_state;           /* DM反馈状态位：0失能 1使能 8~E错误。 */
     float position_rad;          /* 连续展开电机角，单位 rad。 */
     float speed_radps;           /* 电机角速度，单位 rad/s。 */
     float torque_nm;             /* 电机反馈力矩，单位 N*m。 */
@@ -99,9 +100,7 @@ typedef struct
     float d_s;               /* 期望前进速度，m/s。 */
     float d_y;               /* 小陀螺参考系横向速度，m/s。 */
     float d_fai;             /* 期望偏航角速度，rad/s。 */
-    float fai;               /* 连续航向目标，rad。 */
     float L0;                /* 左右对称目标腿长，m。 */
-    float fai_anchor;        /* 航向摇杆连续锚点，rad。 */
     float bench_d_L0[CHASSIS_LEG_COUNT];   /* 板凳单腿腿长调节速率，m/s。 */
     float bench_d_phi0[CHASSIS_LEG_COUNT]; /* 板凳单腿腿角调节速率，rad/s。 */
 } Chassis_Goal_t;
@@ -116,8 +115,6 @@ typedef struct
     float dd_s_fused;
     float fai;
     float d_fai;
-    float theta_b;               /* 机体俯仰角，rad。 */
-    float d_theta_b;             /* 机体俯仰角速度，rad/s。 */
     float wheel_speed[CHASSIS_LEG_COUNT]; /* 轮轴角速度，rad/s。 */
     float side_speed[CHASSIS_LEG_COUNT];  /* 单侧轮腿速度估计，m/s。 */
 } Chassis_Body_t;
@@ -129,8 +126,7 @@ typedef struct
     float target[CHASSIS_STATE_COUNT];
     float error[CHASSIS_STATE_COUNT]; /* 限幅后实际进K点乘的误差。 */
     float scale[CHASSIS_STATE_COUNT];
-    float K[CHASSIS_OUTPUT_COUNT][CHASSIS_STATE_COUNT];
-    uint8_t limit_flag;
+    uint8_t limit_flag;               /* 拟合腿长被L0_min/L0_max夹紧。 */
 } Chassis_LQR_t;
 
 /** @brief 控制请求与通过安全门后的实际电机命令。 */
@@ -160,11 +156,7 @@ struct Chassis
     Chassis_DJI_Motor_t wheel_motor[APP_WHEEL_COUNT];
     uint8_t remote_online_flag;     /* 当前遥控输入后端处于在线状态。 */
     uint8_t remote_stop_flag;       /* 急停请求，只封锁最终电机输出。 */
-    uint8_t remote_ready_flag;      /* 已上线且收到FOLLOW请求。 */
-    uint8_t remote_target_flag;     /* 已建立过遥控目标，离线时保持腿长目标。 */
-    uint8_t recovery_latch_flag;    /* 阻止持续SELF_SAVE请求重复触发。 */
-    remote_mode_request_t last_mode_request; /* 上一轮模式请求，供自救单次触发取边沿。 */
-    uint8_t yaw_stick_flag;         /* 航向摇杆已离开中位，锚点已建立。 */
+    uint8_t yaw_stick_flag;         /* 航向摇杆已离开中位，供松杆边沿锁存航向。 */
     uint32_t can_error_count;
     float dt;                       /* 本轮实际控制周期，s。 */
 

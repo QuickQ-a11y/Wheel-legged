@@ -254,9 +254,13 @@ void Chassis_Ground_Update(const Chassis_Config_t *config, Chassis_t *chassis)
                 2.0f * leg->d_L0 * leg->d_theta * sinf(leg->theta) +
                 leg->L0 * ground->dd_theta[side] * sinf(leg->theta) +
                 leg->L0 * leg->d_theta * leg->d_theta * cosf(leg->theta);
+            /*
+             * 本工程约定F0大于零为伸腿撑地，故支撑力与F0同号。
+             * HERO_LEG用的是相反约定，其公式在此处会让站立时Fn恒为负。
+             */
             float Fn =
-                -(ground->force[side].F0 * cosf(leg->theta) +
-                  ground->force[side].Tp * sinf(leg->theta) / leg->L0) +
+                (ground->force[side].F0 * cosf(leg->theta) +
+                 ground->force[side].Tp * sinf(leg->theta) / leg->L0) +
                 config->model.leg_mass *
                     (config->model.gravity + leg_accel);
 

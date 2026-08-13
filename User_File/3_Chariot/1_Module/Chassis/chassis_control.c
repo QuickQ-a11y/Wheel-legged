@@ -12,10 +12,17 @@
 #define CHASSIS_RPM_TO_RADPS 0.10471975512f
 #define CHASSIS_OUTPUT_FAULT_MASK                                         \
     (CHASSIS_FAULT_DISABLED | CHASSIS_FAULT_IMU |                       \
-     CHASSIS_FAULT_DM_MOTOR | CHASSIS_FAULT_DJI_MOTOR | CHASSIS_FAULT_CAN | \
+     CHASSIS_FAULT_DM_MOTOR | CHASSIS_FAULT_DM_ERROR |                  \
+     CHASSIS_FAULT_DJI_MOTOR | CHASSIS_FAULT_CAN |                      \
      CHASSIS_FAULT_KINEMATICS | CHASSIS_FAULT_REMOTE)
 
 Chassis_t Chassis;
+
+/*
+ * K矩阵每周期由 leg[].L0 重算后当周期用完，不跨周期携带信息，因此放在文件
+ * 作用域而不挂进 Chassis，避免 Watch 树里多出 40 个派生量。调试器仍可观察。
+ */
+static float lqrK[CHASSIS_OUTPUT_COUNT][CHASSIS_STATE_COUNT];
 
 static void Control_Reset(void);
 
@@ -36,68 +43,55 @@ static float Move_Toward(float value, float target, float maximum_step)
 }
 
 /**
- * @brief 将遥控运动目标按当前控制周期写入正常站立目标。
+ * @brief 将遥控运动目标写入正常站立的十维目标，不做斜坡。
  *
- * 速度和航向目标使用独立变化率限制；航向目标的差分同时作为十维
- * LQR的目标角速度，避免只改变角度而产生不一致的参考轨迹。
+ * 位移和航向都按"有输入走速度、松杆锁位置"处理：
+ * 有前进输入时位移状态在本文件后段被清零，位移项不参与，只跟速度；
+ * 松杆后位移从零开始积分，把车锁在松杆位置。
+ * 有偏航输入时航向目标按给定角速度积分；松杆瞬间锁存当前航向并保持，
+ * 偏航角速度目标同时清零。
  */
 static void Motion_Update(void)
 {
     float dt = Chassis.dt;
-    float model_yaw_rad;
+    float model_yaw_rad = Chassis.imu.yaw_total *
+                          Chassis_Config.imu.yaw_angle_scale;
     float top_phase_rad;
-    float yaw_step_rad;
-
-    if (Chassis.remote_target_flag == 0U)
-    {
-        Chassis.lqr.target[CHASSIS_STATE_D_S] =
-            Move_Toward(Chassis.lqr.target[CHASSIS_STATE_D_S],
-                               0.0f,
-                               APP_RC_VEL_RATE * dt);
-        Chassis.lqr.target[CHASSIS_STATE_D_FAI] =
-            Move_Toward(
-                Chassis.lqr.target[CHASSIS_STATE_D_FAI],
-                0.0f,
-                APP_RC_YAW_RATE * dt);
-        return;
-    }
 
     if (Chassis.mode == CHASSIS_MODE_TOP)
     {
-        model_yaw_rad = Chassis.imu.yaw_total *
-                        Chassis_Config.imu.yaw_angle_scale;
         top_phase_rad = model_yaw_rad - Chassis.top_fai;
         Chassis.top_d_s =
             Chassis.goal.d_s * cosf(top_phase_rad) +
             Chassis.goal.d_y * sinf(top_phase_rad);
-        Chassis.lqr.target[CHASSIS_STATE_D_S] =
-            Move_Toward(Chassis.lqr.target[CHASSIS_STATE_D_S],
-                               Chassis.top_d_s,
-                               APP_RC_VEL_RATE * dt);
+        Chassis.lqr.target[CHASSIS_STATE_D_S] = Chassis.top_d_s;
+        /* 小陀螺持续旋转，航向目标始终跟随实际，只靠角速度控制。 */
         Chassis.lqr.target[CHASSIS_STATE_FAI] = model_yaw_rad;
-        Chassis.lqr.target[CHASSIS_STATE_D_FAI] =
-            Move_Toward(
-                Chassis.lqr.target[CHASSIS_STATE_D_FAI],
-                Chassis.goal.d_fai,
-                APP_RC_YAW_RATE * dt);
+        Chassis.lqr.target[CHASSIS_STATE_D_FAI] = Chassis.goal.d_fai;
+        Chassis.yaw_stick_flag = 0U;
     }
     else
     {
         Chassis.top_d_s = 0.0f;
-        Chassis.lqr.target[CHASSIS_STATE_D_S] =
-            Move_Toward(Chassis.lqr.target[CHASSIS_STATE_D_S],
-                               Chassis.goal.d_s,
-                               APP_RC_VEL_RATE * dt);
+        Chassis.lqr.target[CHASSIS_STATE_D_S] = Chassis.goal.d_s;
 
-        yaw_step_rad = Algorithm_LimitSymmetric(
-            Chassis.goal.fai -
-                Chassis.lqr.target[CHASSIS_STATE_FAI],
-            APP_RC_YAW_RATE * dt);
-        Chassis.lqr.target[CHASSIS_STATE_FAI] += yaw_step_rad;
-        if (dt > 0.0f)
+        if (Chassis.goal.d_fai != 0.0f)
         {
-            Chassis.lqr.target[CHASSIS_STATE_D_FAI] =
-                yaw_step_rad / dt;
+            /* 有偏航输入：按给定角速度积分出航向目标。 */
+            Chassis.lqr.target[CHASSIS_STATE_D_FAI] = Chassis.goal.d_fai;
+            Chassis.lqr.target[CHASSIS_STATE_FAI] +=
+                Chassis.goal.d_fai * dt;
+            Chassis.yaw_stick_flag = 1U;
+        }
+        else
+        {
+            Chassis.lqr.target[CHASSIS_STATE_D_FAI] = 0.0f;
+            if (Chassis.yaw_stick_flag != 0U)
+            {
+                /* 松杆瞬间锁存当前航向，清掉转向期间的跟踪误差后保持。 */
+                Chassis.lqr.target[CHASSIS_STATE_FAI] = model_yaw_rad;
+                Chassis.yaw_stick_flag = 0U;
+            }
         }
     }
 
@@ -155,7 +149,14 @@ static uint32_t Output_Fault_Get(void)
         if (Chassis.dm_motor[index].online_flag == 0U)
         {
             fault |= CHASSIS_FAULT_DM_MOTOR;
-            break;
+        }
+        /*
+         * DM反馈状态0为失能、1为使能，8~E为超压、欠压、过流、过温、通讯丢失和过载。
+         * 电机报错后会自行退出使能但仍在发反馈帧，只判online会漏掉这类静默失效。
+         */
+        if (Chassis.dm_motor[index].err_state >= 8U)
+        {
+            fault |= CHASSIS_FAULT_DM_ERROR;
         }
     }
   if ((Chassis.state != CHASSIS_BENCH) ||
@@ -352,9 +353,7 @@ void Chassis_Init(void)
     Chassis.goal.d_s = 0.0f;
     Chassis.goal.d_y = 0.0f;
     Chassis.goal.d_fai = 0.0f;
-    Chassis.goal.fai = 0.0f;
     Chassis.goal.L0 = APP_RC_LEG_M;
-    Chassis.goal.fai_anchor = 0.0f;
     memcpy(Chassis.lqr.target,
            Chassis_Config.target,
            sizeof(Chassis.lqr.target));
@@ -732,9 +731,22 @@ void Chassis_Recovery(void)
         (Chassis.leg[CHASSIS_RIGHT].valid_flag == 0U))
     {
         /*
-         * 当前腿姿态不足以推进恢复阶段时冻结计时和跳转，但仍运行已有
-         * 目标下的关节串级控制，保留可定义请求量供Watch观察。
+         * 当前腿姿态不足以推进恢复阶段时冻结阶段跳转，但仍运行已有目标下
+         * 的关节串级控制，保留可定义请求量供Watch观察。
+         * 计时必须继续：几何长期无解会让恢复永不超时，模式和状态一起锁死。
          */
+        float stuck_timeout = (Chassis.state == CHASSIS_FALLEN) ?
+                                  recovery->fallen_timeout :
+                                  recovery->prepare_timeout;
+
+        Chassis.state_time += dt;
+        if (Chassis.state_time >= stuck_timeout)
+        {
+            Chassis_Zero_Output();
+            Chassis.fault = CHASSIS_FAULT_RECOVERY_TIMEOUT;
+            State_Enter(CHASSIS_ZERO_FORCE);
+            return;
+        }
         Joint_Control();
         return;
     }
@@ -980,7 +992,7 @@ static void LQR_Calc(void)
         for (state = 0U; state < CHASSIS_STATE_COUNT; state++)
         {
             control_output +=
-                Chassis.lqr.K[output][state] *
+                lqrK[output][state] *
                 Chassis.lqr.error[state] *
                 Chassis.lqr.scale[state];
         }
@@ -1125,17 +1137,6 @@ void Chassis_Control(void)
     if (Chassis.state == CHASSIS_STANDING)
     {
         Motion_Update();
-        if (Chassis.remote_target_flag == 0U)
-        {
-            for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
-            {
-                Chassis.leg[side].target_L0 =
-                    Move_Toward(
-                        Chassis.leg[side].target_L0,
-                        Chassis_Config.leg[side].target_L0,
-                        Chassis_Config.recovery.L0_rate * dt);
-            }
-        }
     }
 
     /* 轮速、IMU 和腿部状态组成速度融合的两个测量量。 */
@@ -1227,8 +1228,6 @@ void Chassis_Control(void)
     Chassis.body.d_fai =
         Chassis.imu.gyro[Chassis_Config.imu.yaw_rate_axis] *
         Chassis_Config.imu.yaw_rate_scale;
-    Chassis.body.theta_b = theta_b;
-    Chassis.body.d_theta_b = d_theta_b;
 
     /* 十维数组只表达模型接口，物理状态在 body 和 leg 中各有唯一所有者。 */
     Chassis.lqr.x[CHASSIS_STATE_S] = Chassis.body.s;
@@ -1243,8 +1242,8 @@ void Chassis_Control(void)
         Chassis.leg[CHASSIS_RIGHT].theta;
     Chassis.lqr.x[CHASSIS_STATE_D_THETA_R] =
         Chassis.leg[CHASSIS_RIGHT].d_theta;
-    Chassis.lqr.x[CHASSIS_STATE_THETA_B] = Chassis.body.theta_b;
-    Chassis.lqr.x[CHASSIS_STATE_D_THETA_B] = Chassis.body.d_theta_b;
+    Chassis.lqr.x[CHASSIS_STATE_THETA_B] = theta_b;
+    Chassis.lqr.x[CHASSIS_STATE_D_THETA_B] = d_theta_b;
     /*
      * 四套只读观测，各自先算观测量再出判定。
      * 顺序有依赖：转向的转弯半径要先知道是否打滑，卡腿要先知道是否整车离地。
@@ -1303,7 +1302,7 @@ void Chassis_Control(void)
         /*
          * 重力前馈：整车重力在虚拟腿轴向的投影，单腿承担一半。
          * 腿摆得越靠前或靠后，轴向需要承担的分量越小，因此乘cos(theta)。
-         * F0符号约定为负向撑地，前馈取负值。
+         * F0符号约定为正向撑地，gravity_force取负值后由下方减号还原成正贡献。
          */
         for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
         {
@@ -1319,13 +1318,15 @@ void Chassis_Control(void)
             //     cosf(Chassis.leg[side].theta);
         }
         Chassis.leg[CHASSIS_LEFT].F0 =
-            // -roll_force + 
-            length_force[CHASSIS_LEFT] -
+            roll_force + 
+            length_force[CHASSIS_LEFT]
+             -
             gravity_force[CHASSIS_LEFT] +
             Chassis_Config.F0_left;
         Chassis.leg[CHASSIS_RIGHT].F0 =
-            // roll_force + 
-            length_force[CHASSIS_RIGHT] -
+            -roll_force + 
+            length_force[CHASSIS_RIGHT]
+             -
             gravity_force[CHASSIS_RIGHT] -
             Chassis_Config.F0_right;
     }
@@ -1339,7 +1340,7 @@ void Chassis_Control(void)
         Chassis.leg[CHASSIS_RIGHT].L0,
         Chassis_Config.lqr.L0_min,
         Chassis_Config.lqr.L0_max,
-        &Chassis.lqr.K[0][0],
+        &lqrK[0][0],
         &Chassis.leg[CHASSIS_LEFT].K_L0_fit,
         &Chassis.leg[CHASSIS_RIGHT].K_L0_fit,
         &Chassis.lqr.limit_flag);

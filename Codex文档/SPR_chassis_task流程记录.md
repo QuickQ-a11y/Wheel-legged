@@ -5,7 +5,7 @@
 参考工程路径：
 
 ```text
-E:\AWL_WORK\Wheel-legged\Others\SPR Balanced-infantry\SPR Balanced-infantry\code\chassis\chassis
+/home/quickq/code/STM32/Others/SPR Balanced-infantry/code/chassis/chassis
 ```
 
 重点参考文件：

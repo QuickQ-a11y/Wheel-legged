@@ -21,18 +21,24 @@ extern "C" {
 #define APP_DJI_TX_LEN 8U
 
 #define APP_DJI_TX_ID 0x200U
-#define APP_DJI_LEFT_RX_ID 0x201U
-#define APP_DJI_RIGHT_RX_ID 0x202U
+#define APP_DJI_LEFT_RX_ID 0x202U
+#define APP_DJI_RIGHT_RX_ID 0x201U
 
-#define APP_DM_LF_ID 0x001U
-#define APP_DM_LB_ID 0x002U
-#define APP_DM_RF_ID 0x003U
-#define APP_DM_RB_ID 0x004U
+/*
+ * DM 电机 ID 与所在总线，反馈 ID = 0x010 + 电机 ID，两者都在电机上位机里设定。
+ *   右前 1、右后 2 -> FDCAN2（与 DJI 轮电调共用该总线，ID 不冲突）
+ *   左后 3、左前 4 -> FDCAN1
+ * 总线归属在 device_motor_dm.c 的 Motor_DM_Init 中指定，改 ID 时要一起核对。
+ */
+#define APP_DM_LF_ID 0x004U
+#define APP_DM_LB_ID 0x003U
+#define APP_DM_RF_ID 0x001U
+#define APP_DM_RB_ID 0x002U
 
-#define APP_DM_LF_FB 0x011U
-#define APP_DM_LB_FB 0x012U
-#define APP_DM_RF_FB 0x013U
-#define APP_DM_RB_FB 0x014U
+#define APP_DM_LF_FB 0x014U
+#define APP_DM_LB_FB 0x013U
+#define APP_DM_RF_FB 0x011U
+#define APP_DM_RB_FB 0x012U
 
 /* DM MIT 控制帧和反馈帧的 16 bit 位置字段映射范围，单位 rad。 */
 #define APP_DM_PMIN (-12.5f)
@@ -63,14 +69,17 @@ extern "C" {
 #define APP_DR16_DB 10
 #define APP_DR16_DIAL 400
 
-/* 与具体遥控协议无关的底盘运动目标。 */
-#define APP_RC_MAX_VEL 2.0f
-#define APP_RC_MAX_YAW 1.0f
-#define APP_RC_VEL_RATE 1.0f
-#define APP_RC_YAW_RATE 2.0f
+/*
+ * 与具体遥控协议无关的底盘运动目标。
+ * 站立模式下摇杆给的都是速度量：前进速度和偏航角速度；位移和航向目标
+ * 由控制层积分得到，松杆后锁位置、锁航向，因此不需要目标斜坡。
+ */
+#define APP_RC_MAX_VEL 4.0f   /* 满杆前进速度，m/s。 */
+#define APP_RC_MAX_YAW 1.0f   /* 满杆偏航角速度，rad/s。 */
+#define APP_RC_VEL_RATE 1.0f  /* 爬台阶接近段的速度目标斜率，m/s^2。 */
 #define APP_RC_LEG_S 0.08f
-#define APP_RC_LEG_M 0.10f
-#define APP_RC_LEG_L 0.15f
+#define APP_RC_LEG_M 0.08f
+#define APP_RC_LEG_L 0.13f
 
 /*
  * 控制器第一阶段只计算中间状态和安全输出。

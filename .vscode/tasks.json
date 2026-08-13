@@ -1,0 +1,82 @@
+{
+    // 工具链不在系统 PATH 上，所有任务在 options.env 里临时补进去。
+    // 烧录有两条路：OpenOCD（openocd.cfg）和 J-Link Commander（flash.jlink），
+    // 两者都不进调试器，用哪个看你手上的调试器和心情。
+    "version": "2.0.0",
+    "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+            "PATH": "${env:HOME}/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin:${env:HOME}/.local/share/stm32cube/bundles/ninja/1.13.2+st.1/bin:${env:PATH}"
+        }
+    },
+    "tasks": [
+        {
+            "label": "编译",
+            "type": "shell",
+            "command": "cmake --build build/Debug",
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            },
+            "group": "build"
+        },
+        {
+            "label": "烧录 (OpenOCD)",
+            "type": "shell",
+            "command": "openocd -f openocd.cfg -c \"program build/Debug/Wheel-legged.elf verify reset exit\"",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
+            // 用 && 串联而不是 dependsOn：VS Code 的 dependsOn 序列在前一个任务
+            // 失败时仍会继续，那样会把上一次的旧 elf 烧进去。
+            "label": "编译 + 烧录 (OpenOCD)",
+            "type": "shell",
+            "command": "cmake --build build/Debug && openocd -f openocd.cfg -c \"program build/Debug/Wheel-legged.elf verify reset exit\"",
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "烧录 (J-Link)",
+            "type": "shell",
+            "command": "JLinkExe -device STM32H723VG -if SWD -speed 4000 -autoconnect 1 -CommanderScript flash.jlink",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
+            "label": "编译 + 烧录 (J-Link)",
+            "type": "shell",
+            "command": "cmake --build build/Debug && JLinkExe -device STM32H723VG -if SWD -speed 4000 -autoconnect 1 -CommanderScript flash.jlink",
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        }
+    ]
+}

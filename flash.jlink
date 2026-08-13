@@ -1,0 +1,4 @@
+loadfile build/Debug/Wheel-legged.elf
+r
+g
+qc

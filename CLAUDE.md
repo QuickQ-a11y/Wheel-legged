@@ -59,7 +59,7 @@ Chassis_Init(&cfg, 0);                   /* 句柄+配置传参：直接初始�
 正面写法（照此写）：
 
 ```c
-Chassis.lqr.target[CHASSIS_STATE_DOT_S] = goal.d_s;   /* 全局直访，Watch 可见 */
+Chassis.lqr.target[CHASSIS_STATE_D_S] = goal.d_s;     /* 全局直访，Watch 可见 */
 Motor_DM_GetState(i, &s);                              /* 跨层数据消费走接口 */
 void Chassis_Control(void)                             /* 流程函数 void，无状态返回 */
 Limit_Symmetric(v, lim)                                /* 算法本身需要的限幅保留 */
@@ -71,5 +71,9 @@ Limit_Symmetric(v, lim)                                /* 算法本身需要的�
 
 1. 先重构 `User_File/3_Chariot/1_Module/Chassis` 试点，用户确认风格后再铺开到其他层。
 2. 每个模块重构完必须构建验证：`cmake --build build/Debug`（Ninja + arm-none-eabi-gcc），零错误零警告才提交。
-3. 涉及底盘逻辑时回归主机单测：`Tests/` 下 `test_chassis_*.c` 在 PC 上编译运行（构建产物在 `build/host_tests/`）。
+3. 涉及底盘逻辑时回归主机单测：`Tests/` 下 `test_chassis_*.c` 用系统 gcc 直接编译运行。
+   仓库里**没有测试脚本或 CMake target**，编译命令、每个测试要链接的源文件、以及
+   `test_motor_dm` 无法在主机编译、`test_chassis_recovery` 需要临时把三道输出门置 0
+   这两个坑，都记在工作区根目录 `../CLAUDE.md` 的 "Host tests" 一节。
+   （`build/host_tests/` 下只是历史产物，不是当前构建输出。）
 4. 汇报格式（中文）：改了哪些文件、删了哪些防护（标注 `文件:行号`）、保留了什么、如何验证的。删除清单先列给用户确认，不要一次性大批量删完。

@@ -24,7 +24,7 @@ typedef struct
     float d_theta;               /* LQR 腿摆角速度，rad/s。 */
     float target_L0;             /* 当前控制目标腿长，m。 */
     float target_phi0;           /* 当前连续目标腿角，rad。 */
-    float F0;                    /* 虚拟腿轴向力，N。 */
+    float F0;                    /* 虚拟腿轴向力，N；大于零为伸腿撑地。 */
     float Tp;                    /* 虚拟腿摆矩，N*m。 */
     float K_L0_fit;              /* 限幅后实际拟合腿长，m。 */
     uint8_t valid_flag;          /* 本轮五连杆状态有数学定义。 */

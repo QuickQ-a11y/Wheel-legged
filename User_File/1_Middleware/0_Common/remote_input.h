@@ -11,12 +11,26 @@ extern "C" {
 typedef enum
 {
     REMOTE_MODE_NONE = 0,
+    REMOTE_MODE_ZERO_FORCE,
     REMOTE_MODE_FOLLOW,
     REMOTE_MODE_BENCH,
     REMOTE_MODE_SELF_SAVE,
     REMOTE_MODE_TOP,
     REMOTE_MODE_STEP,
 } remote_mode_request_t;
+
+/*
+ * 拨杆到模式的映射表。重排拨杆只改这四行，不要动 device_dr16.c。
+ *
+ * 右拨杆是使能级别：下=急停（走 remote_stop_flag，不产生模式请求）、
+ * 中=下面这一行、上=由左拨杆的三行决定。
+ * 可填任意 REMOTE_MODE_*，填 REMOTE_MODE_NONE 表示该档位不改变模式。
+ */
+#define REMOTE_MAP_RIGHT_MID  REMOTE_MODE_ZERO_FORCE
+
+#define REMOTE_MAP_LEFT_UP    REMOTE_MODE_FOLLOW
+#define REMOTE_MAP_LEFT_MID   REMOTE_MODE_FOLLOW
+#define REMOTE_MAP_LEFT_DOWN  REMOTE_MODE_SELF_SAVE
 
 /** @brief 遥控后端发布给底盘的离散腿长请求。 */
 typedef enum

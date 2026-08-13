@@ -2,7 +2,7 @@
 
 ## 1. 对比边界
 
-参考工程：`E:\AWL_WORK\Wheel-legged\Others\HERO_LEG\Chassis`。
+参考工程：`/home/quickq/code/STM32/Others/HERO_LEG/Chassis`。
 
 当前工程和HERO_LEG都使用十维状态、腿长相关LQR、VMC、轮腿速度估计和实机状态机，但两车的机械参数、执行器方向、质量、控制周期和K系数不相同。本文只引入控制组织和可解释观测方法，不复制原车阈值、PID或增益倍率。
 

@@ -26,14 +26,37 @@
             ]
         },
         {
+            // OpenOCD 调试。探针和芯片配置都在仓库根目录 openocd.cfg，
+            // 和"烧录 (OpenOCD)"任务共用同一份，改调试器只改那个文件。
+            "name": "Cortex-Debug: OpenOCD Live Watch",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/Wheel-legged.elf",
+            "servertype": "openocd",
+            "searchDir": [
+                "${workspaceFolder}"
+            ],
+            "configFiles": [
+                "openocd.cfg"
+            ],
+            "gdbPath": "${env:HOME}/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-gdb",
+            "device": "STM32H723VG",
+            "runToEntryPoint": "main",
+            "liveWatch": {
+                "enabled": true,
+                "samplesPerSecond": 4
+            }
+        },
+        {
             "name": "Cortex-Debug: J-Link Live Watch",
             "type": "cortex-debug",
             "request": "launch",
             "cwd": "${workspaceFolder}",
             "executable": "${workspaceFolder}/build/Debug/Wheel-legged.elf",
             "servertype": "jlink",
-            "serverpath": "C:/Users/25697/AppData/Local/stm32cube/bundles/jlink-gdbserver/9.24.0+st.1/bin/JLinkGDBServerCL.exe",
-            "armToolchainPath": "C:/Users/25697/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin",
+            "serverpath": "/usr/bin/JLinkGDBServer",    
+            "armToolchainPath": "/opt/tool/gcc-arm-none-eabi-10.3-2021.10/bin",
             "device": "STM32H723VG",
             "interface": "swd",
             "runToEntryPoint": "main",

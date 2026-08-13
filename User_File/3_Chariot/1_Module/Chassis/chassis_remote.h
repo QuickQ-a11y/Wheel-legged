@@ -8,9 +8,6 @@ extern "C" {
 #include "chassis_control.h"
 #include "remote_input.h"
 
-/** @brief 初始化遥控模式边沿和航向摇杆内部状态。 */
-void Chassis_Remote_Init(void);
-
 /**
  * @brief 将通用遥控输入转换为底盘运动目标和外层模式。
  *

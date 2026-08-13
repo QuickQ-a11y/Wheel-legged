@@ -229,24 +229,38 @@ static void testGenericInputMapping(void)
     assert(remote.leftSwitch == REMOTE_SWITCH_UP);
     assert(remote.rightSwitch == REMOTE_SWITCH_DOWN);
     assert(remote.online == 0U);
-    assert(remote.modeRequest == REMOTE_MODE_FOLLOW);
+    /* 右下是急停档，不产生模式请求，左拨杆此时不参与。 */
+    assert(remote.modeRequest == REMOTE_MODE_NONE);
     assert(remote.legRequest == REMOTE_LEG_SHORT);
 
+    /* 右中恒为零力矩，与左拨杆无关。 */
+    data.rightSwitch = DR16_SWITCH_MID;
+    data.dial = 400;
+    DR16_MakeRemote(&data, 10, 400, &remote);
+    assert(remote.modeRequest == REMOTE_MAP_RIGHT_MID);
+    data.leftSwitch = DR16_SWITCH_DOWN;
+    DR16_MakeRemote(&data, 10, 400, &remote);
+    assert(remote.modeRequest == REMOTE_MAP_RIGHT_MID);
+
+    /* 右上时才由左拨杆选模式。 */
     data.rightSwitch = DR16_SWITCH_UP;
     data.leftSwitch = DR16_SWITCH_MID;
-    data.dial = 400;
     DR16_MakeRemote(&data, 10, 400, &remote);
     assert(remote.rightSwitch == REMOTE_SWITCH_UP);
     assert(remote.leftSwitch == REMOTE_SWITCH_MID);
     assert(fabsf(remote.dial - 0.6f) < TEST_TOLERANCE);
-    assert(remote.modeRequest == REMOTE_MODE_BENCH);
+    assert(remote.modeRequest == REMOTE_MAP_LEFT_MID);
     assert(remote.legRequest == REMOTE_LEG_MIDDLE);
+
+    data.leftSwitch = DR16_SWITCH_UP;
+    DR16_MakeRemote(&data, 10, 400, &remote);
+    assert(remote.modeRequest == REMOTE_MAP_LEFT_UP);
 
     data.leftSwitch = DR16_SWITCH_DOWN;
     data.dial = -400;
     DR16_MakeRemote(&data, 10, 400, &remote);
     assert(remote.leftSwitch == REMOTE_SWITCH_DOWN);
-    assert(remote.modeRequest == REMOTE_MODE_SELF_SAVE);
+    assert(remote.modeRequest == REMOTE_MAP_LEFT_DOWN);
     assert(remote.legRequest == REMOTE_LEG_MIDDLE);
 
     data.dial = -401;
