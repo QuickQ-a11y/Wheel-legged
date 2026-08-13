@@ -85,19 +85,19 @@ void Motor_DM_Init(void)
     memset(dmMotors, 0, sizeof(dmMotors));
 
     dmMotors[MOTOR_DM_LEFT_FRONT].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN1,
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN2,
                             APP_DM_LF_ID,
                             APP_DM_LF_FB};
     dmMotors[MOTOR_DM_LEFT_BACK].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN1,
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN2,
                             APP_DM_LB_ID,
                             APP_DM_LB_FB};
     dmMotors[MOTOR_DM_RIGHT_FRONT].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN2,
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN1,
                             APP_DM_RF_ID,
                             APP_DM_RF_FB};
     dmMotors[MOTOR_DM_RIGHT_BACK].config =
-        (motor_dm_config_t){APP_CAN_BUS_FDCAN2,
+        (motor_dm_config_t){APP_CAN_BUS_FDCAN1,
                             APP_DM_RB_ID,
                             APP_DM_RB_FB};
 

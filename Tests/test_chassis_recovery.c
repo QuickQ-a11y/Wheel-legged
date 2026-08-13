@@ -556,8 +556,11 @@ static void test_lqr_realtime_leg_length(void)
     assert(Chassis.lqr.limit_flag == 0U);
     assert_zero_output();
 
-    /* 超出采样范围时必须限幅到边界并置位标志，禁止外推。 */
-    set_leg_pose(CHASSIS_RIGHT, 0.29f, CHASSIS_HALF_PI);
+    /* 超出采样范围时必须限幅到边界并置位标志，禁止外推。
+     * 越界腿长由配置上界推出，换车时不需要改这个测试。 */
+    set_leg_pose(CHASSIS_RIGHT,
+                 Chassis_Config.lqr.L0_max + 0.05f,
+                 CHASSIS_HALF_PI);
     Chassis_Leg_Update();
     Chassis_Control();
     assert(Chassis.leg[CHASSIS_RIGHT].L0 >
@@ -592,8 +595,9 @@ static void test_lqr_leg_length_limit(void)
     Chassis_Init();
     set_online_feedback();
     set_symmetric_leg_pose(0.25f, CHASSIS_HALF_PI);
-    Chassis.leg[CHASSIS_LEFT].L0 = 0.11f;
-    Chassis.leg[CHASSIS_RIGHT].L0 = 0.33f;
+    /* 两端越界腿长都由配置边界推出，换车时不需要改这个测试。 */
+    Chassis.leg[CHASSIS_LEFT].L0 = Chassis_Config.lqr.L0_min - 0.02f;
+    Chassis.leg[CHASSIS_RIGHT].L0 = Chassis_Config.lqr.L0_max + 0.05f;
 
     Chassis.mode = CHASSIS_MODE_FOLLOW;
     Chassis_State_Update();
@@ -948,18 +952,31 @@ static void test_joint_mapping(void)
     assert(Chassis_Config.leg[CHASSIS_RIGHT]
                .joint[CHASSIS_JOINT_PHI4]
                .scale == -1.0f);
+    /*
+     * ratio 是每台车的同步带传动比（小轮腿0.75、大轮腿直连1.0），不是不变量。
+     * 这里只校验四个关节取值一致且为正，可以抓住只改了其中一个的情况。
+     */
     assert(Chassis_Config.leg[CHASSIS_LEFT]
                .joint[CHASSIS_JOINT_PHI1]
-               .ratio == 0.75f);
+               .ratio > 0.0f);
     assert(Chassis_Config.leg[CHASSIS_LEFT]
                .joint[CHASSIS_JOINT_PHI4]
-               .ratio == 0.75f);
+               .ratio ==
+           Chassis_Config.leg[CHASSIS_LEFT]
+               .joint[CHASSIS_JOINT_PHI1]
+               .ratio);
     assert(Chassis_Config.leg[CHASSIS_RIGHT]
                .joint[CHASSIS_JOINT_PHI1]
-               .ratio == 0.75f);
+               .ratio ==
+           Chassis_Config.leg[CHASSIS_LEFT]
+               .joint[CHASSIS_JOINT_PHI1]
+               .ratio);
     assert(Chassis_Config.leg[CHASSIS_RIGHT]
                .joint[CHASSIS_JOINT_PHI4]
-               .ratio == 0.75f);
+               .ratio ==
+           Chassis_Config.leg[CHASSIS_LEFT]
+               .joint[CHASSIS_JOINT_PHI1]
+               .ratio);
     assert(Chassis_Config.leg[CHASSIS_LEFT]
                .joint[CHASSIS_JOINT_PHI1]
                .angle_offset_rad == CHASSIS_HALF_PI);

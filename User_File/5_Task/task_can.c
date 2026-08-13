@@ -219,7 +219,7 @@ void CAN_Task_SetDjiCurrent(const int16_t current[APP_WHEEL_COUNT])
     data[rightSlot] = (uint8_t)((uint16_t)current[1] >> 8U);
     data[rightSlot + 1U] = (uint8_t)((uint16_t)current[1]);
 
-    CAN_Task_UpdateTxFrame(&hfdcan2,
+    CAN_Task_UpdateTxFrame(&hfdcan1,
                            APP_DJI_TX_ID,
                            data,
                            APP_DJI_TX_LEN);

@@ -8,8 +8,8 @@
  * @brief 分发应用层 CAN 接收报文。
  *
  * 当前硬件映射：
- * FDCAN1 接左侧 2 个 DM 髋关节电机；
- * FDCAN2 接右侧 2 个 DM 髋关节电机和 2 个 DJI 轮电机。
+ * FDCAN1 接右侧 2 个 DM 髋关节电机和 2 个 DJI 轮电机；
+ * FDCAN2 接左侧 2 个 DM 髋关节电机。
  */
 void CAN_Task_RxMessageCallback(const task_can_rx_message_t *message)
 {
@@ -21,7 +21,7 @@ void CAN_Task_RxMessageCallback(const task_can_rx_message_t *message)
         return;
     }
 
-    if ((message->bus != APP_CAN_BUS_FDCAN2) ||
+    if ((message->bus != APP_CAN_BUS_FDCAN1) ||
         (message->length != APP_DJI_RX_LEN))
     {
         return;
