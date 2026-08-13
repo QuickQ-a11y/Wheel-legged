@@ -159,18 +159,19 @@ static uint32_t Output_Fault_Get(void)
             fault |= CHASSIS_FAULT_DM_ERROR;
         }
     }
-  if ((Chassis.state != CHASSIS_BENCH) ||
-      (Chassis_Config.output.wheel_flag != 0U))
-  {
-      for (index = 0U; index < APP_WHEEL_COUNT; index++)
-      {
-        //   if (Chassis.wheel_motor[index].online_flag == 0U)
-        //   {
-        //       fault |= CHASSIS_FAULT_DJI_MOTOR;
-        //       break;
-        //   }
-      }
-  }
+    /* 轮通道关闭时不驱动轮电机，其在线状态不参与封锁，避免只调髋关节时
+     * 轮电调未上电连带封锁关节力矩。 */
+    if (Chassis_Config.output.wheel_flag != 0U)
+    {
+        for (index = 0U; index < APP_WHEEL_COUNT; index++)
+        {
+            if (Chassis.wheel_motor[index].online_flag == 0U)
+            {
+                fault |= CHASSIS_FAULT_DJI_MOTOR;
+                break;
+            }
+        }
+    }
     if (Chassis.can_error_count > APP_CAN_TX_ERROR_MAX)
     {
         fault |= CHASSIS_FAULT_CAN;

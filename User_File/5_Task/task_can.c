@@ -210,11 +210,14 @@ void CAN_Task_Init(void)
 void CAN_Task_SetDjiCurrent(const int16_t current[APP_WHEEL_COUNT])
 {
     uint8_t data[APP_DJI_TX_LEN] = {0};
+    /* 字节位置由电调反馈ID推出，保证收发始终指向同一台电调。 */
+    uint8_t leftSlot = APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID);
+    uint8_t rightSlot = APP_DJI_TX_SLOT(APP_DJI_RIGHT_RX_ID);
 
-    data[0] = (uint8_t)((uint16_t)current[0] >> 8U);
-    data[1] = (uint8_t)((uint16_t)current[0]);
-    data[2] = (uint8_t)((uint16_t)current[1] >> 8U);
-    data[3] = (uint8_t)((uint16_t)current[1]);
+    data[leftSlot] = (uint8_t)((uint16_t)current[0] >> 8U);
+    data[leftSlot + 1U] = (uint8_t)((uint16_t)current[0]);
+    data[rightSlot] = (uint8_t)((uint16_t)current[1] >> 8U);
+    data[rightSlot + 1U] = (uint8_t)((uint16_t)current[1]);
 
     CAN_Task_UpdateTxFrame(&hfdcan2,
                            APP_DJI_TX_ID,

@@ -25,6 +25,21 @@ extern "C" {
 #define APP_DJI_RIGHT_RX_ID 0x201U
 
 /*
+ * C620 的 0x200 控制帧按电调 ID 分配字节：ID=n 占 data[2(n-1)] 和 data[2(n-1)+1]。
+ * 发送字节位置必须由上面的反馈 ID 推出，不能写死，否则改电调 ID 时只有接收
+ * 侧跟着变，会出现读一个轮子、控另一个轮子的交叉。
+ */
+#define APP_DJI_TX_SLOT(rx_id) ((uint8_t)(((rx_id) - APP_DJI_TX_ID - 1U) * 2U))
+
+_Static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) + 1U < APP_DJI_TX_LEN,
+               "left wheel ESC id out of 0x200 frame range");
+_Static_assert(APP_DJI_TX_SLOT(APP_DJI_RIGHT_RX_ID) + 1U < APP_DJI_TX_LEN,
+               "right wheel ESC id out of 0x200 frame range");
+_Static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) !=
+                   APP_DJI_TX_SLOT(APP_DJI_RIGHT_RX_ID),
+               "left and right wheel ESC id must differ");
+
+/*
  * DM 电机 ID 与所在总线，反馈 ID = 0x010 + 电机 ID，两者都在电机上位机里设定。
  *   右前 1、右后 2 -> FDCAN2（与 DJI 轮电调共用该总线，ID 不冲突）
  *   左后 3、左前 4 -> FDCAN1
