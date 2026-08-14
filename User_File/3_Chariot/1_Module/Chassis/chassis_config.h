@@ -129,35 +129,57 @@ typedef struct
     float joint_T_limit;   /* 关节力矩限幅，N*m。关节通道唯一限幅点。 */
 } Chassis_Output_Config_t;
 
+/**
+ * @brief 倒地自救、站立姿态保护和板凳模式的全部参数。
+ *
+ * 消费者只有三处：Chassis_Recovery() 跑 FALLEN/FALLING_TO_STAND 两个阶段，
+ * State_Select() 拿姿态门判断能不能站/什么时候判倒，Chassis_Bench() 用板凳项。
+ */
 typedef struct
 {
-    float bench_L0;          /* 小板凳目标腿长，m。 */
-    float extend_L0;         /* 倒地转腿阶段目标腿长，m。 */
-    float bench_phi0;        /* 小板凳虚拟腿目标角，rad。 */
-    float rotate_phi0;       /* 基础转腿偏移，rad。 */
-    float lag_phi0;          /* 滞后腿追赶偏移，rad。 */
-    float theta_diff;        /* 启用追赶的双腿theta差，rad。 */
-    float theta_min;         /* 转腿完成theta下限，rad。 */
-    float theta_max;         /* 转腿完成theta上限，rad。 */
-    float direct_pitch;      /* 允许直接准备的pitch上限，rad。 */
-    float ready_pitch;       /* 阶段完成pitch上限，rad。 */
-    float phi0_min;          /* 直接准备phi0下限，rad。 */
-    float phi0_max;          /* 直接准备phi0上限，rad。 */
-    float L0_tol;            /* 腿长完成误差，m。 */
-    float angle_tol;         /* 腿角完成误差，rad。 */
-    float stable_time;       /* 条件连续保持时间，s。 */
-    float fallen_timeout;    /* 倒地转腿超时，s。 */
-    float prepare_timeout;   /* 小板凳准备超时，s。 */
-    float L0_rate;           /* 站立目标腿长斜率，m/s。 */
-    float pitch_limit;       /* 站立pitch保护阈值，rad。 */
-    float stand_phi0_min;    /* 站立phi0保护下限，rad。 */
-    float stand_phi0_max;    /* 站立phi0保护上限，rad。 */
-    float bench_L0_rate;     /* 板凳摇杆满杆的腿长调节速率，m/s。 */
-    float bench_phi0_rate;   /* 板凳摇杆满杆的腿角调节速率，rad/s。 */
-    float bench_L0_min;      /* 板凳可调腿长下限，m。 */
-    float bench_L0_max;      /* 板凳可调腿长上限，m。 */
-    algorithm_pid_config_t joint_angle_pid; /* 关节角度到目标速度控制器。 */
-    algorithm_pid_config_t joint_speed_pid; /* 关节速度到几何力矩控制器。 */
+    /* 阶段目标姿态：先在 FALLEN 把腿收到 extend_L0，再摆到板凳姿态起身。 */
+    float extend_L0;         /* FALLEN转腿阶段的腿长目标，m。 */
+    float bench_L0;          /* FALLING_TO_STAND的腿长目标，m。 */
+    float bench_phi0;        /* FALLING_TO_STAND的腿杆角目标，rad。 */
+
+    /* 目标斜坡：目标只按速率走、不跟随实际角，动作快慢全由这几项决定。 */
+    float L0_rate;           /* 腿长目标斜率，m/s。站立段升腿也用它。 */
+    float rotate_rate;       /* 腿杆角目标速率，rad/s。 */
+    float lag_rate;          /* 双腿进度差过大时落后腿改用的速率，rad/s。 */
+    float theta_diff;        /* 触发lag_rate的双腿theta差，rad。 */
+    float rotate_lead_max;   /* 目标角领先实际角的上限，rad。腿卡住时防止目标跑飞。 */
+
+    /* 自救腿重力前馈：抵消腿自重，关节PID不必独自扛静态负载。 */
+    float leg_cm_ratio;      /* 腿质心沿虚拟腿的位置比例，0~1。均质杆取0.5。 */
+    float gravity_ff_scale;  /* 前馈整定系数，0关闭。实机从0往1.0加。 */
+
+    /* 阶段推进判据。 */
+    float theta_min;         /* 转腿完成的腿摆绝对角窗口下限，rad。 */
+    float theta_max;         /* 窗口上限，rad；两者中点同时是theta取等价角的参考。 */
+    float ready_pitch;       /* 判定阶段完成的pitch上限，rad。 */
+    float L0_tol;            /* 板凳腿长到位误差，m。 */
+    float angle_tol;         /* 板凳腿角到位误差，rad。 */
+    float stable_time;       /* 到位条件需连续保持的时间，s。 */
+    float fallen_timeout;    /* FALLEN超时，s。超时置RECOVERY_TIMEOUT并零输出。 */
+    float prepare_timeout;   /* FALLING_TO_STAND超时，s。同上。 */
+
+    /* 姿态门：能不能跳过转腿直接站，以及站立中什么时候判倒。 */
+    float direct_pitch;      /* 允许直接进站立/跳过转腿的pitch上限，rad。 */
+    float phi0_min;          /* 上面这道门的腿杆角区间下限，rad。 */
+    float phi0_max;          /* 区间上限，rad。 */
+    float pitch_limit;       /* 站立中判定倒地的pitch阈值，rad。 */
+    float stand_phi0_min;    /* 站立中腿杆角保护下限，rad。 */
+    float stand_phi0_max;    /* 站立中腿杆角保护上限，rad。 */
+
+    /* 板凳模式。当前遥控拨杆没有映射到BENCH，这四项实机走不到。 */
+    float bench_L0_rate;     /* 摇杆满杆的腿长调节速率，m/s。 */
+    float bench_phi0_rate;   /* 摇杆满杆的腿角调节速率，rad/s。 */
+    float bench_L0_min;      /* 可调腿长下限，m。 */
+    float bench_L0_max;      /* 可调腿长上限，m。 */
+
+    /* 自救关节串级：角度环出目标速度，速度环出关节力矩。 */
+    algorithm_pid_config_t joint_angle_pid;
+    algorithm_pid_config_t joint_speed_pid;
 } Chassis_Recovery_Config_t;
 
 /** @brief 小陀螺运动边界和十维反馈缩放。 */

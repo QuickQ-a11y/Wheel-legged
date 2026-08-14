@@ -274,6 +274,28 @@ static void State_Enter(Chassis_State_t state)
                     Chassis_Config.leg[side].target_L0;
         }
     }
+    else if ((state == CHASSIS_FALLEN) ||
+             (state == CHASSIS_FALLING_TO_STAND))
+    {
+        /*
+         * 自救的腿长和腿角目标都从当前实际姿态起步，之后逐周期按速率推进。
+         * 不锁存的话目标会相对实际角常值超前，关节PID全程满输出，动作很猛。
+         * 正解无效时实际姿态是0，只能回到配置目标，否则逆解直接失败。
+         */
+        uint8_t leg_valid =
+            ((Chassis.leg[CHASSIS_LEFT].valid_flag != 0U) &&
+             (Chassis.leg[CHASSIS_RIGHT].valid_flag != 0U)) ? 1U : 0U;
+
+        for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+        {
+            Chassis.leg[side].target_phi0 =
+                (leg_valid != 0U) ? Chassis.leg[side].phi0_total
+                                  : Chassis_Config.recovery.bench_phi0;
+            Chassis.leg[side].target_L0 =
+                (leg_valid != 0U) ? Chassis.leg[side].L0
+                                  : Chassis_Config.leg[side].target_L0;
+        }
+    }
     else if (state == CHASSIS_STEP)
     {
         Chassis.step_phase = CHASSIS_STEP_PREPARE;
@@ -686,6 +708,40 @@ static void Joint_Control(void)
             Chassis.output.T_joint_req[motor_index] =
                 geometric_torque_nm * joint_scale;
         }
+
+        /*
+         * 叠加腿自重的重力前馈：位置串级只需处理误差，不必独自扛住整条腿，
+         * 因此增益可以调小、动作变柔和。参考HERO_LEG自救时在F0上加补偿的做法，
+         * 但那台车有气弹簧且前馈输入是实测支撑力，这里只按腿自重建模。
+         * 重力沿伸腿方向拉F0、theta为正时给出负摆矩，前馈取相反号抵消。
+         */
+        if (Chassis_Config.recovery.gravity_ff_scale != 0.0f)
+        {
+            const Chassis_Model_Config_t *model = &Chassis_Config.model;
+            float leg_weight_n = model->leg_mass * model->gravity *
+                                 Chassis_Config.recovery.gravity_ff_scale;
+            float cm_arm_m = Chassis_Config.recovery.leg_cm_ratio *
+                             Chassis.leg[side].L0;
+            VMC_Torque_t gravity_torque;
+
+            if (VMC_Torque_Calc(&Chassis_Config.leg[side],
+                                &Chassis.leg[side],
+                                -leg_weight_n * cosf(Chassis.leg[side].theta),
+                                leg_weight_n * cm_arm_m *
+                                    sinf(Chassis.leg[side].theta),
+                                &gravity_torque) != 0U)
+            {
+                uint8_t phi1_motor =
+                    Chassis_Config.leg[side].joint[CHASSIS_JOINT_PHI1]
+                        .motor_index;
+                uint8_t phi4_motor =
+                    Chassis_Config.leg[side].joint[CHASSIS_JOINT_PHI4]
+                        .motor_index;
+
+                Chassis.output.T_joint_req[phi1_motor] += gravity_torque.T1;
+                Chassis.output.T_joint_req[phi4_motor] += gravity_torque.T4;
+            }
+        }
     }
 
     /* 4. 仅在全部输出条件满足时，把调试请求限幅后复制到最终命令。 */
@@ -712,7 +768,7 @@ void Chassis_Recovery(void)
     const Chassis_Recovery_Config_t *recovery = &Chassis_Config.recovery;
     float theta_b;
     float theta[CHASSIS_LEG_COUNT];
-    float rotate_phi0[CHASSIS_LEG_COUNT];
+    float rotate_rate[CHASSIS_LEG_COUNT];
     float direction;
     float theta_ref;
     uint8_t theta_flag[CHASSIS_LEG_COUNT];
@@ -786,14 +842,14 @@ void Chassis_Recovery(void)
                 theta_flag[side] =
                     ((theta[side] >= recovery->theta_min) &&
                      (theta[side] <= recovery->theta_max)) ? 1U : 0U;
-                rotate_phi0[side] = recovery->rotate_phi0;
+                rotate_rate[side] = recovery->rotate_rate;
             }
             /* 机体俯仰方向决定倒地后虚拟腿应向哪一侧翻转。 */
             direction = (theta_b < 0.0f) ? 1.0f : -1.0f;
 
             /*
              * 机体仍明显倾斜且双腿进度不一致时，让距离准备区间中心
-             * 更远的一侧使用更大的经验追赶量，避免一条腿提前停住。
+             * 更远的一侧使用更大的追赶速率，避免一条腿提前停住。
              */
             if ((fabsf(theta[CHASSIS_LEFT] - theta[CHASSIS_RIGHT]) >
                   recovery->theta_diff) &&
@@ -802,27 +858,36 @@ void Chassis_Recovery(void)
                 if (fabsf(theta[CHASSIS_LEFT] - theta_ref) >
                     fabsf(theta[CHASSIS_RIGHT] - theta_ref))
                 {
-                    rotate_phi0[CHASSIS_LEFT] = recovery->lag_phi0;
+                    rotate_rate[CHASSIS_LEFT] = recovery->lag_rate;
                 }
                 else
                 {
-                    rotate_phi0[CHASSIS_RIGHT] = recovery->lag_phi0;
+                    rotate_rate[CHASSIS_RIGHT] = recovery->lag_rate;
                 }
             }
 
             /*
-             * 腿角到位且机体已接近可准备姿态时保持当前连续角；否则继续
-             * 沿恢复方向转动。pitch 门槛防止严重倾斜时过早停止转腿。
+             * 腿角到位且机体已接近可准备姿态时目标停在原处；否则从进入
+             * 本状态时锁存的起点按速率继续推进。pitch 门槛防止严重倾斜时
+             * 过早停止转腿。目标只按速率走，不跟随实际角，动作因此可控。
              */
             for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
             {
-                Chassis.leg[side].target_L0 = recovery->extend_L0;
-                Chassis.leg[side].target_phi0 =
-                    ((theta_flag[side] != 0U) &&
-                     (fabsf(theta_b) <= recovery->direct_pitch)) ?
-                        Chassis.leg[side].phi0_total :
-                        Chassis.leg[side].phi0_total +
-                            direction * rotate_phi0[side];
+                Chassis.leg[side].target_L0 =
+                    Move_Toward(Chassis.leg[side].target_L0,
+                                recovery->extend_L0,
+                                recovery->L0_rate * dt);
+                if ((theta_flag[side] == 0U) ||
+                    (fabsf(theta_b) > recovery->direct_pitch))
+                {
+                    Chassis.leg[side].target_phi0 +=
+                        direction * rotate_rate[side] * dt;
+                }
+                /* 腿被卡住时目标不能无限跑远，否则解卡瞬间会甩。 */
+                Chassis.leg[side].target_phi0 = Algorithm_LimitRange(
+                    Chassis.leg[side].target_phi0,
+                    Chassis.leg[side].phi0_total - recovery->rotate_lead_max,
+                    Chassis.leg[side].phi0_total + recovery->rotate_lead_max);
             }
 
             /* 双腿到位且 pitch 足够小并持续稳定后才进入板凳准备阶段。 */
@@ -862,11 +927,21 @@ void Chassis_Recovery(void)
         prepare_flag = (fabsf(theta_b) <= recovery->ready_pitch) ? 1U : 0U;
         for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
         {
-            Chassis.leg[side].target_L0 = recovery->bench_L0;
+            /* 腿长和腿角都按速率靠近板凳姿态，不再一步阶跃。 */
+            Chassis.leg[side].target_L0 =
+                Move_Toward(Chassis.leg[side].target_L0,
+                            recovery->bench_L0,
+                            recovery->L0_rate * dt);
             Chassis.leg[side].target_phi0 =
-                Algorithm_AngleNearestEquivalentRad(
-                    recovery->bench_phi0,
-                    Chassis.leg[side].phi0_total);
+                Move_Toward(Chassis.leg[side].target_phi0,
+                            Algorithm_AngleNearestEquivalentRad(
+                                recovery->bench_phi0,
+                                Chassis.leg[side].target_phi0),
+                            recovery->rotate_rate * dt);
+            Chassis.leg[side].target_phi0 = Algorithm_LimitRange(
+                Chassis.leg[side].target_phi0,
+                Chassis.leg[side].phi0_total - recovery->rotate_lead_max,
+                Chassis.leg[side].phi0_total + recovery->rotate_lead_max);
             if ((fabsf(Chassis.leg[side].L0 - recovery->bench_L0) >
                  recovery->L0_tol) ||
                 (fabsf(Algorithm_AngleNormalizeRad(

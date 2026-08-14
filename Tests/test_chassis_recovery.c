@@ -279,21 +279,18 @@ static void test_recovery_handoff(void)
     assert(Chassis.state == CHASSIS_STANDING);
 
     Chassis_Control();
-    /*
-     * 交接后无遥控目标，腿长目标朝配置的站立腿长收敛。
-     * 用"到站立腿长的距离不增大"判断，与板凳腿长和站立腿长的大小关系无关。
-     */
-    assert(fabsf(Chassis.leg[CHASSIS_LEFT].target_L0 -
-                 Chassis_Config.leg[CHASSIS_LEFT].target_L0) <=
-           fabsf(Chassis_Config.recovery.bench_L0 -
-                 Chassis_Config.leg[CHASSIS_LEFT].target_L0) +
-               TEST_TOLERANCE);
+    /* 交接回站立后，腿长目标由遥控请求的 goal.L0 直接接管。 */
+    assert(fabsf(Chassis.leg[CHASSIS_LEFT].target_L0 - Chassis.goal.L0) <
+           TEST_TOLERANCE);
+    assert(fabsf(Chassis.leg[CHASSIS_RIGHT].target_L0 - Chassis.goal.L0) <
+           TEST_TOLERANCE);
     assert_zero_output();
 }
 
 static void test_fallen_timeout(void)
 {
     float left_phi0_rad;
+    float left_L0_m;
 
     Chassis_Init();
     set_online_feedback();
@@ -304,11 +301,13 @@ static void test_fallen_timeout(void)
     assert(Chassis.state == CHASSIS_FALLEN);
 
     left_phi0_rad = Chassis.leg[CHASSIS_LEFT].phi0;
+    left_L0_m = Chassis.leg[CHASSIS_LEFT].L0;
     Chassis_Recovery();
     assert(Chassis.state == CHASSIS_FALLEN);
+    /* 腿长和腿角目标都按速率推进，单拍只走一小步，不再阶跃到位。 */
     assert(fabsf(Chassis.leg[CHASSIS_LEFT].target_L0 -
                  Chassis_Config.recovery.extend_L0) <
-           TEST_TOLERANCE);
+           fabsf(left_L0_m - Chassis_Config.recovery.extend_L0));
     assert(Chassis.leg[CHASSIS_LEFT].target_phi0 < left_phi0_rad);
     assert_zero_wheel_request();
     assert_zero_output();

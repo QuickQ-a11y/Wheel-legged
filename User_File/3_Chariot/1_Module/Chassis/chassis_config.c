@@ -228,36 +228,47 @@ const Chassis_Config_t Chassis_Config = {
     },
     /* 倒地转腿、小板凳准备和关节串级位置控制参数。 */
     .recovery = {
-        /*
-         * 动作阶段参考 SPR，目标限制在本机构约0.296 m的最大可达腿长内。
-         * 串级 PID 和 1 N*m 请求限幅是输出封锁阶段的保守调试初值，后续按实机修改。
-         */
-        .bench_L0 = 0.15f,
+        /* 动作阶段参考 SPR，目标限制在本机构约0.296 m的最大可达腿长内。 */
         .extend_L0 = 0.29f,
+        .bench_L0 = 0.15f,
         .bench_phi0 = CHASSIS_HALF_PI,
-        .rotate_phi0 = 0.30f,
-        .lag_phi0 = 0.60f,
+
+        /* 斜坡速率。rotate_rate 2.0约115度/s，HERO_LEG用的是8.0，这里先取保守值。 */
+        .L0_rate = 0.10f,
+        .rotate_rate = 2.0f,
+        .lag_rate = 4.0f,
         .theta_diff = 0.80f,
+        .rotate_lead_max = 0.35f,
+
+        /* 腿视作均质杆取0.5；前馈系数从0起调，确认动作不变差再往上加。 */
+        .leg_cm_ratio = 0.5f,
+        .gravity_ff_scale = 0.0f,
+
+        /* 阶段推进判据。theta窗口中心0.95 rad即虚拟腿摆到约54度算转腿到位。 */
         .theta_min = 0.50f,
         .theta_max = 1.40f,
-        .direct_pitch = 0.80f,
         .ready_pitch = 0.30f,
-        .phi0_min = 0.70f,
-        .phi0_max = 3.00f,
         .L0_tol = 0.02f,
         .angle_tol = 0.10f,
         .stable_time = 0.10f,
         .fallen_timeout = 5.0f,
         .prepare_timeout = 3.0f,
-        .L0_rate = 0.10f,
+
+        /* 姿态门。改斜坡速率后自救变慢，超时不够先加timeout，不要改回阶跃。 */
+        .direct_pitch = 0.80f,
+        .phi0_min = 0.70f,
+        .phi0_max = 3.00f,
         .pitch_limit = 1.60f,
         .stand_phi0_min = 0.40f,
         .stand_phi0_max = 2.80f,
+
         /* 板凳模式下用左右摇杆分别微调两条腿，范围保守收在机构可达区内。 */
         .bench_L0_rate = 0.80f,
         .bench_phi0_rate = 3.20f,
         .bench_L0_min = 0.09f,
         .bench_L0_max = 0.25f,
+
+        /* 串级 PID 是输出封锁阶段的保守调试初值，后续按实机修改。 */
         .joint_angle_pid = {
             .kp = 8.0f,
             .ki = 0.0f,
@@ -760,11 +771,11 @@ const Chassis_Config_t Chassis_Config = {
     },
     /* 腿长PID输出作为虚拟支撑力修正，反馈速度直接作为阻尼项。 */
     .leg_length_pid = {
-        .kp = 400.0f,
+        .kp = 800.0f,
         .ki = 0.0f,
-        .kd = 10.0f,
+        .kd = 40.0f,
         .integralLimit = 5.0f,
-        .outputLimit = 40.0f,
+        .outputLimit = 100.0f,
     },
     /* roll PID输出以左右腿差动支撑力的形式作用。 */
     .roll_pid = {
@@ -776,45 +787,56 @@ const Chassis_Config_t Chassis_Config = {
     },
     /* 倒地转腿、小板凳准备和关节串级位置控制参数。 */
     .recovery = {
-        /*
-         * 动作阶段参考 SPR，目标限制在本机构的最大可达腿长内。
-         * 串级 PID 和 1 N*m 请求限幅是输出封锁阶段的保守调试初值，后续按实机修改。
-         */
-        .bench_L0 = 0.15f,
+        /* 动作阶段参考 SPR，目标限制在本机构的最大可达腿长内。 */
         .extend_L0 = 0.15f,
+        .bench_L0 = 0.15f,
         .bench_phi0 = CHASSIS_HALF_PI,
-        .rotate_phi0 = 0.30f,
-        .lag_phi0 = 0.60f,
+
+        /* 斜坡速率。rotate_rate 2.0约115度/s，HERO_LEG用的是8.0，这里先取保守值。 */
+        .L0_rate = 0.10f,
+        .rotate_rate = 2.0f,
+        .lag_rate = 4.0f,
         .theta_diff = 0.80f,
+        .rotate_lead_max = 0.35f,
+
+        /* 腿视作均质杆取0.5；前馈系数从0起调，确认动作不变差再往上加。 */
+        .leg_cm_ratio = 0.5f,
+        .gravity_ff_scale = 0.0f,
+
+        /* 阶段推进判据。theta窗口中心0.95 rad即虚拟腿摆到约54度算转腿到位。 */
         .theta_min = 0.50f,
         .theta_max = 1.40f,
-        .direct_pitch = 0.80f,
         .ready_pitch = 0.30f,
-        .phi0_min = 0.70f,
-        .phi0_max = 3.00f,
         .L0_tol = 0.02f,
         .angle_tol = 0.10f,
         .stable_time = 0.10f,
         .fallen_timeout = 5.0f,
         .prepare_timeout = 3.0f,
-        .L0_rate = 0.10f,
+
+        /* 姿态门。改斜坡速率后自救变慢，超时不够先加timeout，不要改回阶跃。 */
+        .direct_pitch = 0.80f,
+        .phi0_min = 0.70f,
+        .phi0_max = 2.80f,
         .pitch_limit = 1.60f,
         .stand_phi0_min = 0.40f,
         .stand_phi0_max = 2.80f,
+
         /* 板凳模式下用左右摇杆分别微调两条腿，范围保守收在机构可达区内。 */
         .bench_L0_rate = 0.80f,
         .bench_phi0_rate = 3.20f,
         .bench_L0_min = 0.09f,
         .bench_L0_max = 0.25f,
+
+        /* 串级 PID 是输出封锁阶段的保守调试初值，后续按实机修改。 */
         .joint_angle_pid = {
-            .kp = 500.0f,
+            .kp = 8.0f,
             .ki = 0.0f,
             .kd = 0.0f,
             .integralLimit = 0.0f,
             .outputLimit = 100.0f,
         },
         .joint_speed_pid = {
-            .kp = 10.0f,
+            .kp = 4.0f,
             .ki = 0.0f,
             .kd = 0.0f,
             .integralLimit = 0.0f,
