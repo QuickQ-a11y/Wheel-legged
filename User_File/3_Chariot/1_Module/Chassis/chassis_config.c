@@ -288,6 +288,7 @@ const Chassis_Config_t Chassis_Config = {
     .top = {
         .max_d_s = 0.25f,
         .max_d_fai = 2.0f,
+        .d_fai_rate = 3.0f,
         .scale = {
             [CHASSIS_STATE_S] = 0.0f,
             [CHASSIS_STATE_D_S] = 1.0f,
