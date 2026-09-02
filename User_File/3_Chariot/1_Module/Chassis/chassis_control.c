@@ -67,7 +67,11 @@ static void Motion_Update(void)
         Chassis.lqr.target[CHASSIS_STATE_D_S] = Chassis.top_d_s;
         /* 小陀螺持续旋转，航向目标始终跟随实际，只靠角速度控制。 */
         Chassis.lqr.target[CHASSIS_STATE_FAI] = model_yaw_rad;
-        Chassis.lqr.target[CHASSIS_STATE_D_FAI] = Chassis.goal.d_fai;
+        /* 起转和停转都按斜率走，避免角速度目标阶跃冲击机体pitch。 */
+        Chassis.lqr.target[CHASSIS_STATE_D_FAI] =
+            Move_Toward(Chassis.lqr.target[CHASSIS_STATE_D_FAI],
+                        Chassis.goal.d_fai,
+                        Chassis_Config.top.d_fai_rate * dt);
         Chassis.yaw_stick_flag = 0U;
     }
     else
@@ -95,19 +99,21 @@ static void Motion_Update(void)
         }
     }
 
-    // Chassis.leg[CHASSIS_LEFT].target_L0 =
-    //     Move_Toward(Chassis.leg[CHASSIS_LEFT].target_L0,
-    //                        Chassis.goal.L0,
-    //                        Chassis_Config.recovery.L0_rate *
-    //                            dt);
-    // Chassis.leg[CHASSIS_RIGHT].target_L0 =
-    //     Move_Toward(Chassis.leg[CHASSIS_RIGHT].target_L0,
-    //                        Chassis.goal.L0,
-    //                        Chassis_Config.recovery.L0_rate *
-    //                            dt);
-
-    Chassis.leg[CHASSIS_LEFT].target_L0 = Chassis.goal.L0;
-    Chassis.leg[CHASSIS_RIGHT].target_L0 = Chassis.goal.L0;
+    /*
+     * 腿长目标按速率逼近goal.L0，不直接赋值。
+     * State_Enter进STANDING时已把target_L0锁到当前实际腿长，直接赋值会在
+     * 下一拍抹掉这次接管：自救结束腿停在bench_L0，随即被拽到goal.L0，
+     * 而收腿方向与重力同向、腿长PID只有kd这一项阻尼，于是出现伸腿后
+     * 再收腿的那一下冲击。斜坡让这段落差按L0_rate走完。
+     */
+    Chassis.leg[CHASSIS_LEFT].target_L0 =
+        Move_Toward(Chassis.leg[CHASSIS_LEFT].target_L0,
+                    Chassis.goal.L0,
+                    Chassis_Config.recovery.L0_rate * dt);
+    Chassis.leg[CHASSIS_RIGHT].target_L0 =
+        Move_Toward(Chassis.leg[CHASSIS_RIGHT].target_L0,
+                    Chassis.goal.L0,
+                    Chassis_Config.recovery.L0_rate * dt);
 }
 
 /** @brief 判断周期角是否存在落在指定连续区间内的等价角。 */
@@ -261,9 +267,9 @@ static void State_Enter(Chassis_State_t state)
 
     if (state == CHASSIS_STANDING)
     {
-        Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_LEFT]);
-        Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_RIGHT]);
+        Algorithm_PID_Init(&Chassis.leg_length_pid);
         Algorithm_PID_Init(&Chassis.roll_pid);
+        Chassis_Leso_Init(&Chassis.leso);
         for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
         {
             /* 五连杆正解有效时从当前腿长接管，否则回到配置目标腿长。 */
@@ -381,9 +387,9 @@ void Chassis_Init(void)
            Chassis_Config.target,
            sizeof(Chassis.lqr.target));
 
-    Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_LEFT]);
-    Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_RIGHT]);
+    Algorithm_PID_Init(&Chassis.leg_length_pid);
     Algorithm_PID_Init(&Chassis.roll_pid);
+    Chassis_Leso_Init(&Chassis.leso);
     Joint_Control_Reset();
     for (index = 0U; index < CHASSIS_LEG_COUNT; index++)
     {
@@ -488,9 +494,9 @@ void Chassis_State_Update(void)
          * 输出重新放行前丢弃故障期间由陈旧反馈积累的动态状态，首个
          * 完整控制周期从当前姿态重新建立速度、积分和 yaw 平衡点。
          */
-        Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_LEFT]);
-        Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_RIGHT]);
+        Algorithm_PID_Init(&Chassis.leg_length_pid);
         Algorithm_PID_Init(&Chassis.roll_pid);
+        Chassis_Leso_Init(&Chassis.leso);
         Joint_Control_Reset();
         Control_Reset();
         Chassis.lqr.target[CHASSIS_STATE_S] = 0.0f;
@@ -1341,40 +1347,50 @@ void Chassis_Control(void)
     }
     else
     {
-        float length_pid[CHASSIS_LEG_COUNT] = {0.0f, 0.0f};
-        float length_force[CHASSIS_LEG_COUNT];
         float gravity_force[CHASSIS_LEG_COUNT];
         float roll =
             Chassis.imu.roll * Chassis_Config.imu.roll_angle_scale;
         float d_roll =
             Chassis.imu.gyro[Chassis_Config.imu.roll_rate_axis] *
             Chassis_Config.imu.roll_rate_scale;
-        float roll_pid = 0.0f;
-        float roll_force;
+        /* 共模：左右平均腿长，代表车身高度。 */
+        float H = 0.5f * (Chassis.leg[CHASSIS_LEFT].L0 +
+                          Chassis.leg[CHASSIS_RIGHT].L0);
+        float H_target = 0.5f * (Chassis.leg[CHASSIS_LEFT].target_L0 +
+                                 Chassis.leg[CHASSIS_RIGHT].target_L0);
+        float d_H = 0.5f * (Chassis.leg[CHASSIS_LEFT].d_L0 +
+                            Chassis.leg[CHASSIS_RIGHT].d_L0);
+        float height_force = 0.0f;
+        float roll_force = 0.0f;
 
-        /*腿长PID*/
-        for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
-        {
-            Algorithm_PID_UpdateByFeedbackRate(
-                &Chassis_Config.leg_length_pid,
-                &Chassis.leg_length_pid[side],
-                Chassis.leg[side].target_L0,
-                Chassis.leg[side].L0,
-                Chassis.leg[side].d_L0,
-                dt,
-                &length_pid[side]);
-            length_force[side] = length_pid[side];
-        }
-        /*横滚PID*/
+        /*
+         * 支撑力按共模和差模两路生成，两路物理上正交，互不干扰。
+         *
+         *   共模 = 车身高度：用左右平均腿长，输出等量加到两条腿；
+         *   差模 = 车身横滚：用IMU横滚角，输出反号加到两条腿。
+         *
+         * 早先是每条腿各跑一个腿长PID再叠加横滚差动，两者在差模上直接对抗：
+         * 横滚控制靠制造左右腿长差来纠正车身，而两条腿共享同一个target_L0，
+         * 腿长PID一见到腿长差就反向拉回，横滚能力被按增益比例吃掉，且与增益
+         * 大小无关。改成共模后腿长PID不再看见腿长差，两个环各管一个自由度。
+         */
+
+        /*共模：车身高度PID*/
+        Algorithm_PID_UpdateByFeedbackRate(&Chassis_Config.leg_length_pid,
+                                           &Chassis.leg_length_pid,
+                                           H_target,
+                                           H,
+                                           d_H,
+                                           dt,
+                                           &height_force);
+        /*差模：横滚PID*/
         Algorithm_PID_UpdateByFeedbackRate(&Chassis_Config.roll_pid,
                                            &Chassis.roll_pid,
                                            Chassis_Config.roll_target,
                                            roll,
                                            d_roll,
                                            dt,
-                                           &roll_pid);
-
-        roll_force = roll_pid;
+                                           &roll_force);
         /*
          * 重力前馈：整车重力在虚拟腿轴向的投影，单腿承担一半。
          * 腿摆得越靠前或靠后，轴向需要承担的分量越小，因此乘cos(theta)。
@@ -1387,22 +1403,14 @@ void Chassis_Control(void)
                 Chassis_Config.model.gravity *
                 Chassis_Config.F0_gravity_scale *
                 cosf(Chassis.leg[side].theta);
-            // gravity_force[side] =
-            //     -0.5f * Chassis_Config.model.body_mass *
-            //     Chassis_Config.model.gravity *
-            //     Chassis_Config.F0_gravity_scale *
-            //     cosf(Chassis.leg[side].theta);
         }
+        /* F0_left/F0_right 的正负号沿用原写法，两者当前均为0。 */
         Chassis.leg[CHASSIS_LEFT].F0 =
-            roll_force + 
-            length_force[CHASSIS_LEFT]
-             -
+            height_force + roll_force -
             gravity_force[CHASSIS_LEFT] +
             Chassis_Config.F0_left;
         Chassis.leg[CHASSIS_RIGHT].F0 =
-            -roll_force + 
-            length_force[CHASSIS_RIGHT]
-             -
+            height_force - roll_force -
             gravity_force[CHASSIS_RIGHT] -
             Chassis_Config.F0_right;
     }
@@ -1423,6 +1431,19 @@ void Chassis_Control(void)
 
     /* 5. TOP只屏蔽位移和航向位置反馈，K矩阵和状态顺序保持不变。 */
     LQR_Calc();
+
+    /*
+     * LESO估出的总扰动与输入同通道同单位，直接从四路广义输出里减掉。
+     * 上一周期的估计供本周期消费，这一拍延迟是因果实现躲不掉的。
+     * 放在这里保证轮和关节各自唯一的限幅点仍在补偿之后生效。
+     */
+    if (Chassis.leso.gate_flag != 0U)
+    {
+        Chassis.output.T_wheel[CHASSIS_LEFT] -= Chassis.leso.d_comp[0];
+        Chassis.output.T_wheel[CHASSIS_RIGHT] -= Chassis.leso.d_comp[1];
+        Chassis.leg[CHASSIS_LEFT].Tp -= Chassis.leso.d_comp[2];
+        Chassis.leg[CHASSIS_RIGHT].Tp -= Chassis.leso.d_comp[3];
+    }
 
     // Chassis.output.T_wheel[CHASSIS_LEFT] = 0.15f;
     // Chassis.output.T_wheel[CHASSIS_RIGHT] = 0.15f;
@@ -1520,6 +1541,13 @@ void Chassis_Control(void)
                sizeof(Chassis.output.I_wheel));
         Chassis.output.safe_flag = 0U;
     }
+
+    /*
+     * 9. 四路输出定稿后才推进扩张状态观测：此时lqr.x是本周期测量、
+     *    output里是本周期实际施加的命令，两者同拍，无需引入输入滞后。
+     */
+    Chassis_Leso_Update(&Chassis_Config, &Chassis);
+    Chassis_Leso_Calc(&Chassis_Config, &Chassis);
 }
 
 /** @brief 切换爬台阶阶段并清空该阶段的计时和摆腿PID状态。 */

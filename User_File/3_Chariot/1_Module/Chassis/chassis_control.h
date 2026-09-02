@@ -167,11 +167,16 @@ struct Chassis
     Chassis_Body_t body;
     Chassis_LQR_t lqr;
 
-    /* 四套互不依赖的只读观测，各自拥有一份状态，不参与控制输出。 */
+    /*
+     * 五套互不依赖的只读观测，各自拥有一份状态。
+     * 前四套完全不参与控制；leso的扰动估计是唯一可按leso.d_scale接入控制的一路，
+     * 接入与否由leso.gate_flag表达，观测器自身仍然只写自己的结构体。
+     */
     Chassis_Slip_t slip;
     Chassis_Ground_t ground;
     Chassis_Turn_t turn;
     Chassis_Stuck_t stuck;
+    Chassis_Leso_t leso;
 
     /* 小陀螺与爬台阶模式的最小跨周期状态。 */
     float top_fai;
@@ -191,7 +196,7 @@ struct Chassis
 
     /* 需要跨控制周期保存的滤波器和PID状态。 */
     algorithm_kalman_t speed_kalman;
-    algorithm_pid_state_t leg_length_pid[CHASSIS_LEG_COUNT];
+    algorithm_pid_state_t leg_length_pid;   /* 共模：车身高度，只此一份。 */
     algorithm_pid_state_t roll_pid;
     algorithm_pid_state_t step_leg_angle_pid[CHASSIS_LEG_COUNT];
     algorithm_pid_state_t joint_angle_pid[APP_DM_COUNT];

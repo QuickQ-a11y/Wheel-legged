@@ -278,8 +278,18 @@ static void test_recovery_handoff(void)
     Chassis_State_Update();
     assert(Chassis.state == CHASSIS_STANDING);
 
-    Chassis_Control();
-    /* 交接回站立后，腿长目标由遥控请求的 goal.L0 直接接管。 */
+    /*
+     * 交接回站立后腿长目标按L0_rate斜坡走向goal.L0，不再一拍直接接管。
+     * 这段落差正是自救结束停在bench_L0、随后收腿到goal.L0的那一下。
+     */
+    for (iteration = 0U; iteration < 1000U; iteration++)
+    {
+        float previous_L0_m = Chassis.leg[CHASSIS_LEFT].target_L0;
+
+        Chassis_Control();
+        assert(fabsf(Chassis.leg[CHASSIS_LEFT].target_L0 - previous_L0_m) <=
+               Chassis_Config.recovery.L0_rate * Chassis.dt + TEST_TOLERANCE);
+    }
     assert(fabsf(Chassis.leg[CHASSIS_LEFT].target_L0 - Chassis.goal.L0) <
            TEST_TOLERANCE);
     assert(fabsf(Chassis.leg[CHASSIS_RIGHT].target_L0 - Chassis.goal.L0) <
@@ -500,7 +510,7 @@ static void test_fault_calculation(void)
     assert_control_request();
     assert_zero_output();
 
-    Chassis.leg_length_pid[CHASSIS_LEFT].integral = 1.0f;
+    Chassis.leg_length_pid.integral = 1.0f;
     Chassis.roll_pid.integral = 2.0f;
     Chassis.joint_angle_pid[left_phi1_index].integral = 3.0f;
     Chassis.speed_kalman.state[0] = 4.0f;
@@ -516,7 +526,7 @@ static void test_fault_calculation(void)
     Chassis_State_Update();
     assert(Chassis.state == CHASSIS_STANDING);
     assert(Chassis.fault == CHASSIS_FAULT_NONE);
-    assert(Chassis.leg_length_pid[CHASSIS_LEFT].integral == 0.0f);
+    assert(Chassis.leg_length_pid.integral == 0.0f);
     assert(Chassis.roll_pid.integral == 0.0f);
     assert(Chassis.joint_angle_pid[left_phi1_index].integral == 0.0f);
     assert(Chassis.speed_kalman.state[0] == 0.0f);
@@ -728,16 +738,26 @@ static void test_remote_goal(void)
     initial_yaw_target_rad = Chassis.lqr.target[CHASSIS_STATE_FAI];
     Chassis.goal.d_s = APP_RC_MAX_VEL;
     Chassis.goal.d_fai = APP_RC_MAX_YAW;
-    Chassis.goal.L0 = APP_RC_LEG_S;
+    /*
+     * 目标腿长写死一个低于播种姿态0.25的值，不取APP_RC_LEG_*：
+     * 那三档是随时会调的整定量，一旦某档等于0.25，斜坡就无事可做，
+     * 本用例要验的"不再一拍到位"会变成空断言。
+     */
+    Chassis.goal.L0 = 0.15f;
     Chassis.body.s = 5.0f;
 
     Chassis_Control();
 
-    /* 速度和腿长目标直接取遥控值，不再走斜坡。 */
+    /* 速度目标直接取遥控值，不走斜坡。 */
     assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_D_S] -
                  APP_RC_MAX_VEL) < TEST_TOLERANCE);
-    assert(fabsf(Chassis.leg[CHASSIS_LEFT].target_L0 -
-                 APP_RC_LEG_S) < TEST_TOLERANCE);
+    /*
+     * 腿长目标按L0_rate斜坡逼近goal.L0：进STANDING时已锁在当时的实际
+     * 腿长0.25，第一拍只朝APP_RC_LEG_S走一个步长，不再一拍到位。
+     */
+    assert(Chassis.leg[CHASSIS_LEFT].target_L0 < 0.25f);
+    assert(fabsf(Chassis.leg[CHASSIS_LEFT].target_L0 - 0.25f) <=
+           Chassis_Config.recovery.L0_rate * Chassis.dt + TEST_TOLERANCE);
     /* 有偏航输入时航向目标按角速度积分，角速度目标直接透传。 */
     assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_FAI] -
                  (initial_yaw_target_rad +
@@ -765,6 +785,7 @@ static void test_remote_goal(void)
 static void test_top_projection(void)
 {
     float yaw_anchor_rad = 0.40f;
+    uint32_t index;
 
     Chassis_Init();
     set_online_feedback();
@@ -786,14 +807,26 @@ static void test_top_projection(void)
            TEST_TOLERANCE);
     assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_D_S] -
                  Chassis.top_d_s) < TEST_TOLERANCE);
+    /* 角速度目标按top.d_fai_rate斜坡逼近，第一拍只走一个步长。 */
     assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_D_FAI] -
-                 Chassis.goal.d_fai) < TEST_TOLERANCE);
+                 Chassis_Config.top.d_fai_rate * Chassis.dt) <
+           TEST_TOLERANCE);
     assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_FAI] -
                  Chassis.imu.yaw_total) < TEST_TOLERANCE);
     assert(Chassis.lqr.scale[CHASSIS_STATE_S] == 0.0f);
     assert(Chassis.lqr.scale[CHASSIS_STATE_FAI] == 0.0f);
     assert(Chassis.lqr.scale[CHASSIS_STATE_D_S] == 1.0f);
     assert(Chassis.lqr.scale[CHASSIS_STATE_D_FAI] == 1.0f);
+
+    /* 持续运行后收敛到满杆角速度并停在目标上，不越过。 */
+    for (index = 0U; index < 1000U; index++)
+    {
+        Chassis_Control();
+        assert(Chassis.lqr.target[CHASSIS_STATE_D_FAI] <=
+               Chassis.goal.d_fai + TEST_TOLERANCE);
+    }
+    assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_D_FAI] -
+                 Chassis.goal.d_fai) < TEST_TOLERANCE);
     assert_zero_output();
 }
 
@@ -991,9 +1024,17 @@ static void test_joint_mapping(void)
     assert(Chassis_Config.phi0_offset == CHASSIS_HALF_PI);
     assert(Chassis_Config.recovery.bench_phi0 == CHASSIS_HALF_PI);
     assert(Chassis_Config.recovery.phi0_min == 0.70f);
-    assert(Chassis_Config.recovery.phi0_max == 3.00f);
+    assert(Chassis_Config.recovery.phi0_max == 2.80f);
     assert(Chassis_Config.recovery.stand_phi0_min == 0.40f);
     assert(Chassis_Config.recovery.stand_phi0_max == 2.80f);
+    /*
+     * 入口门必须落在站立保护门之内。入口门更松时，腿角处在两道门之间
+     * 会先进STANDING、又在同一次State_Select里被姿态保护打回ZERO_FORCE。
+     */
+    assert(Chassis_Config.recovery.phi0_min >=
+           Chassis_Config.recovery.stand_phi0_min);
+    assert(Chassis_Config.recovery.phi0_max <=
+           Chassis_Config.recovery.stand_phi0_max);
 }
 
 int main(void)

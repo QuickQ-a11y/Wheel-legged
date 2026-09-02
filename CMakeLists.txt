@@ -52,6 +52,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     User_File/1_Middleware/2_Algorithm/Angle.c
     User_File/1_Middleware/2_Algorithm/CRC.c
     User_File/1_Middleware/2_Algorithm/Kalman.c
+    User_File/1_Middleware/2_Algorithm/LESO.c
     User_File/1_Middleware/2_Algorithm/LQR.c
     User_File/1_Middleware/2_Algorithm/PID.c
     User_File/1_Middleware/2_Algorithm/QuaternionEKF.c

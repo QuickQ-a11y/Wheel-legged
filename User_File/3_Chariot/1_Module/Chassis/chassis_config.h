@@ -185,9 +185,10 @@ typedef struct
 /** @brief 小陀螺运动边界和十维反馈缩放。 */
 typedef struct
 {
-    float max_d_s;
-    float max_d_fai;
-    float scale[CHASSIS_STATE_COUNT];
+    float max_d_s;                    /* 满杆平移速度，m/s。d_s和d_y共用。 */
+    float max_d_fai;                  /* 满杆自转角速度，rad/s。 */
+    float d_fai_rate;                 /* 自转角速度目标斜率，rad/s^2。 */
+    float scale[CHASSIS_STATE_COUNT]; /* 十维误差逐状态缩放，0关闭该状态反馈。 */
 } Chassis_Top_Config_t;
 
 /** @brief 正向辅助爬台阶动作参数。 */
@@ -307,6 +308,31 @@ typedef struct
                        ALGORITHM_LQR_POLY22_COEFFICIENT_COUNT];
 } Chassis_LQR_Config_t;
 
+/**
+ * @brief LESO扩张状态观测器的离散模型、观测器增益和接入门。
+ *
+ * 三块系数与lqr.coefficients出自ABK_LQR.py的同一次运行、同一个腿长网格，
+ * 因此腿长采样区间复用lqr.L0_min/L0_max，不在这里再存一份。
+ * 扩张系统的A_e = [Ad Bd; 0 I]、B_e = [Bd; 0]由Ad和Bd现场展开，不重复存储。
+ */
+typedef struct
+{
+    /* 扰动补偿接入比例，0关闭补偿只观测，1按估计值足额减去。 */
+    float comp_scale;
+    /* 各输入通道扰动估计限幅，N*m，0表示该通道不限幅。 */
+    float d_limit[CHASSIS_OUTPUT_COUNT];
+    /* 离散状态矩阵Ad，行序 i * CHASSIS_STATE_COUNT + j。 */
+    float Ad_coefficients[CHASSIS_STATE_COUNT * CHASSIS_STATE_COUNT *
+                          ALGORITHM_LQR_POLY22_COEFFICIENT_COUNT];
+    /* 离散输入矩阵Bd，行序 i * CHASSIS_OUTPUT_COUNT + j。 */
+    float Bd_coefficients[CHASSIS_STATE_COUNT * CHASSIS_OUTPUT_COUNT *
+                          ALGORITHM_LQR_POLY22_COEFFICIENT_COUNT];
+    /* 观测器增益L，(状态+扰动)行乘状态列，行序 i * CHASSIS_STATE_COUNT + j。 */
+    float L_coefficients[(CHASSIS_STATE_COUNT + CHASSIS_OUTPUT_COUNT) *
+                         CHASSIS_STATE_COUNT *
+                         ALGORITHM_LQR_POLY22_COEFFICIENT_COUNT];
+} Chassis_LESO_Config_t;
+
 /** @brief 底盘控制唯一只读配置，集中保存机械、模型和安全参数。 */
 typedef struct
 {
@@ -322,6 +348,7 @@ typedef struct
     Chassis_Step_Config_t step;
     Chassis_Observer_Config_t observer;
     Chassis_LQR_Config_t lqr;
+    Chassis_LESO_Config_t leso;
     Chassis_Output_Config_t output;
     float phi0_offset;                /* phi0换算theta时的竖直零点，rad。 */
     float roll_target;                /* 机体横滚目标，rad。 */

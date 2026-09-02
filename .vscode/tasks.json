@@ -1,12 +1,25 @@
 {
-    // 工具链不在系统 PATH 上，所有任务在 options.env 里临时补进去。
+    // 一份通吃 Windows 和 Linux：全局 options 是 Linux 的，windows 平台节整段覆盖它。
+    // 工具链不在系统 PATH 上，靠 options.env 临时补进去；
+    // PATH 分隔符 Linux 是 :、Windows 是 ;，两段各写各的。
+    //
     // 烧录有两条路：OpenOCD（openocd.cfg）和 J-Link Commander（flash.jlink），
-    // 两者都不进调试器，用哪个看你手上的调试器和心情。
+    // 两者都不进调试器，用哪个看你手上的调试器。
+    //
+    // 版本号跟着 STM32 VSCode 扩展 bundle manager 实际下载的版本走，
+    // 与本机 bundles 目录下的文件夹名不一致时，改下面两段 PATH 里的版本号。
     "version": "2.0.0",
     "options": {
         "cwd": "${workspaceFolder}",
         "env": {
             "PATH": "${env:HOME}/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin:${env:HOME}/.local/share/stm32cube/bundles/ninja/1.13.2+st.1/bin:${env:PATH}"
+        }
+    },
+    "windows": {
+        "options": {
+            "env": {
+                "PATH": "${env:LOCALAPPDATA}\\stm32cube\\bundles\\gnu-tools-for-stm32\\14.3.1+st.2\\bin;${env:LOCALAPPDATA}\\stm32cube\\bundles\\ninja\\1.13.2+st.1\\bin;${env:PATH}"
+            }
         }
     },
     "tasks": [
@@ -36,11 +49,16 @@
             }
         },
         {
-            // 用 && 串联而不是 dependsOn：VS Code 的 dependsOn 序列在前一个任务
+            // 串联而不是用 dependsOn：VS Code 的 dependsOn 序列在前一个任务
             // 失败时仍会继续，那样会把上一次的旧 elf 烧进去。
+            // Windows 单独写一份：默认 shell 是 PowerShell 5.1，不支持 &&（PS 7 才有），
+            // 用 $LASTEXITCODE 判断上一条原生命令的退出码，$? 对原生命令不可靠。
             "label": "编译 + 烧录 (OpenOCD)",
             "type": "shell",
             "command": "cmake --build build/Debug && openocd -f openocd.cfg -c \"program build/Debug/Wheel-legged.elf verify reset exit\"",
+            "windows": {
+                "command": "cmake --build build/Debug; if ($LASTEXITCODE -eq 0) { openocd -f openocd.cfg -c \"program build/Debug/Wheel-legged.elf verify reset exit\" }"
+            },
             "problemMatcher": [
                 "$gcc"
             ],
@@ -55,9 +73,14 @@
             }
         },
         {
+            // J-Link 命令行工具 Linux 叫 JLinkExe、Windows 叫 JLink.exe，
+            // 且 Windows 默认装在带空格的 Program Files 下，所以整条命令单独覆盖。
             "label": "烧录 (J-Link)",
             "type": "shell",
             "command": "JLinkExe -device STM32H723VG -if SWD -speed 4000 -autoconnect 1 -CommanderScript flash.jlink",
+            "windows": {
+                "command": "& 'C:/Program Files/SEGGER/JLink/JLink.exe' -device STM32H723VG -if SWD -speed 4000 -autoconnect 1 -CommanderScript flash.jlink"
+            },
             "problemMatcher": [],
             "presentation": {
                 "reveal": "always",
@@ -69,6 +92,9 @@
             "label": "编译 + 烧录 (J-Link)",
             "type": "shell",
             "command": "cmake --build build/Debug && JLinkExe -device STM32H723VG -if SWD -speed 4000 -autoconnect 1 -CommanderScript flash.jlink",
+            "windows": {
+                "command": "cmake --build build/Debug; if ($LASTEXITCODE -eq 0) { & 'C:/Program Files/SEGGER/JLink/JLink.exe' -device STM32H723VG -if SWD -speed 4000 -autoconnect 1 -CommanderScript flash.jlink }"
+            },
             "problemMatcher": [
                 "$gcc"
             ],

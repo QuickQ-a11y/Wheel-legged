@@ -8,11 +8,13 @@ extern "C" {
 #include "chassis_config.h"
 #include "chassis_vmc.h"
 
+#include "LESO.h"
+
 #include <stdint.h>
 
 /*
- * 打滑、离地、转向和卡腿是四套互不依赖的只读观测，各自拥有一份状态。
- * 四者都按 Init 建立初值、Update 计算观测量、Calc 给出结论的顺序使用，
+ * 打滑、离地、转向、卡腿和扩张状态观测是五套互不依赖的只读观测，各自拥有一份状态。
+ * 五者都按 Init 建立初值、Update 计算观测量、Calc 给出结论的顺序使用，
  * 全部只写自己的结构体，不回写任何控制量。
  *
  * 判定口径参考 HERO_LEG 实机工程：轮速残差闸门与打滑锁存退出、整车离地
@@ -95,6 +97,18 @@ typedef struct
     float comp_L0[CHASSIS_LEG_COUNT];      /* 建议收腿量，m；本轮不接入目标腿长。 */
 } Chassis_Stuck_t;
 
+/** @brief 十维模型扩张四个输入通道扰动得到的LESO观测状态。 */
+typedef struct
+{
+    uint8_t init_flag;                     /* 已用测量建立估计初值。 */
+    uint8_t gate_flag;                     /* 本轮允许把扰动估计接进控制。 */
+    uint8_t fit_limit_flag;                /* 拟合腿长被L0_min/L0_max夹紧。 */
+    float u[CHASSIS_OUTPUT_COUNT];         /* 安全门后实际施加的四路力矩，N*m。 */
+    float d_hat[CHASSIS_OUTPUT_COUNT];     /* 限幅后的各通道总扰动估计，N*m。 */
+    float d_comp[CHASSIS_OUTPUT_COUNT];    /* 实际从控制量里减掉的补偿，N*m。 */
+    algorithm_leso_t leso;                 /* 估计向量与残差。 */
+} Chassis_Leso_t;
+
 typedef struct Chassis Chassis_t;
 
 /**
@@ -156,6 +170,23 @@ void Chassis_Stuck_Update(const Chassis_Config_t *config, Chassis_t *chassis);
  * @brief 轮力矩和腿摆角同时超阈值并持续后判定卡腿，给出补偿建议值。
  */
 void Chassis_Stuck_Calc(const Chassis_Config_t *config, Chassis_t *chassis);
+
+/**
+ * @brief 清空扩张状态观测状态。
+ */
+void Chassis_Leso_Init(Chassis_Leso_t *leso);
+
+/**
+ * @brief 取本轮实际施加的四路力矩，按实时腿长重建离散模型并推进一步观测。
+ *
+ * 必须在四路输出全部定稿之后调用，否则拿到的是上一周期的输入。
+ */
+void Chassis_Leso_Update(const Chassis_Config_t *config, Chassis_t *chassis);
+
+/**
+ * @brief 判定扰动估计本轮能否接入控制，并给出实际补偿量。
+ */
+void Chassis_Leso_Calc(const Chassis_Config_t *config, Chassis_t *chassis);
 
 #ifdef __cplusplus
 }

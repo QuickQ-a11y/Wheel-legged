@@ -520,3 +520,147 @@ void Chassis_Stuck_Calc(const Chassis_Config_t *config, Chassis_t *chassis)
         }
     }
 }
+
+void Chassis_Leso_Init(Chassis_Leso_t *leso)
+{
+    memset(leso, 0, sizeof(*leso));
+    Algorithm_LESO_Init(&leso->leso, CHASSIS_STATE_COUNT, CHASSIS_OUTPUT_COUNT);
+}
+
+/**
+ * @brief 由安全门后的最终命令还原被控对象真正收到的四路广义力矩。
+ *
+ * 轮通道由电调电流反算，腿摆通道由最终关节力矩经VMC逆映射反解。
+ * 取最终命令而不是请求量，输出被封锁或限幅时观测器才不会高估输入。
+ */
+static void Leso_Input_Update(const Chassis_Config_t *config,
+                              Chassis_t *chassis)
+{
+    Chassis_Leso_t *leso = &chassis->leso;
+    uint32_t side;
+
+    for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+    {
+        float wheel_scale = (side == CHASSIS_LEFT) ?
+                                config->wheel.left_scale :
+                                config->wheel.right_scale;
+        float wheel_gain = config->wheel.T_to_I * wheel_scale;
+        uint8_t phi1_index =
+            config->leg[side].joint[CHASSIS_JOINT_PHI1].motor_index;
+        uint8_t phi4_index =
+            config->leg[side].joint[CHASSIS_JOINT_PHI4].motor_index;
+        VMC_Force_t force;
+
+        leso->u[side] = (fabsf(wheel_gain) > CHASSIS_OBS_EPS) ?
+                            ((float)chassis->output.I_wheel[side] / wheel_gain) :
+                            0.0f;
+        leso->u[CHASSIS_LEG_COUNT + side] =
+            (VMC_Force_Calc(&config->leg[side],
+                            &chassis->leg[side],
+                            chassis->output.T_joint[phi1_index],
+                            chassis->output.T_joint[phi4_index],
+                            &force) != 0U) ? force.Tp : 0.0f;
+    }
+}
+
+void Chassis_Leso_Update(const Chassis_Config_t *config, Chassis_t *chassis)
+{
+    /* 三块矩阵每周期由实时腿长重建，只在本文件内跨调用复用一份存储。 */
+    static float Ad[CHASSIS_STATE_COUNT * CHASSIS_STATE_COUNT];
+    static float Bd[CHASSIS_STATE_COUNT * CHASSIS_OUTPUT_COUNT];
+    static float L[(CHASSIS_STATE_COUNT + CHASSIS_OUTPUT_COUNT) *
+                   CHASSIS_STATE_COUNT];
+    Chassis_Leso_t *leso = &chassis->leso;
+    float fit_L0_left;
+    float fit_L0_right;
+    uint8_t limit_flag;
+    uint32_t index;
+
+    Leso_Input_Update(config, chassis);
+
+    /* 与K同一套poly22基础设施，输入同样是左右实时腿长和同一个采样区间。 */
+    Algorithm_LQR_FitLqrKPoly22(config->leso.Ad_coefficients,
+                                CHASSIS_STATE_COUNT,
+                                CHASSIS_STATE_COUNT,
+                                chassis->leg[CHASSIS_LEFT].L0,
+                                chassis->leg[CHASSIS_RIGHT].L0,
+                                config->lqr.L0_min,
+                                config->lqr.L0_max,
+                                Ad,
+                                &fit_L0_left,
+                                &fit_L0_right,
+                                &limit_flag);
+    Algorithm_LQR_FitLqrKPoly22(config->leso.Bd_coefficients,
+                                CHASSIS_STATE_COUNT,
+                                CHASSIS_OUTPUT_COUNT,
+                                chassis->leg[CHASSIS_LEFT].L0,
+                                chassis->leg[CHASSIS_RIGHT].L0,
+                                config->lqr.L0_min,
+                                config->lqr.L0_max,
+                                Bd,
+                                &fit_L0_left,
+                                &fit_L0_right,
+                                &limit_flag);
+    Algorithm_LQR_FitLqrKPoly22(config->leso.L_coefficients,
+                                CHASSIS_STATE_COUNT + CHASSIS_OUTPUT_COUNT,
+                                CHASSIS_STATE_COUNT,
+                                chassis->leg[CHASSIS_LEFT].L0,
+                                chassis->leg[CHASSIS_RIGHT].L0,
+                                config->lqr.L0_min,
+                                config->lqr.L0_max,
+                                L,
+                                &fit_L0_left,
+                                &fit_L0_right,
+                                &limit_flag);
+    leso->fit_limit_flag = limit_flag;
+
+    /*
+     * 输出被封锁时施加的力矩是零而不是命令值，继续递推会把控制器请求
+     * 当成已施加输入，扰动估计立即发散。这种周期直接用当前测量重建估计。
+     */
+    if ((leso->init_flag == 0U) || (chassis->output.safe_flag != 0U))
+    {
+        Algorithm_LESO_Seed(&leso->leso, chassis->lqr.x);
+        leso->init_flag = 1U;
+    }
+    else
+    {
+        Algorithm_LESO_Update(&leso->leso,
+                              Ad,
+                              Bd,
+                              L,
+                              chassis->lqr.x,
+                              leso->u,
+                              config->leso.d_limit);
+    }
+
+    for (index = 0U; index < CHASSIS_OUTPUT_COUNT; index++)
+    {
+        leso->d_hat[index] = leso->leso.estimate[CHASSIS_STATE_COUNT + index];
+    }
+}
+
+void Chassis_Leso_Calc(const Chassis_Config_t *config, Chassis_t *chassis)
+{
+    Chassis_Leso_t *leso = &chassis->leso;
+    uint32_t index;
+
+    /*
+     * 十维模型假设双轮触地，单腿悬空时模型本身不成立，此时补偿不接入。
+     * 倒地、台阶动作和非站立状态同理。
+     */
+    leso->gate_flag =
+        ((config->leso.comp_scale > 0.0f) &&
+         (leso->init_flag != 0U) &&
+         (chassis->state == CHASSIS_STANDING) &&
+         (chassis->fault == CHASSIS_FAULT_NONE) &&
+         (chassis->ground.off_ground_flag[CHASSIS_LEFT] == 0U) &&
+         (chassis->ground.off_ground_flag[CHASSIS_RIGHT] == 0U)) ? 1U : 0U;
+
+    for (index = 0U; index < CHASSIS_OUTPUT_COUNT; index++)
+    {
+        leso->d_comp[index] = (leso->gate_flag != 0U) ?
+                                  (leso->d_hat[index] * config->leso.comp_scale) :
+                                  0.0f;
+    }
+}

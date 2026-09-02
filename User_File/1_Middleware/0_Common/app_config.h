@@ -59,11 +59,11 @@ _Static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) !=
 #define APP_DM_PMIN (-12.5f)
 #define APP_DM_PMAX 12.5f
 
-/* 速度单位 rad/s，力矩单位 N*m；范围按当前 J4310 协议配置。 */
+/* 速度单位 rad/s，力矩单位 N*m；范围按当前 J8009P 协议配置。 */
 #define APP_DM_VEL_MIN (-30.0f)
 #define APP_DM_VEL_MAX 30.0f
-#define APP_DM_TOR_MIN (-10.0f)
-#define APP_DM_TOR_MAX 10.0f
+#define APP_DM_TOR_MIN (-15.0f)
+#define APP_DM_TOR_MAX 15.0f
 
 #define APP_CAN_PERIOD_TICKS 1U
 /* IMU和底盘控制统一按1 kHz运行，延迟时由各任务使用实际dt补偿。 */
@@ -90,11 +90,11 @@ _Static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) !=
  * 由控制层积分得到，松杆后锁位置、锁航向，因此不需要目标斜坡。
  */
 #define APP_RC_MAX_VEL 3.0f   /* 满杆前进速度，m/s。 */
-#define APP_RC_MAX_YAW 1.0f   /* 满杆偏航角速度，rad/s。 */
+#define APP_RC_MAX_YAW 2.0f   /* 满杆偏航角速度，rad/s。 */
 #define APP_RC_VEL_RATE 1.0f  /* 爬台阶接近段的速度目标斜率，m/s^2。 */
-#define APP_RC_LEG_S 0.12f
-#define APP_RC_LEG_M 0.12f
-#define APP_RC_LEG_L 0.12f
+#define APP_RC_LEG_S 0.25f
+#define APP_RC_LEG_M 0.14f
+#define APP_RC_LEG_L 0.35f
 
 /*
  * 控制器第一阶段只计算中间状态和安全输出。
