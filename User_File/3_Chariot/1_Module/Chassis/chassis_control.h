@@ -181,6 +181,7 @@ struct Chassis
     /* 小陀螺与爬台阶模式的最小跨周期状态。 */
     float top_fai;
     float top_d_s;
+    uint8_t top_exit_flag;          /* 刚退出小陀螺，角速度目标正在斜坡收敛，尚未交回摇杆。 */
     float step_fai;
     Chassis_Step_Phase_t step_phase;
     Chassis_Swing_t swing[CHASSIS_LEG_COUNT]; /* CLIMB阶段单腿摆动子步。 */

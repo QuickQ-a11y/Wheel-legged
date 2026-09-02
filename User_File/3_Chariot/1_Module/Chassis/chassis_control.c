@@ -73,6 +73,29 @@ static void Motion_Update(void)
                         Chassis.goal.d_fai,
                         Chassis_Config.top.d_fai_rate * dt);
         Chassis.yaw_stick_flag = 0U;
+        Chassis.top_exit_flag = 1U;
+    }
+    else if (Chassis.top_exit_flag != 0U)
+    {
+        /*
+         * 刚退出小陀螺，角速度目标还停在自转转速上。直接交回摇杆会让目标
+         * 从spin_d_fai阶跃到摇杆值，LQR随即给出大反向轮力矩硬刹机体。
+         * 按起转同一斜率收敛到摇杆值后再交回，收敛期间航向目标跟随实际，
+         * 避免和松杆锁航向逻辑同时生效。
+         */
+        Chassis.top_d_s = 0.0f;
+        Chassis.lqr.target[CHASSIS_STATE_D_S] = Chassis.goal.d_s;
+        Chassis.lqr.target[CHASSIS_STATE_D_FAI] =
+            Move_Toward(Chassis.lqr.target[CHASSIS_STATE_D_FAI],
+                        Chassis.goal.d_fai,
+                        Chassis_Config.top.d_fai_rate * dt);
+        Chassis.lqr.target[CHASSIS_STATE_FAI] = model_yaw_rad;
+        Chassis.yaw_stick_flag = 0U;
+        /* Move_Toward到达时精确取到目标值，因此等值即表示斜坡走完。 */
+        if (Chassis.lqr.target[CHASSIS_STATE_D_FAI] == Chassis.goal.d_fai)
+        {
+            Chassis.top_exit_flag = 0U;
+        }
     }
     else
     {

@@ -799,7 +799,8 @@ static void test_top_projection(void)
 
     Chassis.goal.d_s = 0.25f;
     Chassis.goal.d_y = -0.10f;
-    Chassis.goal.d_fai = 2.0f;
+    /* 固定转速自转：目标转速来自配置，不再由右摇杆给。 */
+    Chassis.goal.d_fai = Chassis_Config.top.spin_d_fai;
     Chassis.imu.yaw_total = yaw_anchor_rad + CHASSIS_HALF_PI;
     Chassis_Control();
 
@@ -818,7 +819,7 @@ static void test_top_projection(void)
     assert(Chassis.lqr.scale[CHASSIS_STATE_D_S] == 1.0f);
     assert(Chassis.lqr.scale[CHASSIS_STATE_D_FAI] == 1.0f);
 
-    /* 持续运行后收敛到满杆角速度并停在目标上，不越过。 */
+    /* 持续运行后收敛到配置转速并停在目标上，不越过。 */
     for (index = 0U; index < 1000U; index++)
     {
         Chassis_Control();
@@ -827,6 +828,60 @@ static void test_top_projection(void)
     }
     assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_D_FAI] -
                  Chassis.goal.d_fai) < TEST_TOLERANCE);
+    assert_zero_output();
+}
+
+/*
+ * 退出小陀螺时角速度目标必须按斜坡收敛到摇杆值，不能阶跃。
+ * 直接交回摇杆会让目标从spin_d_fai一拍跳到0，LQR随即给出大反向轮力矩硬刹。
+ */
+static void test_top_exit_ramp(void)
+{
+    float yaw_anchor_rad = 0.40f;
+    float maximum_step;
+    float previous_target;
+    uint32_t index;
+
+    Chassis_Init();
+    set_online_feedback();
+    Chassis.imu.yaw_total = yaw_anchor_rad;
+    set_symmetric_leg_pose(0.25f, CHASSIS_HALF_PI);
+    Chassis.mode = CHASSIS_MODE_TOP;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_STANDING);
+
+    /* 先让自转转速爬满。 */
+    Chassis.goal.d_fai = Chassis_Config.top.spin_d_fai;
+    for (index = 0U; index < 1000U; index++)
+    {
+        Chassis_Control();
+    }
+    assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_D_FAI] -
+                 Chassis_Config.top.spin_d_fai) < TEST_TOLERANCE);
+    assert(Chassis.top_exit_flag == 1U);
+
+    /* 拨回跟随、摇杆回中：角速度目标必须逐拍下降，且每拍不超过一个步长。 */
+    Chassis.mode = CHASSIS_MODE_FOLLOW;
+    Chassis.goal.d_fai = 0.0f;
+    Chassis_State_Update();
+    maximum_step = Chassis_Config.top.d_fai_rate * Chassis.dt;
+    for (index = 0U; index < 1000U; index++)
+    {
+        previous_target = Chassis.lqr.target[CHASSIS_STATE_D_FAI];
+        Chassis_Control();
+        assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_D_FAI] -
+                     previous_target) <= maximum_step + TEST_TOLERANCE);
+        assert(Chassis.lqr.target[CHASSIS_STATE_D_FAI] >= -TEST_TOLERANCE);
+    }
+    assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_D_FAI]) < TEST_TOLERANCE);
+    /* 收敛完成后标志清零，控制权交回摇杆。 */
+    assert(Chassis.top_exit_flag == 0U);
+
+    /* 交回之后摇杆直通，不再经过斜坡。 */
+    Chassis.goal.d_fai = 0.5f;
+    Chassis_Control();
+    assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_D_FAI] - 0.5f) <
+           TEST_TOLERANCE);
     assert_zero_output();
 }
 
@@ -1058,6 +1113,7 @@ int main(void)
     test_remote_fault();
     test_remote_goal();
     test_top_projection();
+    test_top_exit_ramp();
     test_step_phases();
     test_step_timeout();
     return 0;

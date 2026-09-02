@@ -67,6 +67,10 @@ int main(void)
     Chassis_Remote_Update(&remote);
     assert_near(Chassis.goal.L0, APP_RC_LEG_L);
 
+    /*
+     * 小陀螺按配置的固定转速自转：右摇杆无论推到哪里，goal.d_fai 都等于
+     * spin_d_fai。左摇杆的二维平移仍然生效。
+     */
     remote.modeRequest = REMOTE_MODE_TOP;
     remote.leftStick.y = 1.0f;
     remote.leftStick.x = -0.5f;
@@ -78,7 +82,19 @@ int main(void)
     assert_near(Chassis.goal.d_y,
                -0.5f * Chassis_Config.top.max_d_s);
     assert_near(Chassis.goal.d_fai,
-               -Chassis_Config.top.max_d_fai);
+               Chassis_Config.top.spin_d_fai);
+
+    /* 右摇杆推到反向满杆，转速仍然不变。 */
+    remote.rightStick.x = -1.0f;
+    Chassis_Remote_Update(&remote);
+    assert_near(Chassis.goal.d_fai,
+               Chassis_Config.top.spin_d_fai);
+
+    /* 右摇杆回中，转速依旧是配置值，不会掉到 0。 */
+    remote.rightStick.x = 0.0f;
+    Chassis_Remote_Update(&remote);
+    assert_near(Chassis.goal.d_fai,
+               Chassis_Config.top.spin_d_fai);
 
     remote.modeRequest = REMOTE_MODE_STEP;
     remote.leftStick.y = 0.5f;

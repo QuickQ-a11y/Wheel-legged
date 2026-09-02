@@ -28,8 +28,8 @@ static void Remote_Goal_Update(const Remote_t *remote)
         Chassis.goal.d_y =
             remote->leftStick.x *
             Chassis_Config.top.max_d_s;
-        Chassis.goal.d_fai =
-            -yaw_axis * Chassis_Config.top.max_d_fai;
+        /* 小陀螺按配置的固定转速自转，右摇杆不参与调速。 */
+        Chassis.goal.d_fai = Chassis_Config.top.spin_d_fai;
     }
     else
     {

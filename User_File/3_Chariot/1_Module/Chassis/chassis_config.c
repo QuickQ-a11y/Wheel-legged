@@ -287,7 +287,7 @@ const Chassis_Config_t Chassis_Config = {
     /* 小陀螺保留速度和姿态反馈，关闭位移与航向角位置反馈。 */
     .top = {
         .max_d_s = 0.25f,
-        .max_d_fai = 2.0f,
+        .spin_d_fai = 6.0f,
         .d_fai_rate = 3.0f,
         .scale = {
             [CHASSIS_STATE_S] = 0.0f,
@@ -787,7 +787,7 @@ const Chassis_Config_t Chassis_Config = {
     },
     /* roll PID输出以左右腿差动支撑力的形式作用。 */
     .roll_pid = {
-        .kp = 100.0f,
+        .kp = 400.0f,
         .ki = 0.0f,
         .kd = 0.0f,
         .integralLimit = 5.0f,
@@ -853,21 +853,21 @@ const Chassis_Config_t Chassis_Config = {
     },
     /* 小陀螺保留速度和姿态反馈，关闭位移与航向角位置反馈。 */
     .top = {
-        .max_d_s = 0.25f,
-        .max_d_fai = 2.0f,
+        .max_d_s = 0.6f,
+        .spin_d_fai = 9.0f,
         /* 缺这一项时斜坡步长为0，小陀螺角速度目标会永远停在0转不起来。 */
-        .d_fai_rate = 3.0f,
+        .d_fai_rate = 9.0f,
         .scale = {
             [CHASSIS_STATE_S] = 0.0f,
             [CHASSIS_STATE_D_S] = 1.0f,
             [CHASSIS_STATE_FAI] = 0.0f,
             [CHASSIS_STATE_D_FAI] = 1.0f,
-            [CHASSIS_STATE_THETA_L] = 1.0f,
-            [CHASSIS_STATE_D_THETA_L] = 1.0f,
-            [CHASSIS_STATE_THETA_R] = 1.0f,
-            [CHASSIS_STATE_D_THETA_R] = 1.0f,
-            [CHASSIS_STATE_THETA_B] = 1.0f,
-            [CHASSIS_STATE_D_THETA_B] = 1.0f,
+            [CHASSIS_STATE_THETA_L] = 1.2f,
+            [CHASSIS_STATE_D_THETA_L] = 1.2f,
+            [CHASSIS_STATE_THETA_R] = 1.2f,
+            [CHASSIS_STATE_D_THETA_R] = 1.2f,
+            [CHASSIS_STATE_THETA_B] = 3.0f,
+            [CHASSIS_STATE_D_THETA_B] = 1.4f,
         },
     },
     /* 当前均为输出封锁阶段的保守调试初值。 */
@@ -1375,10 +1375,10 @@ const Chassis_Config_t Chassis_Config = {
     /* 最终物理输出开关；关闭不影响请求量和控制中间量计算。 */
     .output = {
         /*
-         * ⚠ 这里不是关节力矩的最终天花板。设备层在 MIT 编码时还会按
-         * app_config.h 的 APP_DM_TOR_MIN/MAX 再夹一次，当前是 +/-10 N*m，
-         * 所以 joint_T_limit 超过 10 的部分不会生效。要真正放开必须先用
-         * 达妙上位机改电机 TMAX 寄存器，再同步改 APP_DM_TOR_MAX，两者必须一致。
+         * ⚠ 这里不是唯一的天花板。设备层在 MIT 编码时还会按 app_config.h 的
+         * APP_DM_TOR_MIN/MAX 再夹一次，joint_T_limit 超出那个量程的部分不会生效，
+         * 所以两者要一起看。而 APP_DM_TOR_MAX 本身必须与达妙上位机烧进电机的
+         * TMAX 寄存器逐位一致，否则所有力矩都会按两者之比缩放。
          * 参考量级：仅重力前馈就需要 5.7~7.8 N*m（随腿长变化），低于此值腿撑不起来。
          */
         .joint_flag = 1U,

@@ -186,7 +186,11 @@ typedef struct
 typedef struct
 {
     float max_d_s;                    /* 满杆平移速度，m/s。d_s和d_y共用。 */
-    float max_d_fai;                  /* 满杆自转角速度，rad/s。 */
+    /*
+     * 固定自转角速度，rad/s，正为俯视逆时针。
+     * 进入小陀螺即按它起转，与摇杆无关；方向不对直接把这里改成负数。
+     */
+    float spin_d_fai;
     float d_fai_rate;                 /* 自转角速度目标斜率，rad/s^2。 */
     float scale[CHASSIS_STATE_COUNT]; /* 十维误差逐状态缩放，0关闭该状态反馈。 */
 } Chassis_Top_Config_t;
