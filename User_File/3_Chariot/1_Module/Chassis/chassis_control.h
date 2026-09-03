@@ -23,7 +23,6 @@ extern "C" {
 #define CHASSIS_FAULT_KINEMATICS 0x00000040UL     /* 五连杆状态、逆解或力映射无效。 */
 #define CHASSIS_FAULT_RECOVERY_TIMEOUT 0x00000080UL /* 恢复动作阶段超时。 */
 #define CHASSIS_FAULT_REMOTE 0x00000100UL         /* 遥控器离线或收到急停请求。 */
-#define CHASSIS_FAULT_STEP_TIMEOUT 0x00000200UL   /* 爬台阶动作阶段超时。 */
 #define CHASSIS_FAULT_DM_ERROR 0x00000400UL       /* 至少一个髋关节报错误状态。 */
 
 /* 外部请求模式：表示操作者想让底盘执行的行为。 */

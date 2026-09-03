@@ -342,8 +342,18 @@ static void State_Enter(Chassis_State_t state)
         for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
         {
             Algorithm_PID_Init(&Chassis.step_leg_angle_pid[side]);
+            /*
+             * 和进STANDING一样从当前实际腿长接管，再由Chassis_Step()按
+             * step.L0_rate斜坡逼近approach_L0。这里直接赋approach_L0
+             * 会让那条斜坡变成空操作：切入瞬间腿长目标阶跃(中档0.14到
+             * 0.30差0.16m)，kp=800把腿长PID一拍打到outputLimit=100N，
+             * 叠加重力前馈后F0超过整车重量，腿被弹出去直接失衡倒地。
+             */
             Chassis.leg[side].target_L0 =
-                Chassis_Config.step.approach_L0;
+                ((Chassis.leg[CHASSIS_LEFT].valid_flag != 0U) &&
+                 (Chassis.leg[CHASSIS_RIGHT].valid_flag != 0U)) ?
+                    Chassis.leg[side].L0 :
+                    Chassis_Config.step.approach_L0;
         }
     }
 }
@@ -483,6 +493,7 @@ void Chassis_State_Update(void)
 {
     float theta_b;
     uint8_t leg_valid_flag;
+    uint8_t attitude_ready;
     uint32_t output_fault;
     uint32_t active_fault;
     uint32_t last_output_fault;
@@ -530,6 +541,23 @@ void Chassis_State_Update(void)
     /* 3. 仅在外部模式变化时选择入口状态，避免每周期重复初始化。 */
     if (Chassis.mode != Chassis.last_mode)
     {
+        /*
+         * 能否直接进入站立：左右腿正解有效、pitch较小且两条虚拟腿都
+         * 位于准备角区间；正解无效时也放行，中间量继续计算，最终输出
+         * 由故障门封锁。TOP和FOLLOW共用同一个姿态门。
+         */
+        attitude_ready =
+            ((leg_valid_flag == 0U) ||
+             ((fabsf(theta_b) <= Chassis_Config.recovery.direct_pitch) &&
+              (Angle_In_Range(
+                   Chassis.leg[CHASSIS_LEFT].phi0_total,
+                   Chassis_Config.recovery.phi0_min,
+                   Chassis_Config.recovery.phi0_max) != 0U) &&
+              (Angle_In_Range(
+                   Chassis.leg[CHASSIS_RIGHT].phi0_total,
+                   Chassis_Config.recovery.phi0_min,
+                   Chassis_Config.recovery.phi0_max) != 0U))) ? 1U : 0U;
+
         Chassis.fault = active_fault;
         switch (Chassis.mode)
         {
@@ -539,36 +567,40 @@ void Chassis_State_Update(void)
                 Chassis_Config.imu.yaw_angle_scale;
             Chassis.lqr.target[CHASSIS_STATE_FAI] =
                 Chassis.top_fai;
-            /* TOP和FOLLOW进入站立的姿态条件相同。 */
-            /* fall through */
-
-        case CHASSIS_MODE_FOLLOW:
             if (Chassis.state != CHASSIS_STANDING)
             {
-                /*
-                 * 能否直接进入站立：左右腿正解有效、pitch较小且两条
-                 * 虚拟腿都位于准备角区间；正解无效时也放行，中间量继
-                 * 续计算，最终输出由故障门封锁。
-                 */
-                if ((leg_valid_flag == 0U) ||
-                    ((fabsf(theta_b) <=
-                      Chassis_Config.recovery.direct_pitch) &&
-                     (Angle_In_Range(
-                          Chassis.leg[CHASSIS_LEFT].phi0_total,
-                          Chassis_Config.recovery.phi0_min,
-                          Chassis_Config.recovery.phi0_max) != 0U) &&
-                     (Angle_In_Range(
-                          Chassis.leg[CHASSIS_RIGHT].phi0_total,
-                          Chassis_Config.recovery.phi0_min,
-                          Chassis_Config.recovery.phi0_max) != 0U)))
+                if (attitude_ready != 0U)
                 {
                     State_Enter(CHASSIS_STANDING);
                 }
                 else
                 {
+                    /* 小陀螺不自动自起，姿态不满足先拨回左中站起来。 */
                     Chassis.fault =
                         output_fault | CHASSIS_FAULT_CONTROL;
                     State_Enter(CHASSIS_ZERO_FORCE);
+                }
+            }
+            break;
+
+        case CHASSIS_MODE_FOLLOW:
+            if (Chassis.state != CHASSIS_STANDING)
+            {
+                if (attitude_ready != 0U)
+                {
+                    State_Enter(CHASSIS_STANDING);
+                }
+                else
+                {
+                    /*
+                     * 左中合并了倒地自起：姿态不满足时不再直接零力矩报
+                     * 故障，走一遍FALLEN->FALLING_TO_STAND自救链，稳定
+                     * 后自动转入STANDING，全程mode保持FOLLOW，不需要
+                     * 用户二次操作。
+                     * 注意这个判断在mode边沿块内，只在拨杆切进左中那一拍
+                     * 做一次；站立途中摔倒不会再次触发，见第4步的说明。
+                     */
+                    State_Enter(CHASSIS_FALLEN);
                 }
             }
             break;
@@ -593,7 +625,12 @@ void Chassis_State_Update(void)
         Chassis.last_mode = Chassis.mode;
     }
 
-    /* 4. 数学有效时才用当前腿角执行站立姿态保护。 */
+    /*
+     * 4. 数学有效时才用当前腿角执行站立姿态保护。
+     * 站立途中摔倒一律落到零力矩，不自动转FALLEN重爬：自动自起只在第3步
+     * 的mode边沿判一次，摔倒后要重新自起得把拨杆拨走再拨回左中。这是有意
+     * 保留的行为，调试时不希望车在没人操作的情况下自己动起来。
+     */
     if ((Chassis.state == CHASSIS_STANDING) &&
         (leg_valid_flag != 0U) &&
         ((fabsf(theta_b) >
@@ -874,6 +911,7 @@ void Chassis_Recovery(void)
                 rotate_rate[side] = recovery->rotate_rate;
             }
             /* 机体俯仰方向决定倒地后虚拟腿应向哪一侧翻转。 */
+            // direction = (theta_b < 0.0f) ? 1.0f : -1.0f;
             direction = (theta_b < 0.0f) ? 1.0f : -1.0f;
 
             /*
@@ -1573,14 +1611,12 @@ void Chassis_Control(void)
     Chassis_Leso_Calc(&Chassis_Config, &Chassis);
 }
 
-/** @brief 切换爬台阶阶段并清空该阶段的计时和摆腿PID状态。 */
+/** @brief 切换爬台阶阶段并重置该阶段用到的摆腿PID和子步状态。 */
 static void Step_Phase_Enter(Chassis_Step_Phase_t phase)
 {
     uint32_t side;
 
     Chassis.step_phase = phase;
-    Chassis.state_time = 0.0f;
-    Chassis.stable_time = 0.0f;
     if ((phase == CHASSIS_STEP_CLIMB) ||
         (phase == CHASSIS_STEP_RECOVER))
     {
@@ -1594,14 +1630,6 @@ static void Step_Phase_Enter(Chassis_Step_Phase_t phase)
             }
         }
     }
-}
-
-/** @brief 爬台阶阶段超时后封锁全部输出并保留专用故障位。 */
-static void Step_Fail(void)
-{
-    Chassis_Zero_Output();
-    Chassis.fault = CHASSIS_FAULT_STEP_TIMEOUT;
-    State_Enter(CHASSIS_ZERO_FORCE);
 }
 
 /** @brief 更新左右轮碰撞候选，只有请求、反馈和腿角同时满足才锁存。 */
@@ -1691,13 +1719,43 @@ void Chassis_Step(void)
         target_angle_rad = config->recover_theta;
     }
 
-    Chassis.state_time += dt;
     Chassis.lqr.target[CHASSIS_STATE_D_S] =
         Move_Toward(Chassis.lqr.target[CHASSIS_STATE_D_S],
                            target_speed_mps,
                            APP_RC_VEL_RATE * dt);
+    /*
+     * 准备和接近阶段要能转向对准台阶：右摇杆的角速度积分进step_fai，
+     * 松杆瞬间把step_fai锁到当前航向，和站立模式同一套手感。
+     * 磕上台阶后(CLIMB/RECOVER)航向锁死不再接受摇杆：那两段轮电流已被
+     * 清零、腿摆Tp也被Step_Leg_Control覆盖，转向本来就无从执行，继续
+     * 积分只会让目标漂走，等RECOVER结束轮子恢复输出时突然甩一下。
+     */
+    if ((Chassis.step_phase == CHASSIS_STEP_PREPARE) ||
+        (Chassis.step_phase == CHASSIS_STEP_APPROACH))
+    {
+        if (Chassis.goal.d_fai != 0.0f)
+        {
+            Chassis.step_fai += Chassis.goal.d_fai * dt;
+            Chassis.lqr.target[CHASSIS_STATE_D_FAI] = Chassis.goal.d_fai;
+            Chassis.yaw_stick_flag = 1U;
+        }
+        else
+        {
+            Chassis.lqr.target[CHASSIS_STATE_D_FAI] = 0.0f;
+            if (Chassis.yaw_stick_flag != 0U)
+            {
+                Chassis.step_fai =
+                    Chassis.imu.yaw_total *
+                    Chassis_Config.imu.yaw_angle_scale;
+                Chassis.yaw_stick_flag = 0U;
+            }
+        }
+    }
+    else
+    {
+        Chassis.lqr.target[CHASSIS_STATE_D_FAI] = 0.0f;
+    }
     Chassis.lqr.target[CHASSIS_STATE_FAI] = Chassis.step_fai;
-    Chassis.lqr.target[CHASSIS_STATE_D_FAI] = 0.0f;
     Chassis.lqr.target[CHASSIS_STATE_THETA_L] = target_angle_rad;
     Chassis.lqr.target[CHASSIS_STATE_THETA_R] = target_angle_rad;
     Chassis.lqr.target[CHASSIS_STATE_D_THETA_L] = 0.0f;
@@ -1708,7 +1766,7 @@ void Chassis_Step(void)
             Move_Toward(
                 Chassis.leg[side].target_L0,
                 target_length_m,
-                Chassis_Config.recovery.L0_rate * dt);
+                config->L0_rate * dt);
     }
 
     Chassis_Control();
@@ -1727,19 +1785,7 @@ void Chassis_Step(void)
                    config->approach_L0) <=
              config->L0_tol))
         {
-            Chassis.stable_time += dt;
-        }
-        else
-        {
-            Chassis.stable_time = 0.0f;
-        }
-        if (Chassis.stable_time >= config->stable_time)
-        {
             Step_Phase_Enter(CHASSIS_STEP_APPROACH);
-        }
-        else if (Chassis.state_time >= config->prepare_timeout)
-        {
-            Step_Fail();
         }
         break;
 
@@ -1749,10 +1795,6 @@ void Chassis_Step(void)
             (Chassis.step_contact_latch_flag[CHASSIS_RIGHT] != 0U))
         {
             Step_Phase_Enter(CHASSIS_STEP_CLIMB);
-        }
-        else if (Chassis.state_time >= config->approach_timeout)
-        {
-            Step_Fail();
         }
         break;
 
@@ -1767,19 +1809,7 @@ void Chassis_Step(void)
             (Chassis.swing[CHASSIS_LEFT] == CHASSIS_SWING_HOME) &&
             (Chassis.swing[CHASSIS_RIGHT] == CHASSIS_SWING_HOME))
         {
-            Chassis.stable_time += dt;
-        }
-        else
-        {
-            Chassis.stable_time = 0.0f;
-        }
-        if (Chassis.stable_time >= config->stable_time)
-        {
             Step_Phase_Enter(CHASSIS_STEP_RECOVER);
-        }
-        else if (Chassis.state_time >= config->climb_timeout)
-        {
-            Step_Fail();
         }
         break;
 
@@ -1797,24 +1827,12 @@ void Chassis_Step(void)
                    config->recover_theta) <=
              config->angle_tol))
         {
-            Chassis.stable_time += dt;
+            /*
+             * 一次台阶跨越完成，直接回到PREPARE等待下一级台阶；只有
+             * 外部mode变化（拨杆离开左上）才会真正退出STEP状态。
+             */
+            Step_Phase_Enter(CHASSIS_STEP_PREPARE);
         }
-        else
-        {
-            Chassis.stable_time = 0.0f;
-        }
-        if (Chassis.stable_time >= config->stable_time)
-        {
-            State_Enter(CHASSIS_STANDING);
-        }
-        else if (Chassis.state_time >= config->recover_timeout)
-        {
-            Step_Fail();
-        }
-        break;
-
-    default:
-        Step_Fail();
         break;
     }
 

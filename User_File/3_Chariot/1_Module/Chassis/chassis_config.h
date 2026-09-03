@@ -198,21 +198,32 @@ typedef struct
 /** @brief 正向辅助爬台阶动作参数。 */
 typedef struct
 {
-    float approach_L0;
-    float retract_L0;
-    float approach_d_s;
-    float contact_T_req;
-    float contact_T_fb;
-    float contact_theta;
-    float contact_time;
-    float recover_theta;
-    float L0_tol;
-    float angle_tol;
-    float stable_time;
-    float prepare_timeout;
-    float approach_timeout;
-    float climb_timeout;
-    float recover_timeout;
+    float approach_L0;   /* PREPARE目标腿长：碰台阶前先伸到这个高度再前进，m。 */
+    float retract_L0;    /* CLIMB目标腿长：碰到台阶后收腿到这个高度再摆腿，m。 */
+    float approach_d_s;  /* APPROACH前进速度上限，摇杆前进速度会被夹到此值以内，m/s。 */
+    /*
+     * 台阶专用的腿长目标斜率，m/s。台阶要快，自起要柔，所以不再共用
+     * recovery.L0_rate（那一项仍归自起和正常站立变腿长使用）。
+     * ⚠ 本项同时管两段：PREPARE 从当前腿长伸到 approach_L0，和 CLIMB
+     * 收到 retract_L0。调大能加快收腿，但进入台阶模式那一下伸腿也会
+     * 同步变快，切入瞬间对平衡的扰动更大——先架空确认切入不发飘再落地。
+     * 参考：HERO_LEG 的腿长目标完全没有斜坡(硬阶跃)，但它有 450N 气弹簧
+     * 托底、腿长 PID 也到 kp=2000/限幅180N，数值不能直接照搬。
+     */
+    float L0_rate;
+    /*
+     * 碰撞判据：request/feedback/theta三者同时满足才算碰到台阶。
+     * contact_T_req是控制器算出来的期望轮力矩，contact_T_fb是DJI实测
+     * 电流换算的力矩，两者都超限才说明轮子是真的被卡住而不是控制器
+     * 瞬时超调；contact_theta再确认腿摆角度也到位。
+     */
+    float contact_T_req;  /* 期望轮力矩绝对值下限，N*m。 */
+    float contact_T_fb;   /* 实测轮力矩绝对值下限，N*m。 */
+    float contact_theta;  /* 腿摆角theta绝对值下限，rad。 */
+    float contact_time;   /* 上面三个条件需连续满足的时间，s，碰撞锁存消抖用。 */
+    float recover_theta;  /* RECOVER阶段十维腿摆角目标，rad。 */
+    float L0_tol;         /* 各阶段判断腿长到位的容差，m。 */
+    float angle_tol;      /* RECOVER阶段判断腿摆角到位的容差，rad。 */
     /*
      * CLIMB 两段摆腿：先后摆蓄势再前摆越过台阶，最后归正。
      * phi0 为腿杆相对车体角，theta 为含pitch的腿摆绝对角，单位均为 rad。

@@ -307,6 +307,8 @@ const Chassis_Config_t Chassis_Config = {
         .approach_L0 = 0.29f,
         .retract_L0 = 0.15f,
         .approach_d_s = 0.10f,
+        /* 台阶专用腿长斜率，比 recovery.L0_rate(0.20) 快，收腿0.15m约0.3s。 */
+        .L0_rate = 0.50f,
         .contact_T_req = 0.12f,
         .contact_T_fb = 0.08f,
         .contact_theta = 0.30f,
@@ -314,16 +316,13 @@ const Chassis_Config_t Chassis_Config = {
         .recover_theta = 0.0f,
         .L0_tol = 0.02f,
         .angle_tol = 0.10f,
-        .stable_time = 0.10f,
-        .prepare_timeout = 3.0f,
-        .approach_timeout = 10.0f,
-        .climb_timeout = 3.0f,
-        .recover_timeout = 2.0f,
         /*
          * 两段摆腿结构取自HERO_LEG的磕台阶控制，角度按本车机构缩小：
          * 原车腿杆角用到1.32/1.22 rad，本车站立phi0保护范围换算到相对角
          * 只有约-1.17~+1.23 rad，因此后摆保持角收到1.00/0.90。
-         * 力矩按原车6.0/-15.0的比例缩放到本车关节限幅3.5 N*m量级。
+         * 力矩按原车6.0/-15.0的比例缩放，当时是按本车关节限幅3.5 N*m
+         * 量级整定的；joint_T_limit本轮已改到15，这两个摆腿力矩是否要
+         * 跟着放大还没有实机验证，先维持原值。
          */
         .back_phi0_max = 1.00f,
         .back_phi0_hold = 0.90f,
@@ -823,7 +822,7 @@ const Chassis_Config_t Chassis_Config = {
 
         /* 姿态门。改斜坡速率后自救变慢，超时不够先加timeout，不要改回阶跃。 */
         .direct_pitch = 0.80f,
-        .phi0_min = 0.70f,
+        .phi0_min = 1.0f,
         .phi0_max = 2.80f,
         .pitch_limit = 1.60f,
         .stand_phi0_min = 0.40f,
@@ -874,7 +873,9 @@ const Chassis_Config_t Chassis_Config = {
     .step = {
         .approach_L0 = 0.30f,
         .retract_L0 = 0.15f,
-        .approach_d_s = 0.10f,
+        .approach_d_s = 1.5f,
+        /* 台阶专用腿长斜率，比 recovery.L0_rate(0.20) 快，收腿0.15m约0.3s。 */
+        .L0_rate = 0.50f,
         .contact_T_req = 0.12f,
         .contact_T_fb = 0.08f,
         .contact_theta = 0.30f,
@@ -882,16 +883,13 @@ const Chassis_Config_t Chassis_Config = {
         .recover_theta = 0.0f,
         .L0_tol = 0.02f,
         .angle_tol = 0.10f,
-        .stable_time = 0.10f,
-        .prepare_timeout = 3.0f,
-        .approach_timeout = 10.0f,
-        .climb_timeout = 3.0f,
-        .recover_timeout = 2.0f,
         /*
          * 两段摆腿结构取自HERO_LEG的磕台阶控制，角度按本车机构缩小：
          * 原车腿杆角用到1.32/1.22 rad，本车站立phi0保护范围换算到相对角
          * 只有约-1.17~+1.23 rad，因此后摆保持角收到1.00/0.90。
-         * 力矩按原车6.0/-15.0的比例缩放到本车关节限幅3.5 N*m量级。
+         * 力矩按原车6.0/-15.0的比例缩放，当时是按本车关节限幅3.5 N*m
+         * 量级整定的；joint_T_limit本轮已改到15，这两个摆腿力矩是否要
+         * 跟着放大还没有实机验证，先维持原值。
          */
         .back_phi0_max = 1.00f,
         .back_phi0_hold = 0.90f,

@@ -840,6 +840,7 @@ static void test_top_exit_ramp(void)
     float yaw_anchor_rad = 0.40f;
     float maximum_step;
     float previous_target;
+    uint32_t ramp_ticks;
     uint32_t index;
 
     Chassis_Init();
@@ -850,9 +851,17 @@ static void test_top_exit_ramp(void)
     Chassis_State_Update();
     assert(Chassis.state == CHASSIS_STANDING);
 
+    /*
+     * 走完整条斜坡要 spin_d_fai / (d_fai_rate * dt) 拍，按配置算出来再留
+     * 余量。写死次数会在调 spin_d_fai 或 d_fai_rate 之后悄悄不够用。
+     */
+    ramp_ticks = (uint32_t)(Chassis_Config.top.spin_d_fai /
+                            (Chassis_Config.top.d_fai_rate * Chassis.dt)) +
+                 2U;
+
     /* 先让自转转速爬满。 */
     Chassis.goal.d_fai = Chassis_Config.top.spin_d_fai;
-    for (index = 0U; index < 1000U; index++)
+    for (index = 0U; index < ramp_ticks; index++)
     {
         Chassis_Control();
     }
@@ -865,7 +874,7 @@ static void test_top_exit_ramp(void)
     Chassis.goal.d_fai = 0.0f;
     Chassis_State_Update();
     maximum_step = Chassis_Config.top.d_fai_rate * Chassis.dt;
-    for (index = 0U; index < 1000U; index++)
+    for (index = 0U; index < ramp_ticks; index++)
     {
         previous_target = Chassis.lqr.target[CHASSIS_STATE_D_FAI];
         Chassis_Control();
@@ -885,6 +894,104 @@ static void test_top_exit_ramp(void)
     assert_zero_output();
 }
 
+/*
+ * 从与approach_L0不同的腿长切入STEP时，腿长目标必须从当前实际腿长接管
+ * 并按斜坡走，不允许阶跃。直接赋approach_L0会让kp=800的腿长PID一拍打满
+ * outputLimit，实机表现是切到左上瞬间腿弹长、失衡倒地。
+ */
+static void test_step_enter_L0_ramp(void)
+{
+    float entry_L0 = 0.15f;
+    float maximum_step;
+    float previous_target;
+    uint32_t index;
+
+    assert(fabsf(entry_L0 - Chassis_Config.step.approach_L0) > 0.05f);
+
+    Chassis_Init();
+    set_online_feedback();
+    set_symmetric_leg_pose(entry_L0, CHASSIS_HALF_PI);
+    Chassis.mode = CHASSIS_MODE_STEP;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_STEP);
+    assert(Chassis.step_phase == CHASSIS_STEP_PREPARE);
+
+    /* 进入那一拍不许把目标直接摁到approach_L0。 */
+    assert(fabsf(Chassis.leg[CHASSIS_LEFT].target_L0 - entry_L0) <
+           TEST_TOLERANCE);
+    assert(fabsf(Chassis.leg[CHASSIS_RIGHT].target_L0 - entry_L0) <
+           TEST_TOLERANCE);
+
+    /* 之后每拍的目标增量都不得超过一个斜坡步长（台阶用自己的L0_rate）。 */
+    maximum_step = Chassis_Config.step.L0_rate * Chassis.dt;
+    for (index = 0U; index < 50U; index++)
+    {
+        previous_target = Chassis.leg[CHASSIS_LEFT].target_L0;
+        Chassis_Step();
+        assert(fabsf(Chassis.leg[CHASSIS_LEFT].target_L0 - previous_target) <=
+               maximum_step + TEST_TOLERANCE);
+    }
+    /* 斜坡朝approach_L0走，但50拍远不足以走完。 */
+    assert(Chassis.leg[CHASSIS_LEFT].target_L0 > entry_L0);
+    assert(Chassis.leg[CHASSIS_LEFT].target_L0 <
+           Chassis_Config.step.approach_L0);
+}
+
+/*
+ * 准备和接近阶段必须能用右摇杆转向，否则对不准台阶；磕上台阶之后
+ * (CLIMB/RECOVER)航向锁死，摇杆不得再改变step_fai。
+ */
+static void test_step_yaw_control(void)
+{
+    float yaw_rate = 0.8f;
+    float yaw_scale = Chassis_Config.imu.yaw_angle_scale;
+    float entry_fai;
+    float expected;
+    float frozen_fai;
+
+    Chassis_Init();
+    set_online_feedback();
+    Chassis.imu.yaw_total = 0.20f;
+    /* 停在非approach_L0，让状态机留在PREPARE。 */
+    set_symmetric_leg_pose(0.15f, CHASSIS_HALF_PI);
+    Chassis.mode = CHASSIS_MODE_STEP;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_STEP);
+    assert(Chassis.step_phase == CHASSIS_STEP_PREPARE);
+    entry_fai = Chassis.step_fai;
+
+    /* 推杆：航向目标按角速度积分，角速度目标直通。 */
+    Chassis.goal.d_fai = yaw_rate;
+    Chassis_Step();
+    assert(Chassis.step_phase == CHASSIS_STEP_PREPARE);
+    expected = entry_fai + yaw_rate * Chassis.dt;
+    assert(fabsf(Chassis.step_fai - expected) < TEST_TOLERANCE);
+    assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_FAI] - expected) <
+           TEST_TOLERANCE);
+    assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_D_FAI] - yaw_rate) <
+           TEST_TOLERANCE);
+    assert(Chassis.yaw_stick_flag == 1U);
+
+    /* 松杆：锁存到当前实际航向，角速度目标清零。 */
+    Chassis.goal.d_fai = 0.0f;
+    Chassis.imu.yaw_total = 0.55f;
+    Chassis_Step();
+    assert(fabsf(Chassis.step_fai - 0.55f * yaw_scale) < TEST_TOLERANCE);
+    assert(Chassis.lqr.target[CHASSIS_STATE_D_FAI] == 0.0f);
+    assert(Chassis.yaw_stick_flag == 0U);
+
+    /* CLIMB：轮输出已清零，摇杆不得再改航向目标。 */
+    Chassis.step_phase = CHASSIS_STEP_CLIMB;
+    frozen_fai = Chassis.step_fai;
+    Chassis.goal.d_fai = yaw_rate;
+    Chassis.imu.yaw_total = 0.90f;
+    Chassis_Step();
+    assert(fabsf(Chassis.step_fai - frozen_fai) < TEST_TOLERANCE);
+    assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_FAI] - frozen_fai) <
+           TEST_TOLERANCE);
+    assert(Chassis.lqr.target[CHASSIS_STATE_D_FAI] == 0.0f);
+}
+
 static void test_step_phases(void)
 {
     int32_t maximum_wheel_request = 0;
@@ -900,14 +1007,8 @@ static void test_step_phases(void)
     assert(Chassis.state == CHASSIS_STEP);
     assert(Chassis.step_phase == CHASSIS_STEP_PREPARE);
 
-    for (iteration = 0U; iteration < 150U; iteration++)
-    {
-        Chassis_Step();
-        if (Chassis.step_phase == CHASSIS_STEP_APPROACH)
-        {
-            break;
-        }
-    }
+    /* 去掉stable_time消抖后，容差满足当拍就切换，不需要再循环等待。 */
+    Chassis_Step();
     assert(Chassis.step_phase == CHASSIS_STEP_APPROACH);
 
     Chassis.goal.d_s =
@@ -960,50 +1061,27 @@ static void test_step_phases(void)
     set_symmetric_leg_pose(Chassis_Config.step.retract_L0,
                            CHASSIS_HALF_PI +
                                Chassis_Config.step.front_theta_exit - 0.10f);
-    for (iteration = 0U; iteration < 150U; iteration++)
-    {
-        Chassis_Step();
-        if (Chassis.step_phase == CHASSIS_STEP_RECOVER)
-        {
-            break;
-        }
-    }
+    Chassis_Step();
     assert(Chassis.swing[CHASSIS_LEFT] == CHASSIS_SWING_HOME);
     assert(Chassis.swing[CHASSIS_RIGHT] == CHASSIS_SWING_HOME);
     assert(Chassis.step_phase == CHASSIS_STEP_RECOVER);
     assert_zero_output();
 
+    /*
+     * RECOVER达标后不再进STANDING，而是循环回PREPARE准备下一级台阶：
+     * state仍是CHASSIS_STEP，只有外部mode变化才会真正离开STEP。
+     */
     set_symmetric_leg_pose(Chassis.goal.L0,
                            CHASSIS_HALF_PI +
                                Chassis_Config.step.recover_theta);
-    for (iteration = 0U; iteration < 150U; iteration++)
-    {
-        Chassis_Step();
-        if (Chassis.state == CHASSIS_STANDING)
-        {
-            break;
-        }
-    }
-    assert(Chassis.state == CHASSIS_STANDING);
-    assert_zero_output();
-}
-
-static void test_step_timeout(void)
-{
-    Chassis_Init();
-    set_online_feedback();
-    set_symmetric_leg_pose(0.20f, CHASSIS_HALF_PI);
-    Chassis.mode = CHASSIS_MODE_STEP;
-    Chassis_State_Update();
-    assert(Chassis.state == CHASSIS_STEP);
-    Chassis.state_time =
-        Chassis_Config.step.prepare_timeout -
-        Chassis.dt * 0.5f;
-
     Chassis_Step();
-    assert(Chassis.state == CHASSIS_ZERO_FORCE);
-    assert(Chassis.fault == CHASSIS_FAULT_STEP_TIMEOUT);
+    assert(Chassis.state == CHASSIS_STEP);
+    assert(Chassis.step_phase == CHASSIS_STEP_PREPARE);
     assert_zero_output();
+
+    Chassis.mode = CHASSIS_MODE_FOLLOW;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_STANDING);
 }
 
 static void test_output_disabled(void)
@@ -1114,7 +1192,8 @@ int main(void)
     test_remote_goal();
     test_top_projection();
     test_top_exit_ramp();
+    test_step_enter_L0_ramp();
+    test_step_yaw_control();
     test_step_phases();
-    test_step_timeout();
     return 0;
 }
