@@ -48,21 +48,19 @@ typedef enum
     CHASSIS_STEP,                /* 辅助爬台阶状态机。 */
 } Chassis_State_t;
 
+/*
+ * 爬台阶五阶段。MOTION1/MOTION2 取自ZJU的Onestep子状态机：先后摆蓄势并把
+ * 腿伸到中位把前轮送上台阶沿，再收腿到最短并转竖直把机体拉上去。
+ * 这两段走关节位置串级(Joint_Control)，不经过LQR，轮力矩全程为零。
+ */
 typedef enum
 {
-    CHASSIS_STEP_PREPARE = 0,
-    CHASSIS_STEP_APPROACH,
-    CHASSIS_STEP_CLIMB,
-    CHASSIS_STEP_RECOVER,
+    CHASSIS_STEP_PREPARE = 0, /* 伸腿到行驶高度，等待接近。 */
+    CHASSIS_STEP_APPROACH,    /* 主动前进直到判定撞上台阶。 */
+    CHASSIS_STEP_MOTION1,     /* 后摆蓄势并伸腿到中位。 */
+    CHASSIS_STEP_MOTION2,     /* 收腿到最短并转到竖直向下。 */
+    CHASSIS_STEP_RECOVER,     /* 恢复腿长和腿摆角，交接回下一级。 */
 } Chassis_Step_Phase_t;
-
-/* CLIMB阶段单腿摆动子步，两段摆腿结构取自HERO_LEG磕台阶控制。 */
-typedef enum
-{
-    CHASSIS_SWING_BACK = 0, /* 后摆蓄势。 */
-    CHASSIS_SWING_FRONT,    /* 前摆越过台阶。 */
-    CHASSIS_SWING_HOME,     /* 归正到常规腿角。 */
-} Chassis_Swing_t;
 
 typedef struct
 {
@@ -75,6 +73,12 @@ typedef struct
     float gyro[APP_IMU_AXIS_COUNT];       /* rad/s。 */
     float body_accel[APP_IMU_AXIS_COUNT]; /* 整车坐标运动加速度，m/s^2。 */
     float accel[APP_IMU_AXIS_COUNT];      /* 导航坐标运动加速度，m/s^2。 */
+    /*
+     * BMI088传感器原始坐标加速度，含重力，m/s^2。上面三个都是扣掉重力的
+     * 运动加速度，判不了倒地姿态；这一份不做轴向镜像、不扣重力，只供
+     * Chassis.fall_pitch 用。轴符号见 Chassis_Config.imu.fall_accel_*_scale。
+     */
+    float accel_raw[APP_IMU_AXIS_COUNT];
 } Chassis_IMU_t;
 
 typedef struct
@@ -158,6 +162,13 @@ struct Chassis
     uint8_t yaw_stick_flag;         /* 航向摇杆已离开中位，供松杆边沿锁存航向。 */
     uint32_t can_error_count;
     float dt;                       /* 本轮实际控制周期，s。 */
+    /*
+     * 重力矢量给出的整车俯仰角，rad，范围±pi、倒过90度也不折返。
+     * imu.pitch来自EKF的asinf，上界就是pi/2，车真趴下去以后会折返回来，
+     * 符号不再代表倒地方向。凡是"我现在是不是躺着/往哪边躺"的判断都用这一份，
+     * 站立控制和站立中判倒仍然用imu.pitch。由Chassis_State_Update()每周期更新。
+     */
+    float fall_pitch;
 
     Chassis_Goal_t goal;
 
@@ -168,7 +179,7 @@ struct Chassis
 
     /*
      * 五套互不依赖的只读观测，各自拥有一份状态。
-     * 前四套完全不参与控制；leso的扰动估计是唯一可按leso.d_scale接入控制的一路，
+     * 前四套完全不参与控制；leso的扰动估计是唯一可按leso.comp_scale接入控制的一路，
      * 接入与否由leso.gate_flag表达，观测器自身仍然只写自己的结构体。
      */
     Chassis_Slip_t slip;
@@ -183,14 +194,33 @@ struct Chassis
     uint8_t top_exit_flag;          /* 刚退出小陀螺，角速度目标正在斜坡收敛，尚未交回摇杆。 */
     float step_fai;
     Chassis_Step_Phase_t step_phase;
-    Chassis_Swing_t swing[CHASSIS_LEG_COUNT]; /* CLIMB阶段单腿摆动子步。 */
     float contact_time[CHASSIS_LEG_COUNT];
     uint8_t step_contact_flag[CHASSIS_LEG_COUNT];
     uint8_t step_contact_latch_flag[CHASSIS_LEG_COUNT];
+    /*
+     * 姿态路碰撞判据的结论，整车级。轮力矩路和姿态路是并联的，
+     * 这一位单独记录后者，Watch里才分得清是哪一路把车切进MOTION1的。
+     */
+    uint8_t step_posture_flag;
+
+    /*
+     * 整车离地动作的跨周期状态。起飞那一拍把腿长目标锁进latch，落地那一拍
+     * 恢复回去——空中把腿推出去了，不还原就等于永久改了车身高度指令。
+     */
+    uint8_t last_all_off_flag;
+    float off_ground_L0_latch[CHASSIS_LEG_COUNT];
 
     /* 恢复、板凳和站立控制共同使用的目标与请求量。 */
     float state_time;
     float stable_time;
+    float recovery_stuck_time;      /* 转腿卡死条件已连续满足的时间，s。 */
+    /*
+     * 本次自救锁存的目标腿摆角，rad，0表示本轮还没锁存。符号由进入FALLEN
+     * 那一拍的倒地方向决定，之后不再跟着姿态变——机体转过竖直位时
+     * fall_pitch 会过零，每拍重算会让参考角来回翻符号、腿原地抖。
+     */
+    float recovery_theta_ref;
+    float recovery_direction;       /* 当前转腿扫掠方向，+1或-1，0表示还没锁存，卡死时反号。 */
     Chassis_Output_t output;
     uint32_t fault;
 
@@ -198,7 +228,6 @@ struct Chassis
     algorithm_kalman_t speed_kalman;
     algorithm_pid_state_t leg_length_pid;   /* 共模：车身高度，只此一份。 */
     algorithm_pid_state_t roll_pid;
-    algorithm_pid_state_t step_leg_angle_pid[CHASSIS_LEG_COUNT];
     algorithm_pid_state_t joint_angle_pid[APP_DM_COUNT];
     algorithm_pid_state_t joint_speed_pid[APP_DM_COUNT];
 };

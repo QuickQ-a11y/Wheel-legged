@@ -47,7 +47,12 @@ static Chassis_Observer_Config_t make_observer_config(void)
         .off_force_ratio = 0.20f,
         .land_force_ratio = 0.35f,
         .off_hold_s = 0.03f,
+        .off_hold_spin_s = 0.10f,
         .land_hold_s = 0.05f,
+        .land_d_L0_reverse = -0.05f,
+        .land_L0_margin = 0.03f,
+        .land_d_L0_peak_min = 0.10f,
+        .land_d_L0_drop = 0.15f,
         .off_F_comp_ratio = 0.28f,
         .turn_v_diff = 0.20f,
         .turn_force_limit_ratio = 0.50f,
@@ -100,9 +105,157 @@ static void run_observers(const Chassis_Config_t *config, Chassis_t *chassis)
     Chassis_Stuck_Calc(config, chassis);
 }
 
+/* 把底盘复位成一组"静止站立、关节反馈对应给定F0"的干净状态。 */
+static void reset_standing(const Chassis_Config_t *config,
+                           Chassis_t *chassis,
+                           float F0)
+{
+    uint32_t side;
+
+    memset(chassis, 0, sizeof(*chassis));
+    chassis->dt = 0.01f;
+    chassis->state = CHASSIS_STANDING;
+    chassis->mode = CHASSIS_MODE_FOLLOW;
+    VMC_State_Calc(&config->leg[CHASSIS_LEFT], 0.0f, 0.0f, 0.0f, 0.0f,
+                   &chassis->leg[CHASSIS_LEFT]);
+    chassis->leg[CHASSIS_RIGHT] = chassis->leg[CHASSIS_LEFT];
+    for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+    {
+        const Chassis_Leg_Config_t *leg_config = &config->leg[side];
+        VMC_Torque_t torque;
+
+        assert(VMC_Torque_Calc(leg_config, &chassis->leg[side], F0, 0.0f,
+                               &torque) == 1U);
+        chassis->dm_motor[leg_config->joint[CHASSIS_JOINT_PHI1].motor_index]
+            .torque_nm = torque.T1;
+        chassis->dm_motor[leg_config->joint[CHASSIS_JOINT_PHI4].motor_index]
+            .torque_nm = torque.T4;
+    }
+}
+
+/*
+ * 静止站立时 Fn_ratio 必须落在1.0附近：分子含腿轮自重，分母 Observer_Static_Load()
+ * 也必须含，否则 off_force_ratio 这类"百分比"根本不是百分比。
+ */
+static void test_ground_static_ratio_is_one(const Chassis_Config_t *config)
+{
+    Chassis_t chassis;
+    float half_body_n =
+        0.5f * config->model.body_mass * config->model.gravity;
+    uint32_t iteration;
+
+    /* 单腿轴向力恰好托住半个机体，即标准静止站立。 */
+    reset_standing(config, &chassis, half_body_n);
+    for (iteration = 0U; iteration < 50U; iteration++)
+    {
+        run_observers(config, &chassis);
+    }
+    assert(fabsf(chassis.ground.Fn_ratio[CHASSIS_LEFT] - 1.0f) < 0.02f);
+    assert(fabsf(chassis.ground.Fn_ratio[CHASSIS_RIGHT] - 1.0f) < 0.02f);
+    assert(chassis.ground.off_ground_flag[CHASSIS_LEFT] == 0U);
+}
+
+/*
+ * 空中主动伸腿过程中触地：腿仍在伸长、速度没反向，支撑力也还没恢复，
+ * 只有ZJU的"伸腿峰值回落"那一路能判出来。
+ */
+static void test_ground_land_extending(const Chassis_Config_t *config)
+{
+    const Chassis_Observer_Config_t *obs = &config->observer;
+    Chassis_t chassis;
+    uint32_t iteration;
+
+    /* 先让双腿进入离地。 */
+    reset_standing(config, &chassis, -20.0f);
+    for (iteration = 0U; iteration < 6U; iteration++)
+    {
+        run_observers(config, &chassis);
+    }
+    assert(chassis.ground.off_ground_flag[CHASSIS_LEFT] == 1U);
+
+    /* 空中主动伸腿，速度冲到峰值。 */
+    chassis.leg[CHASSIS_LEFT].d_L0 = 0.40f;
+    chassis.leg[CHASSIS_RIGHT].d_L0 = 0.40f;
+    run_observers(config, &chassis);
+    assert(chassis.ground.d_L0_peak[CHASSIS_LEFT] > obs->land_d_L0_peak_min);
+
+    /*
+     * 触地：速度从峰值明显回落但仍为正，支撑力仍在落地门限之下。
+     * 旧的支持力恢复判据在这里判不出来。
+     */
+    /*
+     * 触地：伸腿速度被地面压制、逐拍回落但仍为正。逐拍缓降而不是一步阶跃，
+     * 否则 dd_L0 的突变会经加速度项把支撑力也顶上去，就测不出这一路了。
+     */
+    for (iteration = 0U; iteration < 8U; iteration++)
+    {
+        chassis.leg[CHASSIS_LEFT].d_L0 -= 0.03f;
+        chassis.leg[CHASSIS_RIGHT].d_L0 -= 0.03f;
+        run_observers(config, &chassis);
+        if (chassis.ground.land_speed_flag[CHASSIS_LEFT] != 0U)
+        {
+            break;
+        }
+    }
+    /* 腿仍在伸长、支撑力也没恢复，只有伸腿峰值回落那一路能判出来。 */
+    assert(chassis.ground.land_speed_flag[CHASSIS_LEFT] == 1U);
+    assert(chassis.leg[CHASSIS_LEFT].d_L0 > 0.0f);
+    assert(chassis.ground.Fn_ratio[CHASSIS_LEFT] < obs->land_force_ratio);
+    assert(chassis.ground.off_ground_flag[CHASSIS_LEFT] == 1U);
+
+    /*
+     * 消抖满足后判定触地。之后不再继续跑：本用例始终喂 F0=-20（腿在往回收），
+     * 支撑力恒为负，再跑下去会正确地重新判成离地，那是另一回事。
+     */
+    for (iteration = 0U; iteration < 8U; iteration++)
+    {
+        run_observers(config, &chassis);
+        if (chassis.ground.off_ground_flag[CHASSIS_LEFT] == 0U)
+        {
+            break;
+        }
+    }
+    assert(chassis.ground.off_ground_flag[CHASSIS_LEFT] == 0U);
+    assert(chassis.ground.d_L0_peak[CHASSIS_LEFT] == 0.0f);
+}
+
+/*
+ * 小陀螺下离地消抖必须放宽：旋转的载荷转移会让支撑力估计周期性掉到门限
+ * 以下，用一般模式的消抖会周期性误判离地。
+ */
+static void test_ground_spin_debounce(const Chassis_Config_t *config)
+{
+    const Chassis_Observer_Config_t *obs = &config->observer;
+    Chassis_t chassis;
+    uint32_t normal_tick = (uint32_t)(obs->off_hold_s / 0.01f);
+    uint32_t iteration;
+
+    reset_standing(config, &chassis, -20.0f);
+    chassis.mode = CHASSIS_MODE_TOP;
+    /* 跑满一般模式的消抖时间还多两拍，小陀螺下仍然不该置位。 */
+    for (iteration = 0U; iteration < (normal_tick + 2U); iteration++)
+    {
+        run_observers(config, &chassis);
+        assert(chassis.ground.off_ground_flag[CHASSIS_LEFT] == 0U);
+    }
+    /* 补足到小陀螺消抖时间后才允许置位。 */
+    for (iteration = 0U; iteration < 20U; iteration++)
+    {
+        run_observers(config, &chassis);
+    }
+    assert(chassis.ground.off_ground_flag[CHASSIS_LEFT] == 1U);
+}
+
 int main(void)
 {
     Chassis_Config_t config = {0};
+
+    /*
+     * 离地三项动作的总开关必须以关的状态发布：LQR掩码那一项在 all_off_flag
+     * 误触发时会让站着的车瞬间失去位移/速度/航向/俯仰反馈直接倒地。
+     * 本测试编的是未经改动的 chassis_config.c，所以能断言发布默认值。
+     */
+    assert(Chassis_Config.output.off_ground_act_flag == 0U);
     Chassis_t chassis;
     uint32_t iteration;
 
@@ -121,6 +274,9 @@ int main(void)
     config.model.leg_mass = 0.5f;
     config.model.wheel_mass = 1.0f;
     config.model.cg_to_hip = 0.04f;
+    /* 触地判据B要拿腿长拟合上限做参考，测试必须显式给出。 */
+    config.lqr.L0_min = 0.10f;
+    config.lqr.L0_max = 0.30f;
     config.leg[CHASSIS_LEFT] = make_leg_config(0U);
     config.leg[CHASSIS_RIGHT] = make_leg_config(2U);
     chassis.dt = 0.01f;
@@ -207,8 +363,12 @@ int main(void)
     assert(chassis.turn.R_turn == 0.0f);
     assert(chassis.turn.dd_s_turn == 0.0f);
 
-    /* 支撑力掉到离地比例以下，双腿离地并给出下压补偿建议值。 */
-    set_feedback_force(&config, &chassis, 0.0f);
+    /*
+     * 支撑力掉到离地比例以下，双腿离地并给出下压补偿建议值。
+     * F0=0 还不够：腿和轮的自重仍压在地面上，占静载约23%，高于0.20的门限。
+     * 真正离地要腿主动往回收（F0为负），这正是含腿轮自重的口径带来的差别。
+     */
+    set_feedback_force(&config, &chassis, -20.0f);
     for (iteration = 0U; iteration < 4U; iteration++)
     {
         run_observers(&config, &chassis);
@@ -216,7 +376,11 @@ int main(void)
     assert(chassis.ground.off_ground_flag[CHASSIS_LEFT] == 1U);
     assert(chassis.ground.off_ground_flag[CHASSIS_RIGHT] == 1U);
     assert(chassis.ground.all_off_flag == 1U);
-    assert(fabsf(chassis.ground.fn_comp -
+    /* 下压推力逐腿给：整车腾空且该腿仍未触地才非零。 */
+    assert(fabsf(chassis.ground.fn_comp[CHASSIS_LEFT] -
+                 chassis.ground.Fn_static * config.observer.off_F_comp_ratio) <
+           TEST_TOLERANCE);
+    assert(fabsf(chassis.ground.fn_comp[CHASSIS_RIGHT] -
                  chassis.ground.Fn_static * config.observer.off_F_comp_ratio) <
            TEST_TOLERANCE);
 
@@ -225,7 +389,7 @@ int main(void)
     run_observers(&config, &chassis);
     assert(chassis.ground.off_ground_flag[CHASSIS_LEFT] == 1U);
     assert(chassis.ground.all_off_flag == 0U);
-    assert(chassis.ground.fn_comp == 0.0f);
+    assert(chassis.ground.fn_comp[CHASSIS_LEFT] == 0.0f);
     chassis.state = CHASSIS_FALLEN;
     run_observers(&config, &chassis);
     assert(chassis.ground.all_off_flag == 0U);
@@ -279,5 +443,9 @@ int main(void)
     assert(chassis.stuck.stuck_flag[CHASSIS_LEFT] == 0U);
     assert(chassis.stuck.comp_F0[CHASSIS_LEFT] == 0.0f);
     assert(chassis.stuck.comp_L0[CHASSIS_LEFT] == 0.0f);
+
+    test_ground_static_ratio_is_one(&config);
+    test_ground_land_extending(&config);
+    test_ground_spin_debounce(&config);
     return 0;
 }

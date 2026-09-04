@@ -43,6 +43,10 @@ static void Chassis_Feedback_Update(void)
     memcpy(Chassis.imu.accel,
            imuState.motionAccMps2,
            sizeof(Chassis.imu.accel));
+    /* 原始加速度保持传感器坐标，倒地姿态判据要的是重力方向，不能扣重力。 */
+    memcpy(Chassis.imu.accel_raw,
+           imuState.bmi088Data.accMps2,
+           sizeof(Chassis.imu.accel_raw));
 
     /* 遥控输入在任务层转换为模式和物理目标，不接触LQR或电机输出。 */
     Remote_Task_Update();

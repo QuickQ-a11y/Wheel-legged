@@ -58,9 +58,18 @@ typedef struct
     float Fn_ratio[CHASSIS_LEG_COUNT];          /* 支撑力与标称单腿静载之比。 */
     uint8_t Fn_init_flag[CHASSIS_LEG_COUNT];    /* 支撑力低通已用首个有效值建立初值。 */
     float Fn_static;                            /* 标称模型单腿静载，N。 */
-    float fn_comp;                              /* 整车离地后建议的向下补偿推力，N；本轮不接入F0。 */
+    /*
+     * 悬空腿的下压推力，N，逐腿。整车离地且该腿仍未触地才非零，已触地的腿
+     * 沿用常规腿长PID——ZJU的写法。是否真的叠加到F0由
+     * Chassis_Config.output.off_ground_act_flag 决定。
+     */
+    float fn_comp[CHASSIS_LEG_COUNT];
     float off_time[CHASSIS_LEG_COUNT];          /* 离地条件连续满足时间，s。 */
     float land_time[CHASSIS_LEG_COUNT];         /* 落地条件连续满足时间，s。 */
+    /* 本次腾空的伸腿速度峰值，m/s。进入离地时清零，离地期间逐拍取最大值。 */
+    float d_L0_peak[CHASSIS_LEG_COUNT];
+    /* 触地由腿长速度那一路判出，整车级两路并联时用于在Watch里分辨来源。 */
+    uint8_t land_speed_flag[CHASSIS_LEG_COUNT];
     uint8_t off_candidate_flag[CHASSIS_LEG_COUNT]; /* 本轮支撑力低于离地阈值。 */
     uint8_t off_ground_flag[CHASSIS_LEG_COUNT];    /* 判定后的单腿离地结论。 */
     uint8_t all_off_flag;                       /* 左右腿同时离地，且不处于倒地或台阶动作。 */

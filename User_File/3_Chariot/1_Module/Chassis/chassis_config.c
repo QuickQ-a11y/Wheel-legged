@@ -121,7 +121,14 @@ const Chassis_Config_t Chassis_Config = {
      * 重力前馈和全部力类观测阈值都由这里推出。
      * 换机器人时本块和 leg.geometry、wheel 一起改，按比例定义的阈值自动跟随。
      *
-     * 整车合计 3.043 + 2*1.054 + 2*0.455 = 6.061 kg，单腿静载 29.7 N。
+     * ⚠ 两个消费者用的质量不同，别混：
+     * 重力前馈用 Chassis_Model_Mass()，只返回 body_mass——十维模型已经把
+     * 腿轮质量单独建模，前馈只需补机体。
+     * 力类观测阈值用 Observer_Static_Load()，按ZJU式90取
+     * (leg_mass + wheel_mass + 0.5*body_mass)*gravity，因为腿和轮自身的
+     * 重量同样压在地面上。本块单腿静载 = (1.054 + 0.455 + 0.5*3.043)*9.81
+     * = 29.7 N，observer 里所有 *_force_ratio 都相对这个数。
+     * 站立时 ground.Fn_ratio 应当落在 1.0 附近，偏离说明质量填错了。
      */
     .model = {
         .gravity = 9.81f,     /* g_ac */
@@ -145,6 +152,9 @@ const Chassis_Config_t Chassis_Config = {
         .forward_accel_scale = 1.0f,
         .lateral_accel_axis = 1U,
         .vertical_accel_axis = 2U,
+        /* 倒地方向判据符号，实机标定方法见 Chassis_IMU_Config_t 的注释。 */
+        .fall_accel_x_scale = 1.0f,
+        .fall_accel_z_scale = 1.0f,
     },
     /* 左右scale同时约束反馈和命令，避免同一轮方向在两处独立维护。 */
     /* 小轮腿配置 */
@@ -233,32 +243,45 @@ const Chassis_Config_t Chassis_Config = {
         .bench_L0 = 0.15f,
         .bench_phi0 = CHASSIS_HALF_PI,
 
-        /* 斜坡速率。rotate_rate 2.0约115度/s，HERO_LEG用的是8.0，这里先取保守值。 */
+        /* 斜坡速率。rotate_rate 单位rad/s，HERO_LEG用的是8.0，这里先取保守值。 */
         .L0_rate = 0.10f,
         .rotate_rate = 2.0f,
         .lag_rate = 4.0f,
         .theta_diff = 0.80f,
         .rotate_lead_max = 0.35f,
 
+        /* 卡死反转。阈值取ZJU翻身阶段原值：35度/s持续600ms。 */
+        .stuck_d_phi0 = 0.61f,
+        .stuck_time = 0.60f,
+
         /* 腿视作均质杆取0.5；前馈系数从0起调，确认动作不变差再往上加。 */
         .leg_cm_ratio = 0.5f,
         .gravity_ff_scale = 0.0f,
 
-        /* 阶段推进判据。theta窗口中心0.95 rad即虚拟腿摆到约54度算转腿到位。 */
+        /*
+         * 阶段推进判据。窗口中心 (theta_min+theta_max)/2 = 0.95 rad，即虚拟腿
+         * 摆到约54度算转腿到位。窗口跟着倒地方向取符号，往负方向倒时判的是
+         * -1.40~-0.50，所以这两项填绝对值。
+         */
         .theta_min = 0.50f,
         .theta_max = 1.40f,
         .ready_pitch = 0.30f,
+        /* roll门取ZJU收腿站起退出判据的20度；两腿长差同样取ZJU的0.04m。 */
+        .ready_roll = 0.35f,
         .L0_tol = 0.02f,
+        .L0_diff_tol = 0.04f,
         .angle_tol = 0.10f,
         .stable_time = 0.10f,
         .fallen_timeout = 5.0f,
         .prepare_timeout = 3.0f,
 
         /* 姿态门。改斜坡速率后自救变慢，超时不够先加timeout，不要改回阶跃。 */
+        .fall_pitch_filter = 0.05f,
         .direct_pitch = 0.80f,
         .phi0_min = 0.70f,
         .phi0_max = 3.00f,
-        .pitch_limit = 1.60f,
+        /* 必须 < pi/2=1.5708，否则永不成立。原值1.60就是死分支。 */
+        .pitch_limit = 1.30f,
         .stand_phi0_min = 0.40f,
         .stand_phi0_max = 2.80f,
 
@@ -305,49 +328,52 @@ const Chassis_Config_t Chassis_Config = {
     /* 当前均为输出封锁阶段的保守调试初值。 */
     .step = {
         .approach_L0 = 0.29f,
-        .retract_L0 = 0.15f,
+        /* ZJU Motion2收到行程最短，收得越短机体被拉得越高。lqr.L0_min=0.10，留余量。 */
+        .retract_L0 = 0.11f,
         .approach_d_s = 0.10f,
-        /* 台阶专用腿长斜率，比 recovery.L0_rate(0.20) 快，收腿0.15m约0.3s。 */
+        /* 台阶专用腿长斜率，比同块的 recovery.L0_rate 快，台阶要抢时间。 */
         .L0_rate = 0.50f,
         .contact_T_req = 0.12f,
         .contact_T_fb = 0.08f,
         .contact_theta = 0.30f,
         .contact_time = 0.05f,
+        /* 并联的姿态判据，阈值取ZJU台阶检测原值：6/12度、20度、10度每秒、0.2 m/s。 */
+        .contact_pitch = 0.105f,
+        .contact_pitch_hard = 0.21f,
+        .contact_theta_hard = 0.35f,
+        .contact_d_pitch = 0.175f,
+        .contact_d_s_err = 0.20f,
+        .contact_d_s_min = 0.20f,
         .recover_theta = 0.0f,
         .L0_tol = 0.02f,
         .angle_tol = 0.10f,
         /*
-         * 两段摆腿结构取自HERO_LEG的磕台阶控制，角度按本车机构缩小：
-         * 原车腿杆角用到1.32/1.22 rad，本车站立phi0保护范围换算到相对角
-         * 只有约-1.17~+1.23 rad，因此后摆保持角收到1.00/0.90。
-         * 力矩按原车6.0/-15.0的比例缩放，当时是按本车关节限幅3.5 N*m
-         * 量级整定的；joint_T_limit本轮已改到15，这两个摆腿力矩是否要
-         * 跟着放大还没有实机验证，先维持原值。
+         * MOTION1/MOTION2 两段动作，限速值取ZJU原值(300/270度每秒、1.8 m/s)。
+         * swing_phi0 是唯一按本车机构下调的一项：ZJU用1.45，但本车
+         * phi0_max=2.90 换算到相对车体角上限只有1.33，摆过去会被姿态保护
+         * 打到零力矩，所以取1.00留0.33余量。
+         * mid_L0 按行程比例换算：ZJU的0.23在其0.10~0.331行程里是56%，
+         * 映射到本车 lqr.L0_min/L0_max 的0.10~0.30 就是0.213。
          */
-        .back_phi0_max = 1.00f,
-        .back_phi0_hold = 0.90f,
-        .back_Tp = 0.80f,
-        .back_theta_exit = 0.90f,
-        .front_theta_max = 0.95f,
-        .front_phi0_hold = 0.85f,
-        .front_Tp = -2.00f,
-        .front_theta_exit = 0.45f,
-        .home_phi0 = 0.15f,
-        /* 相对站立的1.60/0.40/2.80适当放宽，避免磕台阶瞬间误判倒地。 */
-        .pitch_limit = 1.80f,
+        .swing_phi0 = 1.00f,
+        .swing_phi0_rate = 5.24f,
+        .home_phi0_rate = 4.71f,
+        .climb_L0_rate = 1.80f,
+        .mid_L0 = 0.213f,
+        /* 到位容差取ZJU的0.05m/20度/15度，比站立那套松，动作总长约1秒。 */
+        .climb_L0_tol = 0.05f,
+        .swing_phi0_tol = 0.35f,
+        .home_theta_tol = 0.26f,
+        /* 相对站立的 pitch_limit/stand_phi0_min/max 适当放宽，避免磕台阶瞬间误判倒地。 */
+        /* 同样必须 < pi/2；台阶比站立放宽，但原值1.80也是死分支。 */
+        .pitch_limit = 1.45f,
         .phi0_min = 0.30f,
         .phi0_max = 2.90f,
-        .leg_angle_pid = {
-            .kp = 4.0f,
-            .ki = 0.0f,
-            .kd = 0.2f,
-            .integralLimit = 0.0f,
-            .outputLimit = 1.0f,
-        },
     },
     /*
      * 只读观测阈值。凡是随整车重量或执行器能力等比缩放的量一律写成比例：
-     * 力类以单腿静载 0.5*model.mass*model.gravity 为基准，
+     * 力类以单腿静载 Observer_Static_Load() 为基准，即
+     * (leg_mass + wheel_mass + 0.5*body_mass)*gravity，与ZJU式90一致；
      * 力矩类以 wheel.T_limit 为基准。换机器人时改 model 和 wheel 即可跟随，
      * 不需要重算这些比例。角度、时间和速度是运动学量，换车需要单独整定。
      */
@@ -366,8 +392,16 @@ const Chassis_Config_t Chassis_Config = {
         .off_force_ratio = 0.20f,
         .land_force_ratio = 0.35f,
         .off_hold_s = 0.03f,
+        /* 小陀螺放宽到ZJU的100ms，抵抗旋转载荷转移造成的支撑力周期性掉落。 */
+        .off_hold_spin_s = 0.10f,
         .land_hold_s = 0.05f,
+        /* 触地第二路，阈值取ZJU式93原值。 */
+        .land_d_L0_reverse = -0.05f,
+        .land_L0_margin = 0.03f,
+        .land_d_L0_peak_min = 0.10f,
+        .land_d_L0_drop = 0.15f,
         .off_F_comp_ratio = 0.28f,
+        .off_comp_L0_margin = 0.03f,
         .turn_v_diff = 0.20f,
         .turn_force_limit_ratio = 0.50f,
         .stuck_T_ratio = 0.75f,
@@ -590,7 +624,7 @@ const Chassis_Config_t Chassis_Config = {
         },
     },
     /*
-     * 小轮腿尚未生成LESO系数，三块全零、d_scale为0，观测器不产生任何补偿。
+     * 小轮腿尚未生成LESO系数，三块全零、comp_scale为0，观测器不产生任何补偿。
      * 换到这块配置前必须用小轮腿参数重跑 ABK_LQR.py 并把三块贴进来。
      */
     .leso = {
@@ -605,15 +639,17 @@ const Chassis_Config_t Chassis_Config = {
          */
         .joint_flag = 1U,
         .wheel_flag = 0U,
+        /* 离地三项动作默认关，实机确认 all_off_flag 不误触发后再打开。 */
+        .off_ground_act_flag = 0U,
         .joint_T_limit = 5.0f,
     },
     /* 整车公共目标、支撑力前馈和控制周期边界。 */
     .phi0_offset = CHASSIS_HALF_PI,
     .roll_target = 0.0f,
     /*
-     * 重力前馈按 0.5*mass*gravity*cos(theta) 计算，随腿摆角投影。
+     * 重力前馈按 0.5*Chassis_Model_Mass()*gravity*cos(theta) 计算，随腿摆角投影。
      * 1.0表示按实测质量足额补偿；实机若发现腿长稳态偏差，先调这个系数，
-     * 不要回头改 model.mass。
+     * 不要回头改 model.body_mass。
      */
     .F0_gravity_scale = 1.0f,
     .F0_left = 0.0f,
@@ -627,6 +663,13 @@ const Chassis_Config_t Chassis_Config = {
         [CHASSIS_STATE_THETA_L] = 0.0f,
         [CHASSIS_STATE_THETA_R] = 0.0f,
 
+    },
+    /* ZJU式142：整车离地时只留腿摆角和腿摆角速度，其余通道空中无从执行。 */
+    .off_ground_scale = {
+        [CHASSIS_STATE_THETA_L] = 1.0f,
+        [CHASSIS_STATE_D_THETA_L] = 1.0f,
+        [CHASSIS_STATE_THETA_R] = 1.0f,
+        [CHASSIS_STATE_D_THETA_R] = 1.0f,
     },
 };
 #endif
@@ -649,7 +692,7 @@ const Chassis_Config_t Chassis_Config = {
 #ifdef BIG_WHEEL_LEG
 const Chassis_Config_t Chassis_Config = {
     /* 左右腿尺寸相同，但电机索引和后续实机标定值分别保存。 */
-    /* 小轮腿 */
+    /* 大轮腿 */
     .leg = {
         [CHASSIS_LEFT] = {
             .geometry = {
@@ -705,7 +748,14 @@ const Chassis_Config_t Chassis_Config = {
      * 重力前馈和全部力类观测阈值都由这里推出。
      * 换机器人时本块和 leg.geometry、wheel 一起改，按比例定义的阈值自动跟随。
      *
-     * 整车合计 3.043 + 2*1.054 + 2*0.455 = 6.061 kg，单腿静载 29.7 N。
+     * ⚠ 两个消费者用的质量不同，别混：
+     * 重力前馈用 Chassis_Model_Mass()，只返回 body_mass——十维模型已经把
+     * 腿轮质量单独建模，前馈只需补机体。
+     * 力类观测阈值用 Observer_Static_Load()，按ZJU式90取
+     * (leg_mass + wheel_mass + 0.5*body_mass)*gravity，因为腿和轮自身的
+     * 重量同样压在地面上。本块单腿静载 = (1.65 + 0.537 + 0.5*11.0)*9.81
+     * = 75.4 N，observer 里所有 *_force_ratio 都相对这个数。
+     * 站立时 ground.Fn_ratio 应当落在 1.0 附近，偏离说明质量填错了。
      */
     .model = {
         .gravity = 9.81f,     /* g_ac */
@@ -729,9 +779,12 @@ const Chassis_Config_t Chassis_Config = {
         .forward_accel_scale = 1.0f,
         .lateral_accel_axis = 1U,
         .vertical_accel_axis = 2U,
+        /* 倒地方向判据符号，实机标定方法见 Chassis_IMU_Config_t 的注释。 */
+        .fall_accel_x_scale = 1.0f,
+        .fall_accel_z_scale = 1.0f,
     },
     /* 左右scale同时约束反馈和命令，避免同一轮方向在两处独立维护。 */
-    /* 小轮腿配置 */
+    /* 大轮腿配置 */
     .wheel = {
         .R = 0.058f,
         .half_track = 0.22f,
@@ -799,32 +852,45 @@ const Chassis_Config_t Chassis_Config = {
         .bench_L0 = 0.15f,
         .bench_phi0 = CHASSIS_HALF_PI,
 
-        /* 斜坡速率。rotate_rate 2.0约115度/s，HERO_LEG用的是8.0，这里先取保守值。 */
+        /* 斜坡速率。rotate_rate 单位rad/s，HERO_LEG用的是8.0，这里先取保守值。 */
         .L0_rate = 0.20f,
         .rotate_rate = 4.0f,
         .lag_rate = 4.0f,
         .theta_diff = 0.80f,
         .rotate_lead_max = 0.35f,
 
+        /* 卡死反转。阈值取ZJU翻身阶段原值：35度/s持续600ms。 */
+        .stuck_d_phi0 = 0.61f,
+        .stuck_time = 0.60f,
+
         /* 腿视作均质杆取0.5；前馈系数从0起调，确认动作不变差再往上加。 */
         .leg_cm_ratio = 0.5f,
         .gravity_ff_scale = 0.0f,
 
-        /* 阶段推进判据。theta窗口中心0.95 rad即虚拟腿摆到约54度算转腿到位。 */
+        /*
+         * 阶段推进判据。窗口中心 (theta_min+theta_max)/2 = 0.95 rad，即虚拟腿
+         * 摆到约54度算转腿到位。窗口跟着倒地方向取符号，往负方向倒时判的是
+         * -1.40~-0.50，所以这两项填绝对值。
+         */
         .theta_min = 0.50f,
         .theta_max = 1.40f,
         .ready_pitch = 0.30f,
+        /* roll门取ZJU收腿站起退出判据的20度；两腿长差同样取ZJU的0.04m。 */
+        .ready_roll = 0.35f,
         .L0_tol = 0.02f,
+        .L0_diff_tol = 0.04f,
         .angle_tol = 0.10f,
         .stable_time = 0.10f,
         .fallen_timeout = 5.0f,
         .prepare_timeout = 3.0f,
 
         /* 姿态门。改斜坡速率后自救变慢，超时不够先加timeout，不要改回阶跃。 */
+        .fall_pitch_filter = 0.05f,
         .direct_pitch = 0.80f,
         .phi0_min = 1.0f,
         .phi0_max = 2.80f,
-        .pitch_limit = 1.60f,
+        /* 必须 < pi/2=1.5708，否则永不成立。原值1.60就是死分支。 */
+        .pitch_limit = 1.30f,
         .stand_phi0_min = 0.40f,
         .stand_phi0_max = 2.80f,
 
@@ -871,50 +937,53 @@ const Chassis_Config_t Chassis_Config = {
     },
     /* 当前均为输出封锁阶段的保守调试初值。 */
     .step = {
-        .approach_L0 = 0.30f,
-        .retract_L0 = 0.15f,
+        .approach_L0 = 0.35f,
+        /* ZJU Motion2收到行程最短，收得越短机体被拉得越高。lqr.L0_min=0.10，留余量。 */
+        .retract_L0 = 0.11f,
         .approach_d_s = 1.5f,
-        /* 台阶专用腿长斜率，比 recovery.L0_rate(0.20) 快，收腿0.15m约0.3s。 */
+        /* 台阶专用腿长斜率，比同块的 recovery.L0_rate 快，台阶要抢时间。 */
         .L0_rate = 0.50f,
         .contact_T_req = 0.12f,
         .contact_T_fb = 0.08f,
         .contact_theta = 0.30f,
         .contact_time = 0.05f,
+        /* 并联的姿态判据，阈值取ZJU台阶检测原值：6/12度、20度、10度每秒、0.2 m/s。 */
+        .contact_pitch = 0.105f,
+        .contact_pitch_hard = 0.21f,
+        .contact_theta_hard = 0.35f,
+        .contact_d_pitch = 0.175f,
+        .contact_d_s_err = 0.20f,
+        .contact_d_s_min = 0.20f,
         .recover_theta = 0.0f,
         .L0_tol = 0.02f,
         .angle_tol = 0.10f,
         /*
-         * 两段摆腿结构取自HERO_LEG的磕台阶控制，角度按本车机构缩小：
-         * 原车腿杆角用到1.32/1.22 rad，本车站立phi0保护范围换算到相对角
-         * 只有约-1.17~+1.23 rad，因此后摆保持角收到1.00/0.90。
-         * 力矩按原车6.0/-15.0的比例缩放，当时是按本车关节限幅3.5 N*m
-         * 量级整定的；joint_T_limit本轮已改到15，这两个摆腿力矩是否要
-         * 跟着放大还没有实机验证，先维持原值。
+         * MOTION1/MOTION2 两段动作，限速值取ZJU原值(300/270度每秒、1.8 m/s)。
+         * swing_phi0 是唯一按本车机构下调的一项：ZJU用1.45，但本车
+         * phi0_max=2.90 换算到相对车体角上限只有1.33，摆过去会被姿态保护
+         * 打到零力矩，所以取1.00留0.33余量。
+         * mid_L0 按行程比例换算：ZJU的0.23在其0.10~0.331行程里是56%，
+         * 映射到本车 lqr.L0_min/L0_max 的0.10~0.30 就是0.213。
          */
-        .back_phi0_max = 1.00f,
-        .back_phi0_hold = 0.90f,
-        .back_Tp = 0.80f,
-        .back_theta_exit = 0.90f,
-        .front_theta_max = 0.95f,
-        .front_phi0_hold = 0.85f,
-        .front_Tp = -2.00f,
-        .front_theta_exit = 0.45f,
-        .home_phi0 = 0.15f,
-        /* 相对站立的1.60/0.40/2.80适当放宽，避免磕台阶瞬间误判倒地。 */
-        .pitch_limit = 1.80f,
+        .swing_phi0 = 1.00f,
+        .swing_phi0_rate = 5.24f,
+        .home_phi0_rate = 4.71f,
+        .climb_L0_rate = 1.80f,
+        .mid_L0 = 0.213f,
+        /* 到位容差取ZJU的0.05m/20度/15度，比站立那套松，动作总长约1秒。 */
+        .climb_L0_tol = 0.05f,
+        .swing_phi0_tol = 0.35f,
+        .home_theta_tol = 0.26f,
+        /* 相对站立的 pitch_limit/stand_phi0_min/max 适当放宽，避免磕台阶瞬间误判倒地。 */
+        /* 同样必须 < pi/2；台阶比站立放宽，但原值1.80也是死分支。 */
+        .pitch_limit = 1.45f,
         .phi0_min = 0.30f,
         .phi0_max = 2.90f,
-        .leg_angle_pid = {
-            .kp = 4.0f,
-            .ki = 0.0f,
-            .kd = 0.2f,
-            .integralLimit = 0.0f,
-            .outputLimit = 1.0f,
-        },
     },
     /*
      * 只读观测阈值。凡是随整车重量或执行器能力等比缩放的量一律写成比例：
-     * 力类以单腿静载 0.5*model.mass*model.gravity 为基准，
+     * 力类以单腿静载 Observer_Static_Load() 为基准，即
+     * (leg_mass + wheel_mass + 0.5*body_mass)*gravity，与ZJU式90一致；
      * 力矩类以 wheel.T_limit 为基准。换机器人时改 model 和 wheel 即可跟随，
      * 不需要重算这些比例。角度、时间和速度是运动学量，换车需要单独整定。
      */
@@ -933,8 +1002,16 @@ const Chassis_Config_t Chassis_Config = {
         .off_force_ratio = 0.20f,
         .land_force_ratio = 0.35f,
         .off_hold_s = 0.03f,
+        /* 小陀螺放宽到ZJU的100ms，抵抗旋转载荷转移造成的支撑力周期性掉落。 */
+        .off_hold_spin_s = 0.10f,
         .land_hold_s = 0.05f,
+        /* 触地第二路，阈值取ZJU式93原值。 */
+        .land_d_L0_reverse = -0.05f,
+        .land_L0_margin = 0.03f,
+        .land_d_L0_peak_min = 0.10f,
+        .land_d_L0_drop = 0.15f,
         .off_F_comp_ratio = 0.28f,
+        .off_comp_L0_margin = 0.03f,
         .turn_v_diff = 0.20f,
         .turn_force_limit_ratio = 0.50f,
         .stuck_T_ratio = 0.75f,
@@ -954,7 +1031,7 @@ const Chassis_Config_t Chassis_Config = {
      */
     .lqr = {
         .L0_min = 0.10f,
-        .L0_max = 0.30f,
+        .L0_max = 0.35f,
         /*
          * 误差限幅在进K点乘之前生效，防止位移积累或姿态瞬时越界时
          * 单一状态项主导四路输出。只限位置类，速度类留0表示不限幅。
@@ -1082,7 +1159,7 @@ const Chassis_Config_t Chassis_Config = {
          */
         .comp_scale = 1.0f,
         /* 扰动限幅取各通道限幅的一半量级，防止模型失配时扰动状态一路累积。 */
-        .d_limit = {2.0f, 2.0f, 4.0f, 4.0f},
+        .d_limit = {2.0f, 2.0f, 7.0f, 7.0f},
         .Ad_coefficients = {
             1,  -2.610989e-14,  -2.615269e-14,  3.709929e-14,  4.659808e-14,  3.721178e-14,
             0.001,  -2.348656e-17,  -2.379367e-17,  3.322912e-17,  4.211071e-17,  3.403618e-17,
@@ -1381,15 +1458,17 @@ const Chassis_Config_t Chassis_Config = {
          */
         .joint_flag = 1U,
         .wheel_flag = 1U,
+        /* 离地三项动作默认关，实机确认 all_off_flag 不误触发后再打开。 */
+        .off_ground_act_flag = 0U,
         .joint_T_limit = 15.0f,
     },
     /* 整车公共目标、支撑力前馈和控制周期边界。 */
     .phi0_offset = CHASSIS_HALF_PI,
     .roll_target = 0.0f,
     /*
-     * 重力前馈按 0.5*mass*gravity*cos(theta) 计算，随腿摆角投影。
+     * 重力前馈按 0.5*Chassis_Model_Mass()*gravity*cos(theta) 计算，随腿摆角投影。
      * 1.0表示按实测质量足额补偿；实机若发现腿长稳态偏差，先调这个系数，
-     * 不要回头改 model.mass。
+     * 不要回头改 model.body_mass。
      */
     .F0_gravity_scale = 1.0f,
     .F0_left = 0.0f,
@@ -1403,6 +1482,13 @@ const Chassis_Config_t Chassis_Config = {
         [CHASSIS_STATE_THETA_L] = 0.08f,
         [CHASSIS_STATE_THETA_R] = 0.08f,
 
+    },
+    /* ZJU式142：整车离地时只留腿摆角和腿摆角速度，其余通道空中无从执行。 */
+    .off_ground_scale = {
+        [CHASSIS_STATE_THETA_L] = 1.0f,
+        [CHASSIS_STATE_D_THETA_L] = 1.0f,
+        [CHASSIS_STATE_THETA_R] = 1.0f,
+        [CHASSIS_STATE_D_THETA_R] = 1.0f,
     },
 };
 #endif

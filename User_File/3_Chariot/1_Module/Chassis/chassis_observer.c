@@ -29,9 +29,18 @@ static float Observer_Filter(float value,
 /**
  * @brief 单腿静载，力类观测阈值统一以它为基准按比例定义。
  */
+/**
+ * @brief 单腿标称静载，N。全部力类观测阈值的比例基准。
+ *
+ * 按ZJU式90取 (m_leg + m_wheel + m_b/2)*g：轮子和腿自身的重量也压在地面上，
+ * 所以地面反力的标称值必须含它们。刻意不复用 Chassis_Model_Mass()——那一份
+ * 只返回机体质量，是给重力前馈用的（前馈只需要补机体，腿轮由本项承担），
+ * 两个消费者要的质量本来就不是同一个。
+ */
 static float Observer_Static_Load(const Chassis_Model_Config_t *config)
 {
-    return 0.5f * Chassis_Model_Mass(config) * config->gravity;
+    return (config->leg_mass + config->wheel_mass +
+            (0.5f * config->body_mass)) * config->gravity;
 }
 
 /**
@@ -257,11 +266,21 @@ void Chassis_Ground_Update(const Chassis_Config_t *config, Chassis_t *chassis)
             /*
              * 本工程约定F0大于零为伸腿撑地，故支撑力与F0同号。
              * HERO_LEG用的是相反约定，其公式在此处会让站立时Fn恒为负。
+             *
+             * ⚠ 这里的F0/Tp是 VMC_Force_Calc 由【实测】关节力矩反解出来的，
+             * 不是控制指令。HERO_LEG的同名公式喂进去的是指令
+             * (-Leg_L_Pid.Output - G_Comp.Output + Comp_Fn)，所以它必须再减掉
+             * G_Comp、Roll_Cut、fn_comp、Comp_Fn 这些已知的控制成分才能还原
+             * 地面反力；我们用实测力，那几项是真实存在的物理力，减掉就错了。
+             * 对照HERO时不要把"少了四项减法"当成遗漏。
+             *
+             * 腿和轮的自重也压在地面上，与 Observer_Static_Load() 同口径，
+             * 否则站立时 Fn_ratio 不会落在1.0附近，比例阈值就名不副实。
              */
             float Fn =
                 (ground->force[side].F0 * cosf(leg->theta) +
                  ground->force[side].Tp * sinf(leg->theta) / leg->L0) +
-                config->model.leg_mass *
+                (config->model.leg_mass + config->model.wheel_mass) *
                     (config->model.gravity + leg_accel);
 
             ground->Fn_raw[side] = Fn;
@@ -308,27 +327,44 @@ void Chassis_Ground_Calc(const Chassis_Config_t *config, Chassis_t *chassis)
 
     for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
     {
+        const Chassis_Leg_t *leg = &chassis->leg[side];
+        float off_hold_s;
+        uint8_t land_candidate_flag;
+
         if (ground->valid_flag[side] == 0U)
         {
             ground->off_candidate_flag[side] = 0U;
             ground->off_ground_flag[side] = 0U;
+            ground->land_speed_flag[side] = 0U;
             ground->off_time[side] = 0.0f;
             ground->land_time[side] = 0.0f;
+            ground->d_L0_peak[side] = 0.0f;
             continue;
         }
+
+        /*
+         * 小陀螺下放宽离地消抖：旋转的离心与侧向载荷转移会让支撑力估计
+         * 周期性掉到门限以下，不放宽会周期性误判离地。阈值取自ZJU。
+         */
+        off_hold_s = (chassis->mode == CHASSIS_MODE_TOP) ?
+                         ground_config->off_hold_spin_s :
+                         ground_config->off_hold_s;
 
         ground->off_candidate_flag[side] =
             (ground->Fn_ratio[side] <= ground_config->off_force_ratio) ? 1U : 0U;
         if (ground->off_ground_flag[side] == 0U)
         {
             ground->land_time[side] = 0.0f;
+            ground->land_speed_flag[side] = 0U;
             if (ground->off_candidate_flag[side] != 0U)
             {
                 ground->off_time[side] += chassis->dt;
-                if (ground->off_time[side] >= ground_config->off_hold_s)
+                if (ground->off_time[side] >= off_hold_s)
                 {
                     ground->off_ground_flag[side] = 1U;
                     ground->off_time[side] = 0.0f;
+                    /* 腾空开始，伸腿速度峰值重新记。 */
+                    ground->d_L0_peak[side] = 0.0f;
                 }
             }
             else
@@ -339,13 +375,37 @@ void Chassis_Ground_Calc(const Chassis_Config_t *config, Chassis_t *chassis)
         else
         {
             ground->off_time[side] = 0.0f;
-            if (ground->Fn_ratio[side] >= ground_config->land_force_ratio)
+            if (leg->d_L0 > ground->d_L0_peak[side])
+            {
+                ground->d_L0_peak[side] = leg->d_L0;
+            }
+            /*
+             * 触地两路并联。第二路取自ZJU：它明确不用支持力恢复判触地，
+             * 因为空中主动伸腿过程中触地时腿仍在伸长、速度不会立刻反向，
+             * 只是被地面压制，只看支撑力会漏检、姿态会失衡。
+             *   A 腿长速度反向（腿已伸到位、落地被压缩）
+             *   B 伸腿速度从本次腾空的峰值明显回落（主动伸腿中触地）
+             */
+            ground->land_speed_flag[side] =
+                ((leg->d_L0 < ground_config->land_d_L0_reverse) ||
+                 ((leg->L0 <
+                   (config->lqr.L0_max - ground_config->land_L0_margin)) &&
+                  (ground->d_L0_peak[side] >
+                   ground_config->land_d_L0_peak_min) &&
+                  ((ground->d_L0_peak[side] - leg->d_L0) >
+                   ground_config->land_d_L0_drop))) ? 1U : 0U;
+            land_candidate_flag =
+                ((ground->Fn_ratio[side] >=
+                  ground_config->land_force_ratio) ||
+                 (ground->land_speed_flag[side] != 0U)) ? 1U : 0U;
+            if (land_candidate_flag != 0U)
             {
                 ground->land_time[side] += chassis->dt;
                 if (ground->land_time[side] >= ground_config->land_hold_s)
                 {
                     ground->off_ground_flag[side] = 0U;
                     ground->land_time[side] = 0.0f;
+                    ground->d_L0_peak[side] = 0.0f;
                 }
             }
             else
@@ -359,9 +419,17 @@ void Chassis_Ground_Calc(const Chassis_Config_t *config, Chassis_t *chassis)
         ((ground->off_ground_flag[CHASSIS_LEFT] != 0U) &&
          (ground->off_ground_flag[CHASSIS_RIGHT] != 0U) &&
          (Observer_In_Action(chassis) == 0U)) ? 1U : 0U;
-    ground->fn_comp =
-        (ground->all_off_flag != 0U) ?
-            (ground->Fn_static * ground_config->off_F_comp_ratio) : 0.0f;
+    /*
+     * 逐腿给下压推力：整车已经腾空，但该腿还没触地才推。已经触地的那条腿
+     * 沿用常规腿长PID，不额外加力。观测器只算建议值，接不接由控制层决定。
+     */
+    for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+    {
+        ground->fn_comp[side] =
+            ((ground->all_off_flag != 0U) &&
+             (ground->off_ground_flag[side] != 0U)) ?
+                (ground->Fn_static * ground_config->off_F_comp_ratio) : 0.0f;
+    }
 }
 
 void Chassis_Turn_Init(Chassis_Turn_t *turn)

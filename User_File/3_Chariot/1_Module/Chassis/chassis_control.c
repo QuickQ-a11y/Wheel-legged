@@ -315,6 +315,17 @@ static void State_Enter(Chassis_State_t state)
             ((Chassis.leg[CHASSIS_LEFT].valid_flag != 0U) &&
              (Chassis.leg[CHASSIS_RIGHT].valid_flag != 0U)) ? 1U : 0U;
 
+        /*
+         * 倒地方向和扫掠方向只属于转腿阶段，进FALLEN时按本轮姿态重新锁存，
+         * 0表示还没锁。收腿阶段不消费它们，也就不清。
+         */
+        if (state == CHASSIS_FALLEN)
+        {
+            Chassis.recovery_theta_ref = 0.0f;
+            Chassis.recovery_direction = 0.0f;
+            Chassis.recovery_stuck_time = 0.0f;
+        }
+
         for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
         {
             Chassis.leg[side].target_phi0 =
@@ -339,9 +350,9 @@ static void State_Enter(Chassis_State_t state)
         memset(Chassis.step_contact_latch_flag,
                0,
                sizeof(Chassis.step_contact_latch_flag));
+        Chassis.step_posture_flag = 0U;
         for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
         {
-            Algorithm_PID_Init(&Chassis.step_leg_angle_pid[side]);
             /*
              * 和进STANDING一样从当前实际腿长接管，再由Chassis_Step()按
              * step.L0_rate斜坡逼近approach_L0。这里直接赋approach_L0
@@ -498,6 +509,21 @@ void Chassis_State_Update(void)
     uint32_t active_fault;
     uint32_t last_output_fault;
 
+    /*
+     * 0. 重力矢量俯仰角。必须放在任何 return 之前每周期更新：模式边沿那一拍
+     * 就要用它判姿态，只在 FALLEN 里更新会读到陈旧值，低通也得一直是热的。
+     * 角度差先归一化再滤波，机体接近 ±pi 时不会穿过断点被滤向反方向。
+     */
+    Chassis.fall_pitch = Algorithm_AngleNormalizeRad(
+        Chassis.fall_pitch +
+        (Chassis_Config.recovery.fall_pitch_filter *
+         Algorithm_AngleNormalizeRad(
+             atan2f(Chassis_Config.imu.fall_accel_x_scale *
+                        Chassis.imu.accel_raw[0],
+                    Chassis_Config.imu.fall_accel_z_scale *
+                        Chassis.imu.accel_raw[2]) -
+             Chassis.fall_pitch)));
+
     /* 1. 外部主动零力具有最高优先级，不进入任何闭环控制。 */
     if (Chassis.mode == CHASSIS_MODE_ZERO_FORCE)
     {
@@ -542,13 +568,16 @@ void Chassis_State_Update(void)
     if (Chassis.mode != Chassis.last_mode)
     {
         /*
-         * 能否直接进入站立：左右腿正解有效、pitch较小且两条虚拟腿都
+         * 能否直接进入站立：左右腿正解有效、机体倾角较小且两条虚拟腿都
          * 位于准备角区间；正解无效时也放行，中间量继续计算，最终输出
          * 由故障门封锁。TOP和FOLLOW共用同一个姿态门。
+         * 倾角用 fall_pitch 不用 imu.pitch：车真趴下去以后 EKF pitch 会
+         * 折返回小值，直接骗过这道门判成"可以站"。
          */
         attitude_ready =
             ((leg_valid_flag == 0U) ||
-             ((fabsf(theta_b) <= Chassis_Config.recovery.direct_pitch) &&
+             ((fabsf(Chassis.fall_pitch) <=
+               Chassis_Config.recovery.direct_pitch) &&
               (Angle_In_Range(
                    Chassis.leg[CHASSIS_LEFT].phi0_total,
                    Chassis_Config.recovery.phi0_min,
@@ -837,6 +866,7 @@ void Chassis_Recovery(void)
     float rotate_rate[CHASSIS_LEG_COUNT];
     float direction;
     float theta_ref;
+    float theta_sign;
     uint8_t theta_flag[CHASSIS_LEG_COUNT];
     uint8_t prepare_flag;
     uint32_t side;
@@ -876,12 +906,32 @@ void Chassis_Recovery(void)
 
     theta_b = Chassis.imu.pitch *
                      Chassis_Config.imu.pitch_angle_scale;
-    theta_ref = (recovery->theta_min + recovery->theta_max) * 0.5f;
+
+    /*
+     * 转腿目标落在机体倾倒的同一侧，从当前姿态转过去最近。
+     * 参考ZJU：它的摆腿目标是单边写死的，因为前面有翻身阶段先把机体翻到
+     * 已知一侧；本工程没有那个阶段，目标必须跟着倒地方向对称，否则往一个
+     * 方向倒时要多转约两倍窗口中心角——这就是"舍近求远"。
+     * 哪一侧真能撬起机体取决于机构，实机站不起来就把下面这两个符号对调。
+     * 只在本轮自救的第一拍锁存，见 Chassis.recovery_theta_ref 的说明。
+     */
+    if (Chassis.recovery_theta_ref == 0.0f)
+    {
+        Chassis.recovery_theta_ref =
+            ((Chassis.fall_pitch < 0.0f) ? -1.0f : 1.0f) *
+            (recovery->theta_min + recovery->theta_max) * 0.5f;
+    }
+    theta_ref = Chassis.recovery_theta_ref;
+    theta_sign = (theta_ref >= 0.0f) ? 1.0f : -1.0f;
     for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
     {
+        /*
+         * 这里必须用 fall_pitch 而不是 theta_b：theta 是虚拟腿相对大地竖直方向
+         * 的角，机体倒过90度以后 EKF pitch 会折返，theta 会跟着算成另一个值。
+         */
         theta[side] = Algorithm_AngleNearestEquivalentRad(
             Chassis.leg[side].phi0_total -
-                Chassis_Config.phi0_offset + theta_b,
+                Chassis_Config.phi0_offset + Chassis.fall_pitch,
             theta_ref);
     }
 
@@ -889,7 +939,7 @@ void Chassis_Recovery(void)
     {
         Chassis.state_time += dt;
         /* 倒地时姿态已经满足准备条件，直接跳过转腿阶段。 */
-        if ((fabsf(theta_b) <= recovery->direct_pitch) &&
+        if ((fabsf(Chassis.fall_pitch) <= recovery->direct_pitch) &&
             (Angle_In_Range(
                  Chassis.leg[CHASSIS_LEFT].phi0_total,
                  recovery->phi0_min,
@@ -905,14 +955,59 @@ void Chassis_Recovery(void)
         {
             for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
             {
+                /*
+                 * 窗口跟着 theta_ref 的符号走。这里不能写成 fabsf(theta)：
+                 * 腿摆到反侧同样能凑出合格的绝对值，但那一侧顶不起机体。
+                 */
                 theta_flag[side] =
-                    ((theta[side] >= recovery->theta_min) &&
-                     (theta[side] <= recovery->theta_max)) ? 1U : 0U;
+                    (((theta[side] * theta_sign) >= recovery->theta_min) &&
+                     ((theta[side] * theta_sign) <= recovery->theta_max)) ?
+                        1U : 0U;
                 rotate_rate[side] = recovery->rotate_rate;
             }
-            /* 机体俯仰方向决定倒地后虚拟腿应向哪一侧翻转。 */
-            // direction = (theta_b < 0.0f) ? 1.0f : -1.0f;
-            direction = (theta_b < 0.0f) ? 1.0f : -1.0f;
+
+            /*
+             * 扫掠方向按就近原则选：往参考角近的那一侧转。不再看 pitch 符号，
+             * 折返后的 pitch 会指错方向、让腿绕远路。同样只锁存一次，两腿共用
+             * 一个方向——两腿不同步转，机体翻不过来。
+             */
+            if (Chassis.recovery_direction == 0.0f)
+            {
+                Chassis.recovery_direction =
+                    (((theta[CHASSIS_LEFT] + theta[CHASSIS_RIGHT]) * 0.5f) <
+                     theta_ref) ? 1.0f : -1.0f;
+            }
+            direction = Chassis.recovery_direction;
+
+            /*
+             * 卡死反转。腿被机构或障碍物卡住时，目标一直往同一方向推只会
+             * 顶到超时，所以连续卡住就反向扫，并把目标重锁到当前实际角
+             * ——不重锁的话解卡瞬间目标已经跑远，腿会甩出去。
+             */
+            if ((fabsf(Chassis.leg[CHASSIS_LEFT].d_phi0) <
+                 recovery->stuck_d_phi0) &&
+                (fabsf(Chassis.leg[CHASSIS_RIGHT].d_phi0) <
+                 recovery->stuck_d_phi0) &&
+                ((theta_flag[CHASSIS_LEFT] == 0U) ||
+                 (theta_flag[CHASSIS_RIGHT] == 0U)))
+            {
+                Chassis.recovery_stuck_time += dt;
+            }
+            else
+            {
+                Chassis.recovery_stuck_time = 0.0f;
+            }
+            if (Chassis.recovery_stuck_time >= recovery->stuck_time)
+            {
+                Chassis.recovery_direction = -direction;
+                direction = Chassis.recovery_direction;
+                Chassis.recovery_stuck_time = 0.0f;
+                for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+                {
+                    Chassis.leg[side].target_phi0 =
+                        Chassis.leg[side].phi0_total;
+                }
+            }
 
             /*
              * 机体仍明显倾斜且双腿进度不一致时，让距离准备区间中心
@@ -920,7 +1015,7 @@ void Chassis_Recovery(void)
              */
             if ((fabsf(theta[CHASSIS_LEFT] - theta[CHASSIS_RIGHT]) >
                   recovery->theta_diff) &&
-                (fabsf(theta_b) > recovery->ready_pitch))
+                (fabsf(Chassis.fall_pitch) > recovery->ready_pitch))
             {
                 if (fabsf(theta[CHASSIS_LEFT] - theta_ref) >
                     fabsf(theta[CHASSIS_RIGHT] - theta_ref))
@@ -945,7 +1040,7 @@ void Chassis_Recovery(void)
                                 recovery->extend_L0,
                                 recovery->L0_rate * dt);
                 if ((theta_flag[side] == 0U) ||
-                    (fabsf(theta_b) > recovery->direct_pitch))
+                    (fabsf(Chassis.fall_pitch) > recovery->direct_pitch))
                 {
                     Chassis.leg[side].target_phi0 +=
                         direction * rotate_rate[side] * dt;
@@ -957,10 +1052,10 @@ void Chassis_Recovery(void)
                     Chassis.leg[side].phi0_total + recovery->rotate_lead_max);
             }
 
-            /* 双腿到位且 pitch 足够小并持续稳定后才进入板凳准备阶段。 */
+            /* 双腿到位且机体倾角足够小并持续稳定后才进入板凳准备阶段。 */
             if ((theta_flag[CHASSIS_LEFT] != 0U) &&
                 (theta_flag[CHASSIS_RIGHT] != 0U) &&
-                (fabsf(theta_b) <= recovery->ready_pitch))
+                (fabsf(Chassis.fall_pitch) <= recovery->ready_pitch))
             {
                 Chassis.stable_time += dt;
             }
@@ -991,7 +1086,20 @@ void Chassis_Recovery(void)
     if (Chassis.state == CHASSIS_FALLING_TO_STAND)
     {
         Chassis.state_time += dt;
-        prepare_flag = (fabsf(theta_b) <= recovery->ready_pitch) ? 1U : 0U;
+        /*
+         * 到位判据同时看 pitch、roll 和两腿等长。只查 pitch 的话侧躺时腿长
+         * 腿角照样能到位，会直接交给站立控制，而那个姿态已经在LQR线性化
+         * 域外。这里的 pitch 用 theta_b：机体已经接近直立，EKF pitch 可靠，
+         * 而且要和站立控制消费的是同一份。
+         */
+        prepare_flag =
+            ((fabsf(theta_b) <= recovery->ready_pitch) &&
+             (fabsf(Chassis.imu.roll *
+                    Chassis_Config.imu.roll_angle_scale) <=
+              recovery->ready_roll) &&
+             (fabsf(Chassis.leg[CHASSIS_LEFT].L0 -
+                    Chassis.leg[CHASSIS_RIGHT].L0) <=
+              recovery->L0_diff_tol)) ? 1U : 0U;
         for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
         {
             /* 腿长和腿角都按速率靠近板凳姿态，不再一步阶跃。 */
@@ -1091,8 +1199,19 @@ static void LQR_Calc(void)
     uint32_t output;
     uint32_t state;
 
-    if ((Chassis.mode == CHASSIS_MODE_TOP) &&
-        (Chassis.state == CHASSIS_STANDING))
+    /*
+     * 整车离地优先于小陀螺：既在小陀螺又腾空时牵引力为零，位置和航向
+     * 控制毫无意义，只剩腿摆通道可控。掩码取自ZJU式142。
+     */
+    if ((Chassis_Config.output.off_ground_act_flag != 0U) &&
+        (Chassis.ground.all_off_flag != 0U))
+    {
+        memcpy(Chassis.lqr.scale,
+               Chassis_Config.off_ground_scale,
+               sizeof(Chassis.lqr.scale));
+    }
+    else if ((Chassis.mode == CHASSIS_MODE_TOP) &&
+             (Chassis.state == CHASSIS_STANDING))
     {
         memcpy(Chassis.lqr.scale,
                Chassis_Config.top.scale,
@@ -1144,101 +1263,6 @@ static void LQR_Calc(void)
 }
 
 /**
- * @brief 爬台阶摆腿阶段用角度PID覆盖LQR的两路虚拟腿摆力矩。
- *
- * CLIMB按HERO_LEG磕台阶控制分两段：先后摆蓄势再前摆越过台阶，最后归正。
- * 摆动段给固定力矩，摆过头才切回PID保持，避免撞机械限位。
- * RECOVER仍是单一腿摆角PID。
- */
-static void Step_Leg_Control(float dt)
-{
-    const Chassis_Step_Config_t *config = &Chassis_Config.step;
-    uint32_t side;
-
-    for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
-    {
-        /* 腿杆相对车体角，不含机体俯仰，对应HERO_LEG的abs_leg_theta。 */
-        float phi0 = Chassis.leg[side].phi0_total - Chassis_Config.phi0_offset;
-        float theta = Chassis.leg[side].theta;
-        float output_nm = 0.0f;
-
-        if (Chassis.step_phase != CHASSIS_STEP_CLIMB)
-        {
-            Algorithm_PID_UpdateByFeedbackRate(
-                &config->leg_angle_pid,
-                &Chassis.step_leg_angle_pid[side],
-                config->recover_theta,
-                theta,
-                Chassis.leg[side].d_theta,
-                dt,
-                &output_nm);
-            Chassis.leg[side].Tp = output_nm;
-            continue;
-        }
-
-        switch (Chassis.swing[side])
-        {
-        case CHASSIS_SWING_BACK:
-            if (fabsf(phi0) >= config->back_phi0_max)
-            {
-                Algorithm_PID_UpdateByFeedbackRate(
-                    &config->leg_angle_pid,
-                    &Chassis.step_leg_angle_pid[side],
-                    config->back_phi0_hold,
-                    phi0,
-                    Chassis.leg[side].d_phi0,
-                    dt,
-                    &output_nm);
-            }
-            else
-            {
-                output_nm = config->back_Tp;
-            }
-            if (fabsf(theta) >= config->back_theta_exit)
-            {
-                Chassis.swing[side] = CHASSIS_SWING_FRONT;
-            }
-            break;
-
-        case CHASSIS_SWING_FRONT:
-            if (fabsf(theta) >= config->front_theta_max)
-            {
-                Algorithm_PID_UpdateByFeedbackRate(
-                    &config->leg_angle_pid,
-                    &Chassis.step_leg_angle_pid[side],
-                    config->front_phi0_hold,
-                    phi0,
-                    Chassis.leg[side].d_phi0,
-                    dt,
-                    &output_nm);
-            }
-            else
-            {
-                output_nm = config->front_Tp;
-            }
-            if (theta <= config->front_theta_exit)
-            {
-                Chassis.swing[side] = CHASSIS_SWING_HOME;
-            }
-            break;
-
-        case CHASSIS_SWING_HOME:
-        default:
-            Algorithm_PID_UpdateByFeedbackRate(
-                &config->leg_angle_pid,
-                &Chassis.step_leg_angle_pid[side],
-                config->home_phi0,
-                phi0,
-                Chassis.leg[side].d_phi0,
-                dt,
-                &output_nm);
-            break;
-        }
-        Chassis.leg[side].Tp = output_nm;
-    }
-}
-
-/**
  * @brief 完成速度融合、十维状态、支撑力、LQR和VMC整条控制链。
  *
  * 函数开始先清最终命令；输出故障不阻断中间量计算，只在末端阶段
@@ -1247,6 +1271,7 @@ static void Step_Leg_Control(float dt)
 void Chassis_Control(void)
 {
     float measurement[ALGORITHM_KALMAN_MAX_MEASUREMENT_COUNT] = {0.0f};
+    uint8_t off_ground_act_flag;
     float dt;
     float theta_b;
     float d_theta_b;
@@ -1400,6 +1425,48 @@ void Chassis_Control(void)
     Chassis_Stuck_Update(&Chassis_Config, &Chassis);
     Chassis_Stuck_Calc(&Chassis_Config, &Chassis);
 
+    /*
+     * 整车离地动作的边沿处理。三项动作(悬空腿下压、悬空轮清零、LQR掩码)统一
+     * 挂在整车级all_off_flag上：单腿过坎或压弹丸时短暂卸载是常态，逐腿直接
+     * 动控制会在正常行驶中乱切。ZJU同样是先把整车切进Flight模式再逐腿细分。
+     */
+    off_ground_act_flag =
+        ((Chassis_Config.output.off_ground_act_flag != 0U) &&
+         (Chassis.ground.all_off_flag != 0U)) ? 1U : 0U;
+    if (Chassis.ground.all_off_flag != Chassis.last_all_off_flag)
+    {
+        if (Chassis.ground.all_off_flag != 0U)
+        {
+            /* 起飞：锁存腾空前的腿长指令。 */
+            for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+            {
+                Chassis.off_ground_L0_latch[side] =
+                    Chassis.leg[side].target_L0;
+            }
+        }
+        else if (Chassis_Config.output.off_ground_act_flag != 0U)
+        {
+            /*
+             * 落地交接。腾空期间腿被推出去、腿长和横滚PID在没有地面反力的
+             * 情况下积分卷了一路、航向和位移参考也漂了，都要还原。
+             * 刻意不调Control_Reset()：它会连带重置四套观测器，而地面观测
+             * 刚刚才判出落地，重置它自相矛盾。
+             */
+            for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+            {
+                Chassis.leg[side].target_L0 =
+                    Chassis.off_ground_L0_latch[side];
+            }
+            Algorithm_PID_Init(&Chassis.leg_length_pid);
+            Algorithm_PID_Init(&Chassis.roll_pid);
+            Chassis.body.s = 0.0f;
+            Chassis.lqr.target[CHASSIS_STATE_S] = 0.0f;
+            Chassis.lqr.target[CHASSIS_STATE_FAI] =
+                Chassis.imu.yaw_total * Chassis_Config.imu.yaw_angle_scale;
+        }
+        Chassis.last_all_off_flag = Chassis.ground.all_off_flag;
+    }
+
     /* 3. 小板凳由关节位置环保持腿姿态，不再叠加腿长和横滚支撑力。 */
     if (Chassis.state == CHASSIS_BENCH)
     {
@@ -1474,6 +1541,24 @@ void Chassis_Control(void)
             height_force - roll_force -
             gravity_force[CHASSIS_RIGHT] -
             Chassis_Config.F0_right;
+
+        /*
+         * 悬空腿主动伸腿找地。F0大于零即为伸腿撑地，直接叠加。
+         * 腿长快到拟合上限就停止加推力，否则悬空腿会一直顶到机构限位
+         * ——ZJU「悬空腿接近最大腿长后不再施加额外推力」。
+         */
+        if (off_ground_act_flag != 0U)
+        {
+            for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+            {
+                if (Chassis.leg[side].L0 <
+                    (Chassis_Config.lqr.L0_max -
+                     Chassis_Config.observer.off_comp_L0_margin))
+                {
+                    Chassis.leg[side].F0 += Chassis.ground.fn_comp[side];
+                }
+            }
+        }
     }
 
     /* 4. 始终根据左右实时腿长拟合K，固定目标腿长不伪造K输入。 */
@@ -1514,13 +1599,21 @@ void Chassis_Control(void)
         Chassis.leg[CHASSIS_LEFT].Tp = 0.0f;
         Chassis.leg[CHASSIS_RIGHT].Tp = 0.0f;
     }
-    if ((Chassis.state == CHASSIS_STEP) &&
-        ((Chassis.step_phase == CHASSIS_STEP_CLIMB) ||
-         (Chassis.step_phase == CHASSIS_STEP_RECOVER)))
+    /*
+     * 悬空轮不驱动：空转没有意义，落地瞬间轮速与地面不匹配会直接打滑。
+     * 触地那条腿的轮子照常由LQR驱动，逐腿判断。放在限幅之前，
+     * 保证轮通道唯一的限幅点仍然生效。
+     */
+    if (off_ground_act_flag != 0U)
     {
-        Step_Leg_Control(dt);
+        for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+        {
+            if (Chassis.ground.off_ground_flag[side] != 0U)
+            {
+                Chassis.output.T_wheel[side] = 0.0f;
+            }
+        }
     }
-
     /* 轮通道只在力矩侧限幅一次，电调命令由换算得到，不再二次限幅。 */
     if ((Chassis_Config.wheel.T_limit > 0.0f) &&
         (Chassis_Config.wheel.T_to_I != 0.0f))
@@ -1611,32 +1704,88 @@ void Chassis_Control(void)
     Chassis_Leso_Calc(&Chassis_Config, &Chassis);
 }
 
-/** @brief 切换爬台阶阶段并重置该阶段用到的摆腿PID和子步状态。 */
+/**
+ * @brief 切换爬台阶阶段。
+ *
+ * 进入两段动作时把腿角目标从当前实际角接管，否则位置串级第一拍就带着
+ * 常值超前，关节PID会满输出。从RECOVER转回PREPARE等于跨完一级台阶，
+ * 参照ZJU的Return做一次完整交接：两段动作期间不跑Chassis_Control()，
+ * 速度卡尔曼和body.s停在上台阶之前的值，不复位就开下一级会突然纠偏。
+ */
 static void Step_Phase_Enter(Chassis_Step_Phase_t phase)
 {
     uint32_t side;
 
+    if ((phase == CHASSIS_STEP_PREPARE) &&
+        (Chassis.step_phase == CHASSIS_STEP_RECOVER))
+    {
+        Control_Reset();
+        memcpy(Chassis.lqr.target,
+               Chassis_Config.target,
+               sizeof(Chassis.lqr.target));
+        Chassis.lqr.target[CHASSIS_STATE_S] = 0.0f;
+        Chassis.step_fai =
+            Chassis.imu.yaw_total * Chassis_Config.imu.yaw_angle_scale;
+        Chassis.lqr.target[CHASSIS_STATE_FAI] = Chassis.step_fai;
+        memset(Chassis.contact_time, 0, sizeof(Chassis.contact_time));
+        memset(Chassis.step_contact_flag,
+               0,
+               sizeof(Chassis.step_contact_flag));
+        memset(Chassis.step_contact_latch_flag,
+               0,
+               sizeof(Chassis.step_contact_latch_flag));
+        Chassis.step_posture_flag = 0U;
+    }
+
     Chassis.step_phase = phase;
-    if ((phase == CHASSIS_STEP_CLIMB) ||
-        (phase == CHASSIS_STEP_RECOVER))
+    if ((phase == CHASSIS_STEP_MOTION1) ||
+        (phase == CHASSIS_STEP_MOTION2))
     {
         for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
         {
-            Algorithm_PID_Init(&Chassis.step_leg_angle_pid[side]);
-            /* 两段摆腿每次进入CLIMB都从后摆重新开始，RECOVER不使用子步。 */
-            if (phase == CHASSIS_STEP_CLIMB)
-            {
-                Chassis.swing[side] = CHASSIS_SWING_BACK;
-            }
+            Chassis.leg[side].target_phi0 = Chassis.leg[side].phi0_total;
         }
     }
 }
 
-/** @brief 更新左右轮碰撞候选，只有请求、反馈和腿角同时满足才锁存。 */
+/**
+ * @brief 更新左右轮碰撞候选，两路判据并联，任一成立即计入消抖。
+ *
+ * 第一路是原有的轮力矩判据：请求、反馈和腿角同时超限。
+ * 第二路取自ZJU台阶检测，是整车级的主判据与辅判据相与——ZJU指出轮力矩这类
+ * 信号与颠簸、急减速、踩弹丸难以区分，而"指令速度不为零却跟不上"只有真被
+ * 挡住才会出现。两路的结论分别留在step_contact_flag和step_posture_flag里，
+ * Watch中可以直接看出是哪一路把车切进MOTION1的。
+ */
 static void Step_Contact_Update(float dt)
 {
     const Chassis_Step_Config_t *config = &Chassis_Config.step;
+    float theta_b = Chassis.lqr.x[CHASSIS_STATE_THETA_B];
+    float d_theta_b = Chassis.lqr.x[CHASSIS_STATE_D_THETA_B];
+    float d_s_ref = Chassis.lqr.target[CHASSIS_STATE_D_S];
+    float d_s = Chassis.lqr.x[CHASSIS_STATE_D_S];
+    uint8_t main_flag;
+    uint8_t sub_flag;
     uint32_t side;
+
+    /* 主判据P：机体已经被顶得低头，且至少一条腿被迫后摆。 */
+    main_flag =
+        ((fabsf(theta_b) > config->contact_pitch) &&
+         ((fabsf(Chassis.leg[CHASSIS_LEFT].theta) > config->contact_theta) ||
+          (fabsf(Chassis.leg[CHASSIS_RIGHT].theta) >
+           config->contact_theta))) ? 1U : 0U;
+    /* 辅判据S：四条里任一成立。速度跟踪误差那条是最能区分台阶的。 */
+    sub_flag =
+        ((fabsf(d_theta_b) > config->contact_d_pitch) ||
+         ((fabsf(d_s_ref - d_s) > config->contact_d_s_err) &&
+          (fabsf(d_s_ref) > config->contact_d_s_min)) ||
+         (fabsf(theta_b) > config->contact_pitch_hard) ||
+         (fabsf(Chassis.leg[CHASSIS_LEFT].theta) >
+          config->contact_theta_hard) ||
+         (fabsf(Chassis.leg[CHASSIS_RIGHT].theta) >
+          config->contact_theta_hard)) ? 1U : 0U;
+    Chassis.step_posture_flag =
+        ((main_flag != 0U) && (sub_flag != 0U)) ? 1U : 0U;
 
     for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
     {
@@ -1660,7 +1809,9 @@ static void Step_Contact_Update(float dt)
         {
             continue;
         }
-        if (Chassis.step_contact_flag[side] != 0U)
+        /* 姿态路是整车级结论，成立时两条腿一起进消抖。 */
+        if ((Chassis.step_contact_flag[side] != 0U) ||
+            (Chassis.step_posture_flag != 0U))
         {
             Chassis.contact_time[side] += dt;
             if (Chassis.contact_time[side] >=
@@ -1677,10 +1828,14 @@ static void Step_Contact_Update(float dt)
 }
 
 /**
- * @brief 执行抬高、接近、收腿摆动和姿态恢复四阶段辅助爬台阶。
+ * @brief 执行五阶段辅助爬台阶。
  *
- * 接触锁存后只清零I_wheel，LQR轮力矩和I_wheel_req继续
- * 更新，便于在Watch中判断碰撞条件和后续控制请求。
+ * PREPARE/APPROACH/RECOVER 复用整条LQR+VMC控制链；MOTION1/MOTION2 取自ZJU的
+ * Onestep，走关节位置串级(Joint_Control)，目标角和目标腿长各自限速推进，
+ * 期间不经过LQR。轮电流在任一腿判定撞上台阶之后就全程清零。
+ *
+ * 接触锁存后只清零I_wheel，LQR轮力矩和I_wheel_req继续更新，
+ * 便于在Watch中判断碰撞条件和后续控制请求。
  */
 void Chassis_Step(void)
 {
@@ -1689,11 +1844,103 @@ void Chassis_Step(void)
     float target_length_m;
     float target_speed_mps = 0.0f;
     float target_angle_rad = 0.0f;
+    float theta_b;
+    uint8_t contact_flag;
     uint32_t side;
 
     if (Chassis.state != CHASSIS_STEP)
     {
         Chassis_Zero_Output();
+        return;
+    }
+
+    theta_b = Chassis.imu.pitch * Chassis_Config.imu.pitch_angle_scale;
+
+    /*
+     * MOTION1/MOTION2：两段位置型动作。目标腿角和目标腿长各自按限速推进，
+     * 由关节串级跟踪，不进LQR，因此轮力矩自然全程为零。
+     * MOTION1把腿后摆到swing_phi0并伸到mid_L0，让前轮搭上台阶沿；
+     * MOTION2把腿收到最短并转到大地竖直向下，把机体拉上台阶。
+     */
+    if ((Chassis.step_phase == CHASSIS_STEP_MOTION1) ||
+        (Chassis.step_phase == CHASSIS_STEP_MOTION2))
+    {
+        float target_phi0_rad;
+        float phi0_rate_radps;
+        uint8_t reach_flag = 1U;
+
+        if (Chassis.step_phase == CHASSIS_STEP_MOTION1)
+        {
+            target_length_m = config->mid_L0;
+            target_phi0_rad = Chassis_Config.phi0_offset + config->swing_phi0;
+            phi0_rate_radps = config->swing_phi0_rate;
+        }
+        else
+        {
+            target_length_m = config->retract_L0;
+            /* 减去机体俯仰即大地竖直向下，等价ZJU的 pi/2 - theta_b。 */
+            target_phi0_rad = Chassis_Config.phi0_offset - theta_b;
+            phi0_rate_radps = config->home_phi0_rate;
+        }
+
+        for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+        {
+            /* 纯五连杆正解的腿角，相对车体，不含pitch，即ZJU的"机构角"。 */
+            float phi0_rel_rad = Chassis.leg[side].phi0_total -
+                                 Chassis_Config.phi0_offset;
+            float angle_error_rad;
+            float angle_tol_rad;
+
+            Chassis.leg[side].target_L0 =
+                Move_Toward(Chassis.leg[side].target_L0,
+                            target_length_m,
+                            config->climb_L0_rate * dt);
+            Chassis.leg[side].target_phi0 =
+                Move_Toward(Chassis.leg[side].target_phi0,
+                            Algorithm_AngleNearestEquivalentRad(
+                                target_phi0_rad,
+                                Chassis.leg[side].target_phi0),
+                            phi0_rate_radps * dt);
+
+            /*
+             * 到位判据必须和该段目标同口径，否则判的不是"跟没跟上"。
+             * MOTION1目标是车体系机构角，判据就用机构角，不掺theta_b；
+             * ZJU原文这里比的是含pitch的theta_l，展开等于
+             * |腿跟踪误差 + theta_b|，机体俯仰大时会永远退不出——他们有
+             * 3秒模式超时兜底，本工程没有，所以改成同口径。
+             * MOTION2目标是大地竖直，判据就用含pitch的theta，同样是同口径。
+             */
+            if (Chassis.step_phase == CHASSIS_STEP_MOTION1)
+            {
+                angle_error_rad = phi0_rel_rad - config->swing_phi0;
+                angle_tol_rad = config->swing_phi0_tol;
+            }
+            else
+            {
+                angle_error_rad = phi0_rel_rad + theta_b;
+                angle_tol_rad = config->home_theta_tol;
+            }
+            if ((fabsf(Chassis.leg[side].L0 - target_length_m) >
+                 config->climb_L0_tol) ||
+                (fabsf(angle_error_rad) > angle_tol_rad))
+            {
+                reach_flag = 0U;
+            }
+        }
+
+        Joint_Control();
+        memset(Chassis.output.I_wheel, 0, sizeof(Chassis.output.I_wheel));
+        if (Chassis.state != CHASSIS_STEP)
+        {
+            return;
+        }
+        if (reach_flag != 0U)
+        {
+            Step_Phase_Enter(
+                (Chassis.step_phase == CHASSIS_STEP_MOTION1) ?
+                    CHASSIS_STEP_MOTION2 :
+                    CHASSIS_STEP_RECOVER);
+        }
         return;
     }
 
@@ -1708,11 +1955,6 @@ void Chassis_Step(void)
             target_speed_mps = 0.0f;
         }
     }
-    else if (Chassis.step_phase == CHASSIS_STEP_CLIMB)
-    {
-        /* CLIMB的腿摆由两段摆腿直接给Tp，十维腿角目标保持零。 */
-        target_length_m = config->retract_L0;
-    }
     else if (Chassis.step_phase == CHASSIS_STEP_RECOVER)
     {
         target_length_m = Chassis.goal.L0;
@@ -1726,9 +1968,9 @@ void Chassis_Step(void)
     /*
      * 准备和接近阶段要能转向对准台阶：右摇杆的角速度积分进step_fai，
      * 松杆瞬间把step_fai锁到当前航向，和站立模式同一套手感。
-     * 磕上台阶后(CLIMB/RECOVER)航向锁死不再接受摇杆：那两段轮电流已被
-     * 清零、腿摆Tp也被Step_Leg_Control覆盖，转向本来就无从执行，继续
-     * 积分只会让目标漂走，等RECOVER结束轮子恢复输出时突然甩一下。
+     * 磕上台阶后(RECOVER)航向锁死不再接受摇杆：那一段轮电流已被清零，
+     * 转向本来就无从执行，继续积分只会让目标漂走，等轮子恢复输出时
+     * 突然甩一下。MOTION1/MOTION2 走位置串级，根本不到这里。
      */
     if ((Chassis.step_phase == CHASSIS_STEP_PREPARE) ||
         (Chassis.step_phase == CHASSIS_STEP_APPROACH))
@@ -1794,22 +2036,7 @@ void Chassis_Step(void)
         if ((Chassis.step_contact_latch_flag[CHASSIS_LEFT] != 0U) &&
             (Chassis.step_contact_latch_flag[CHASSIS_RIGHT] != 0U))
         {
-            Step_Phase_Enter(CHASSIS_STEP_CLIMB);
-        }
-        break;
-
-    case CHASSIS_STEP_CLIMB:
-        /* 双腿都走完后摆和前摆并进入归正，才认为已经越过台阶。 */
-        if ((fabsf(Chassis.leg[CHASSIS_LEFT].L0 -
-                   config->retract_L0) <=
-             config->L0_tol) &&
-            (fabsf(Chassis.leg[CHASSIS_RIGHT].L0 -
-                   config->retract_L0) <=
-             config->L0_tol) &&
-            (Chassis.swing[CHASSIS_LEFT] == CHASSIS_SWING_HOME) &&
-            (Chassis.swing[CHASSIS_RIGHT] == CHASSIS_SWING_HOME))
-        {
-            Step_Phase_Enter(CHASSIS_STEP_RECOVER);
+            Step_Phase_Enter(CHASSIS_STEP_MOTION1);
         }
         break;
 
@@ -1828,16 +2055,28 @@ void Chassis_Step(void)
              config->angle_tol))
         {
             /*
-             * 一次台阶跨越完成，直接回到PREPARE等待下一级台阶；只有
-             * 外部mode变化（拨杆离开左上）才会真正退出STEP状态。
+             * 一次台阶跨越完成，回PREPARE等待下一级；只有外部mode变化
+             * （拨杆离开左上）才会真正退出STEP状态。回PREPARE时
+             * Step_Phase_Enter会做一次完整交接复位。
              */
             Step_Phase_Enter(CHASSIS_STEP_PREPARE);
         }
         break;
+
+    default:
+        break;
     }
 
+    /*
+     * 任一腿判定撞上台阶之后就不再驱动轮子，不等两腿都锁存、也不等阶段跳转。
+     * 否则先锁存那一侧的轮子会继续顶着已经被挡住的台阶。
+     */
+    contact_flag =
+        ((Chassis.step_contact_latch_flag[CHASSIS_LEFT] != 0U) ||
+         (Chassis.step_contact_latch_flag[CHASSIS_RIGHT] != 0U) ||
+         (Chassis.step_posture_flag != 0U)) ? 1U : 0U;
     if ((Chassis.state == CHASSIS_STEP) &&
-        ((Chassis.step_phase == CHASSIS_STEP_CLIMB) ||
+        ((contact_flag != 0U) ||
          (Chassis.step_phase == CHASSIS_STEP_RECOVER)))
     {
         memset(Chassis.output.I_wheel, 0, sizeof(Chassis.output.I_wheel));
