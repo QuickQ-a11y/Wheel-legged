@@ -16,7 +16,7 @@
 #define USB_TASK_TX_BATCH_SIZE \
     (sizeof(usb_status_packet_t) * APP_USB_TX_BATCH)
 
-_Static_assert((APP_USB_RX_BUF_SIZE & USB_TASK_RX_BUFFER_MASK) == 0U,
+static_assert((APP_USB_RX_BUF_SIZE & USB_TASK_RX_BUFFER_MASK) == 0U,
                "USB RX buffer size must be a power of two");
 
 typedef struct

@@ -5,6 +5,7 @@
 #include "Limit.h"
 #include "PID.h"
 #include "chassis_config.h"
+#include "chassis_mpc.h"
 
 #include <math.h>
 #include <string.h>
@@ -434,6 +435,8 @@ void Chassis_Init(void)
     Algorithm_PID_Init(&Chassis.leg_length_pid);
     Algorithm_PID_Init(&Chassis.roll_pid);
     Chassis_Leso_Init(&Chassis.leso);
+    /* MPC求解器在这里一次性分配好工作矩阵，控制环里不再分配。 */
+    Chassis_MPC_Init();
     Joint_Control_Reset();
     for (index = 0U; index < CHASSIS_LEG_COUNT; index++)
     {
@@ -1532,15 +1535,45 @@ void Chassis_Control(void)
                 Chassis_Config.F0_gravity_scale *
                 cosf(Chassis.leg[side].theta);
         }
+        /*
+         * MPC按固定拍数分频求解，不用累加实际dt——模型里的Ts是按decimation
+         * 写死的，dt抖动会让离散模型失配。开关关着时仍然照算，只是不接进F0，
+         * 这样实机可以在Watch里直接对照MPC和PID两路输出。
+         */
+        Chassis.mpc_tick++;
+        if (Chassis.mpc_tick >= Chassis_Config.mpc.decimation)
+        {
+            float mpc_x0[CHASSIS_STATE_MPC_COUNT];
+
+            Chassis.mpc_tick = 0U;
+            mpc_x0[0] = roll;
+            mpc_x0[1] = d_roll;
+            mpc_x0[2] = H;
+            mpc_x0[3] = d_H;
+            Chassis_MPC_Solve(mpc_x0, H_target);
+        }
+
         /* F0_left/F0_right 的正负号沿用原写法，两者当前均为0。 */
-        Chassis.leg[CHASSIS_LEFT].F0 =
-            height_force + roll_force -
-            gravity_force[CHASSIS_LEFT] +
-            Chassis_Config.F0_left;
-        Chassis.leg[CHASSIS_RIGHT].F0 =
-            height_force - roll_force -
-            gravity_force[CHASSIS_RIGHT] -
-            Chassis_Config.F0_right;
+        if (Chassis_Config.output.mpc_flag != 0U)
+        {
+            /*
+             * MPC直接给绝对支撑力：重力已经作为仿射项在模型里，不再叠加
+             * 重力前馈，也不再走共模腿长PID和差模横滚PID那两路。
+             */
+            Chassis.leg[CHASSIS_LEFT].F0 = Chassis_MPC.F[0];
+            Chassis.leg[CHASSIS_RIGHT].F0 = Chassis_MPC.F[1];
+        }
+        else
+        {
+            Chassis.leg[CHASSIS_LEFT].F0 =
+                height_force + roll_force -
+                gravity_force[CHASSIS_LEFT] +
+                Chassis_Config.F0_left;
+            Chassis.leg[CHASSIS_RIGHT].F0 =
+                height_force - roll_force -
+                gravity_force[CHASSIS_RIGHT] -
+                Chassis_Config.F0_right;
+        }
 
         /*
          * 悬空腿主动伸腿找地。F0大于零即为伸腿撑地，直接叠加。

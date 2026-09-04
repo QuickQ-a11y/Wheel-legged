@@ -630,6 +630,30 @@ const Chassis_Config_t Chassis_Config = {
     .leso = {
         .comp_scale = 0.0f,
     },
+    /*
+     * 车身高度与Roll的MPC。A/B由 model/wheel 加下面这两个物理量现场推导，
+     * 数值依据见 Chassis_MPC_Config_t 的注释。
+     */
+    .mpc = {
+        /* I_roll 目前是 body_mass*half_track^2 的估算值，实机大概率要调。 */
+        .I_roll = 0.5324f,
+        .damping = 8.0f,
+        .roll_sign = 1.0f,
+        /*
+         * Q/R 的配平：力偏差量级 O(50N) 使 u^2 到 O(2500)，高度误差 O(0.05m)
+         * 使 H^2 只有 O(0.0025)，两者要可比就得 Q_H/R 到 1e6 量级。
+         * 按 Qi-Q26 的原始量级填会让 R 完全压过 Q，0.2m 高度差只换来 2N 力。
+         */
+        .Q = { 2.0e4f, 2.0e2f, 5.0e4f, 5.0e2f },
+        .R = { 0.05f, 0.05f },
+        .rho = 5.0f,
+        .horizon = 15U,      /* 15*10ms = 0.15s，覆盖跳跃和下台阶的时间尺度 */
+        .max_iter = 50U,     /* PC端实测最坏16次，留足余量 */
+        .decimation = 10U,   /* 1kHz底盘任务，10拍=100Hz */
+        .F_min = 10.0f,
+        .F_max = 150.0f,
+        .dF_max = 15.0f,
+    },
     /* 最终物理输出开关；关闭不影响请求量和控制中间量计算。 */
     .output = {
         /*
@@ -641,6 +665,7 @@ const Chassis_Config_t Chassis_Config = {
         .wheel_flag = 0U,
         /* 离地三项动作默认关，实机确认 all_off_flag 不误触发后再打开。 */
         .off_ground_act_flag = 0U,
+        .mpc_flag = 0U,   /* MPC默认关，先在Watch里和PID对照过再打开。 */
         .joint_T_limit = 5.0f,
     },
     /* 整车公共目标、支撑力前馈和控制周期边界。 */
@@ -657,19 +682,35 @@ const Chassis_Config_t Chassis_Config = {
     .default_dt = APP_CTRL_DT_S,
     .dt_min = 0.0002f,
     .dt_max = 0.02f,
+    /*
+     * 十维必须从下标0起逐项写满：数组指定初始化器在C++里只有"从0开始且连续"
+     * 才被接受，跳号或乱序会让g++直接报 non-trivial designated initializers。
+     * 没写的项本来也是零初始化，写满只是把它写明确。
+     */
     .target = {
-        [CHASSIS_STATE_D_S] = 0.0f, /* 实测原地站立平衡点，rad。 */
-        [CHASSIS_STATE_THETA_B] = 0.00f, /* 实测原地站立平衡点，rad。 */
+        [CHASSIS_STATE_S] = 0.0f,
+        [CHASSIS_STATE_D_S] = 0.0f,       /* 实测原地站立平衡点，rad。 */
+        [CHASSIS_STATE_FAI] = 0.0f,
+        [CHASSIS_STATE_D_FAI] = 0.0f,
         [CHASSIS_STATE_THETA_L] = 0.0f,
+        [CHASSIS_STATE_D_THETA_L] = 0.0f,
         [CHASSIS_STATE_THETA_R] = 0.0f,
-
+        [CHASSIS_STATE_D_THETA_R] = 0.0f,
+        [CHASSIS_STATE_THETA_B] = 0.0f,   /* 实测原地站立平衡点，rad。 */
+        [CHASSIS_STATE_D_THETA_B] = 0.0f,
     },
     /* ZJU式142：整车离地时只留腿摆角和腿摆角速度，其余通道空中无从执行。 */
     .off_ground_scale = {
+        [CHASSIS_STATE_S] = 0.0f,
+        [CHASSIS_STATE_D_S] = 0.0f,
+        [CHASSIS_STATE_FAI] = 0.0f,
+        [CHASSIS_STATE_D_FAI] = 0.0f,
         [CHASSIS_STATE_THETA_L] = 1.0f,
         [CHASSIS_STATE_D_THETA_L] = 1.0f,
         [CHASSIS_STATE_THETA_R] = 1.0f,
         [CHASSIS_STATE_D_THETA_R] = 1.0f,
+        [CHASSIS_STATE_THETA_B] = 0.0f,
+        [CHASSIS_STATE_D_THETA_B] = 0.0f,
     },
 };
 #endif
@@ -852,16 +893,23 @@ const Chassis_Config_t Chassis_Config = {
         .bench_L0 = 0.15f,
         .bench_phi0 = CHASSIS_HALF_PI,
 
-        /* 斜坡速率。rotate_rate 单位rad/s，HERO_LEG用的是8.0，这里先取保守值。 */
-        .L0_rate = 0.20f,
-        .rotate_rate = 4.0f,
-        .lag_rate = 4.0f,
+        /*
+         * 斜坡速率。rotate_rate 单位rad/s，HERO_LEG用的是8.0。
+         * ⚠ 临时降速：原值 L0_rate=0.20 / rotate_rate=4.0 / lag_rate=4.0，
+         * 4.0 rad/s 是 229度/s，躺倒自起时动作太猛已经把车甩翻过一次。
+         * 降到这一档是为了架空验转腿方向——慢到肉眼能看清、也来得及拨杆救车。
+         * 方向确认无误后再逐步调回去，别一步踩到 4.0。
+         */
+        .L0_rate = 0.10f,
+        .rotate_rate = 1.0f,
+        .lag_rate = 1.5f,
         .theta_diff = 0.80f,
         .rotate_lead_max = 0.35f,
 
         /* 卡死反转。阈值取ZJU翻身阶段原值：35度/s持续600ms。 */
         .stuck_d_phi0 = 0.61f,
-        .stuck_time = 0.60f,
+        // .stuck_time = 0.60f,
+        .stuck_time = 10000.0f,
 
         /* 腿视作均质杆取0.5；前馈系数从0起调，确认动作不变差再往上加。 */
         .leg_cm_ratio = 0.5f,
@@ -1447,6 +1495,30 @@ const Chassis_Config_t Chassis_Config = {
             -0.3690836,  1.135545,  -2.637359,  -1.207847,  1.031456,  2.21293
         },
     },
+    /*
+     * 车身高度与Roll的MPC。A/B由 model/wheel 加下面这两个物理量现场推导，
+     * 数值依据见 Chassis_MPC_Config_t 的注释。
+     */
+    .mpc = {
+        /* I_roll 目前是 body_mass*half_track^2 的估算值，实机大概率要调。 */
+        .I_roll = 0.5324f,
+        .damping = 8.0f,
+        .roll_sign = 1.0f,
+        /*
+         * Q/R 的配平：力偏差量级 O(50N) 使 u^2 到 O(2500)，高度误差 O(0.05m)
+         * 使 H^2 只有 O(0.0025)，两者要可比就得 Q_H/R 到 1e6 量级。
+         * 按 Qi-Q26 的原始量级填会让 R 完全压过 Q，0.2m 高度差只换来 2N 力。
+         */
+        .Q = { 2.0e4f, 2.0e2f, 5.0e4f, 5.0e2f },
+        .R = { 0.05f, 0.05f },
+        .rho = 5.0f,
+        .horizon = 15U,      /* 15*10ms = 0.15s，覆盖跳跃和下台阶的时间尺度 */
+        .max_iter = 50U,     /* PC端实测最坏16次，留足余量 */
+        .decimation = 10U,   /* 1kHz底盘任务，10拍=100Hz */
+        .F_min = 10.0f,
+        .F_max = 150.0f,
+        .dF_max = 15.0f,
+    },
     /* 最终物理输出开关；关闭不影响请求量和控制中间量计算。 */
     .output = {
         /*
@@ -1460,6 +1532,7 @@ const Chassis_Config_t Chassis_Config = {
         .wheel_flag = 1U,
         /* 离地三项动作默认关，实机确认 all_off_flag 不误触发后再打开。 */
         .off_ground_act_flag = 0U,
+        .mpc_flag = 0U,   /* MPC默认关，先在Watch里和PID对照过再打开。 */
         .joint_T_limit = 15.0f,
     },
     /* 整车公共目标、支撑力前馈和控制周期边界。 */
@@ -1476,19 +1549,31 @@ const Chassis_Config_t Chassis_Config = {
     .default_dt = APP_CTRL_DT_S,
     .dt_min = 0.0002f,
     .dt_max = 0.02f,
+    /* 同上：十维从下标0起写满，C++的数组指定初始化器不接受跳号。 */
     .target = {
-        [CHASSIS_STATE_D_S] = 0.0f, /* 实测原地站立平衡点，rad。 */
-        [CHASSIS_STATE_THETA_B] = 0.0f,
+        [CHASSIS_STATE_S] = 0.0f,
+        [CHASSIS_STATE_D_S] = 0.0f,       /* 实测原地站立平衡点，rad。 */
+        [CHASSIS_STATE_FAI] = 0.0f,
+        [CHASSIS_STATE_D_FAI] = 0.0f,
         [CHASSIS_STATE_THETA_L] = 0.08f,
+        [CHASSIS_STATE_D_THETA_L] = 0.0f,
         [CHASSIS_STATE_THETA_R] = 0.08f,
-
+        [CHASSIS_STATE_D_THETA_R] = 0.0f,
+        [CHASSIS_STATE_THETA_B] = 0.0f,
+        [CHASSIS_STATE_D_THETA_B] = 0.0f,
     },
     /* ZJU式142：整车离地时只留腿摆角和腿摆角速度，其余通道空中无从执行。 */
     .off_ground_scale = {
+        [CHASSIS_STATE_S] = 0.0f,
+        [CHASSIS_STATE_D_S] = 0.0f,
+        [CHASSIS_STATE_FAI] = 0.0f,
+        [CHASSIS_STATE_D_FAI] = 0.0f,
         [CHASSIS_STATE_THETA_L] = 1.0f,
         [CHASSIS_STATE_D_THETA_L] = 1.0f,
         [CHASSIS_STATE_THETA_R] = 1.0f,
         [CHASSIS_STATE_D_THETA_R] = 1.0f,
+        [CHASSIS_STATE_THETA_B] = 0.0f,
+        [CHASSIS_STATE_D_THETA_B] = 0.0f,
     },
 };
 #endif

@@ -67,7 +67,9 @@ FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 1024K
 _estack = ORIGIN(DTCMRAM) + LENGTH(DTCMRAM);    /* end of RAM */
 _sstack = _estack - _Min_Stack_Size;
 /* Generate a link error if heap and stack don't fit into RAM */
-_Min_Heap_Size = 0x200;      /* required amount of heap  */
+/* TinyMPC 的 tiny_setup() 会 new 出 66 个动态 Eigen 矩阵，float 下约 12~16 KB，
+ * 原来的 0x200(512字节) 完全不够。分配只发生在初始化期，控制环里零分配。 */
+_Min_Heap_Size = 0x8000;      /* required amount of heap  */
 _Min_Stack_Size = 0x400; /* required amount of stack */
 
 /* Define output sections */

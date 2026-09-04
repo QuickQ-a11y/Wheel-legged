@@ -2,15 +2,16 @@
 
 #include "CRC.h"
 
+#include <assert.h>
 #include <stddef.h>
 #include <string.h>
 
-_Static_assert(sizeof(usb_frame_header_t) == 7U, "USB frame header size mismatch");
-_Static_assert(sizeof(usb_status_payload_t) == 22U, "USB status payload size mismatch");
-_Static_assert(sizeof(usb_control_payload_t) == 9U, "USB control payload size mismatch");
-_Static_assert(sizeof(usb_status_packet_t) == 31U, "USB status packet size mismatch");
-_Static_assert(sizeof(usb_control_packet_t) == 18U, "USB control packet size mismatch");
-_Static_assert(sizeof(float) == 4U, "USB protocol requires 32-bit float");
+static_assert(sizeof(usb_frame_header_t) == 7U, "USB frame header size mismatch");
+static_assert(sizeof(usb_status_payload_t) == 22U, "USB status payload size mismatch");
+static_assert(sizeof(usb_control_payload_t) == 9U, "USB control payload size mismatch");
+static_assert(sizeof(usb_status_packet_t) == 31U, "USB status packet size mismatch");
+static_assert(sizeof(usb_control_packet_t) == 18U, "USB control packet size mismatch");
+static_assert(sizeof(float) == 4U, "USB protocol requires 32-bit float");
 
 /**
  * @brief 从协议字节流读取低字节在前的 16 位数值。

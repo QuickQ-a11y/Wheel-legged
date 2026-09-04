@@ -5,6 +5,7 @@
 extern "C" {
 #endif
 
+#include <assert.h>
 #include <stdint.h>
 
 #define APP_CAN_DATA_MAX_BYTES 8U
@@ -31,11 +32,11 @@ extern "C" {
  */
 #define APP_DJI_TX_SLOT(rx_id) ((uint8_t)(((rx_id) - APP_DJI_TX_ID - 1U) * 2U))
 
-_Static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) + 1U < APP_DJI_TX_LEN,
+static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) + 1U < APP_DJI_TX_LEN,
                "left wheel ESC id out of 0x200 frame range");
-_Static_assert(APP_DJI_TX_SLOT(APP_DJI_RIGHT_RX_ID) + 1U < APP_DJI_TX_LEN,
+static_assert(APP_DJI_TX_SLOT(APP_DJI_RIGHT_RX_ID) + 1U < APP_DJI_TX_LEN,
                "right wheel ESC id out of 0x200 frame range");
-_Static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) !=
+static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) !=
                    APP_DJI_TX_SLOT(APP_DJI_RIGHT_RX_ID),
                "left and right wheel ESC id must differ");
 

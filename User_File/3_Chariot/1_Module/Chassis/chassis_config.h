@@ -14,6 +14,8 @@ extern "C" {
 #define CHASSIS_PI 3.14159265358979323846f
 #define CHASSIS_HALF_PI 1.57079632679489661923f
 #define CHASSIS_STATE_COUNT 10U   /* 十维整车LQR状态数量。 */
+#define CHASSIS_STATE_MPC_COUNT 4U /* MPC状态数：alpha, d_alpha, H, d_H。 */
+#define CHASSIS_MPC_INPUT_COUNT 2U /* MPC输入数：左右腿支撑力。 */
 #define CHASSIS_OUTPUT_COUNT 4U   /* 左右轮力矩和左右腿摆力矩。 */
 
 /* 左右腿数组下标，顺序必须与LQR和电机映射保持一致。 */
@@ -146,6 +148,11 @@ typedef struct
      * 小陀螺，确认 all_off_flag 一次都不误触发，再打开这个开关。
      */
     uint8_t off_ground_act_flag;
+    /*
+     * 用MPC接管车身高度和Roll，替换共模腿长PID+差模横滚PID那两路。默认关。
+     * 关闭时MPC仍然每拍照算并写进Watch，只是不参与F0，方便实机对照两路输出。
+     */
+    uint8_t mpc_flag;
     float joint_T_limit;   /* 关节力矩限幅，N*m。关节通道唯一限幅点。 */
 } Chassis_Output_Config_t;
 
@@ -449,6 +456,45 @@ typedef struct
                          ALGORITHM_LQR_POLY22_COEFFICIENT_COUNT];
 } Chassis_LESO_Config_t;
 
+/**
+ * @brief 车身高度与Roll的MPC参数（TinyMPC）。
+ *
+ * 复刻 Qi-Q26 的轻量化MPC：状态 x=[alpha, d_alpha, H, d_H]，输入 u=[F_l, F_r]。
+ * A/B 不写成矩阵常量，而是由 model/wheel 里的物理量在 Chassis_MPC_Init() 现场推导，
+ * 这样换机器人时改 model 和 wheel 就自动跟随，和本文件其余按比例定义的量一个原则。
+ *
+ *   竖直：M*ddH   = (F_l + F_r)*cos(alpha) - damping*dH - M*g
+ *   横滚：I*ddroll = (F_l - F_r)*half_track * roll_sign
+ *
+ * u 保持【绝对支撑力】，重力作为仿射项进 TinyMPC 的 fdyn，所以下面的力限幅
+ * 就是字面意义的绝对值，不需要相对平衡点平移。
+ */
+typedef struct
+{
+    float I_roll;        /* 横滚转动惯量，kg*m^2。当前是 M*half_track^2 的估算值。 */
+    float damping;       /* 竖直阻尼，N*s/m。只影响 Ad(3,3)，取值不敏感。 */
+    /*
+     * 横滚通道方向，取+1或-1。整车右手系里+roll是左侧上抬，左腿加力会把左侧
+     * 顶得更高，所以是 ddroll = +(F_l - F_r)*R/I，与 Qi-Q26 原文相反。
+     * PC端已验证取+1时纠偏方向正确；实机若发现roll越纠越偏就改成-1。
+     */
+    float roll_sign;
+    float Q[CHASSIS_STATE_MPC_COUNT]; /* 状态权重，顺序 alpha, d_alpha, H, d_H。 */
+    float R[CHASSIS_MPC_INPUT_COUNT]; /* 输入权重，罚的是相对 M*g/2 的偏差。 */
+    float rho;           /* ADMM惩罚参数。 */
+    uint16_t horizon;    /* 预测步数N。15步*10ms=0.15s，够覆盖跳跃和下台阶。 */
+    uint16_t max_iter;   /* ADMM迭代硬上限。宁可次优也要让耗时确定。 */
+    uint16_t decimation; /* 底盘任务多少拍求解一次。1kHz任务、10拍=100Hz。 */
+    float F_min;         /* 单腿支撑力下限，N。 */
+    float F_max;         /* 单腿支撑力上限，N。 */
+    /*
+     * 单步力变化率上限，N/拍。TinyMPC的约束都是逐时刻的，跨时刻耦合装不进去；
+     * 但滚动优化只下发第0步，而上一拍的u是已知常量，所以第0步的变化率就是
+     * 纯逐时刻约束——真正生效的控制量严格满足，而且是在优化里满足的。
+     */
+    float dF_max;
+} Chassis_MPC_Config_t;
+
 /** @brief 底盘控制唯一只读配置，集中保存机械、模型和安全参数。 */
 typedef struct
 {
@@ -465,6 +511,7 @@ typedef struct
     Chassis_Observer_Config_t observer;
     Chassis_LQR_Config_t lqr;
     Chassis_LESO_Config_t leso;
+    Chassis_MPC_Config_t mpc;
     Chassis_Output_Config_t output;
     float phi0_offset;                /* phi0换算theta时的竖直零点，rad。 */
     float roll_target;                /* 机体横滚目标，rad。 */

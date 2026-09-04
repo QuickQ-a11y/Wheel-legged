@@ -213,6 +213,7 @@ struct Chassis
     /* 恢复、板凳和站立控制共同使用的目标与请求量。 */
     float state_time;
     float stable_time;
+    uint16_t mpc_tick;              /* MPC分频计数，到 mpc.decimation 求解一次。 */
     float recovery_stuck_time;      /* 转腿卡死条件已连续满足的时间，s。 */
     /*
      * 本次自救锁存的目标腿摆角，rad，0表示本轮还没锁存。符号由进入FALLEN
