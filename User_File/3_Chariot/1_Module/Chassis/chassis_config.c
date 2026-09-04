@@ -800,7 +800,7 @@ const Chassis_Config_t Chassis_Config = {
      */
     .model = {
         .gravity = 9.81f,     /* g_ac */
-        .body_mass = 11.0f,  /* m_b_ac */
+        .body_mass = 8.0f,  /* m_b_ac */
         .leg_mass = 1.65f,   /* m_l_ac */
         .wheel_mass = 0.537f, /* m_w_ac */
         .cg_to_hip = 0.120f,  /* l_c_ac */
@@ -872,9 +872,9 @@ const Chassis_Config_t Chassis_Config = {
     },
     /* 腿长PID输出作为虚拟支撑力修正，反馈速度直接作为阻尼项。 */
     .leg_length_pid = {
-        .kp = 800.0f,
+        .kp = 400.0f,
         .ki = 0.0f,
-        .kd = 40.0f,
+        .kd = 20.0f,
         .integralLimit = 5.0f,
         .outputLimit = 100.0f,
     },

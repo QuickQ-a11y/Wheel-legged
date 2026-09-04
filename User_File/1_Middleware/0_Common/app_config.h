@@ -93,9 +93,9 @@ static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) !=
 #define APP_RC_MAX_VEL 3.0f   /* 满杆前进速度，m/s。 */
 #define APP_RC_MAX_YAW 2.0f   /* 满杆偏航角速度，rad/s。 */
 #define APP_RC_VEL_RATE 1.0f  /* 爬台阶接近段的速度目标斜率，m/s^2。 */
-#define APP_RC_LEG_S 0.25f
+#define APP_RC_LEG_S 0.14f
 #define APP_RC_LEG_M 0.14f
-#define APP_RC_LEG_L 0.35f
+#define APP_RC_LEG_L 0.14f
 
 /*
  * 控制器第一阶段只计算中间状态和安全输出。

@@ -1000,7 +1000,13 @@ void Chassis_Recovery(void)
             {
                 Chassis.recovery_stuck_time = 0.0f;
             }
-            if (Chassis.recovery_stuck_time >= recovery->stuck_time)
+            /*
+             * stuck_time <= 0 视为禁用。原先直接写 >= 比较，配置项填0（或漏填
+             * 被零初始化）时 0>=0 恒成立，卡死反转会每毫秒触发一次——方向1kHz
+             * 翻转、目标每拍重锁，是个fail-dangerous的写法。
+             */
+            if ((recovery->stuck_time > 0.0f) &&
+                (Chassis.recovery_stuck_time >= recovery->stuck_time))
             {
                 Chassis.recovery_direction = -direction;
                 direction = Chassis.recovery_direction;
@@ -1537,20 +1543,29 @@ void Chassis_Control(void)
         }
         /*
          * MPC按固定拍数分频求解，不用累加实际dt——模型里的Ts是按decimation
-         * 写死的，dt抖动会让离散模型失配。开关关着时仍然照算，只是不接进F0，
-         * 这样实机可以在Watch里直接对照MPC和PID两路输出。
+         * 写死的，dt抖动会让离散模型失配。
+         *
+         * ⚠ 求解必须挂在 mpc_flag 下面。原先写成"开关关着也照算，方便在Watch
+         * 里对照两路输出"，结果 Debug(-O0) 下 Eigen 模板完全没优化，单次求解
+         * 撑爆了 1kHz 的控制周期：底盘任务被拖住 -> Chassis_Command_Send() 停发
+         * CAN -> DM电机在MIT模式下保持最后一条力矩 -> 腿持续出力且遥控拨回中位
+         * 也没人处理。实机表现就是自起正常、一进STANDING立刻疯车且断不了电。
+         * 想对照两路输出，等 Release 上把 Chassis_MPC.cycles_max 量清楚再开。
          */
-        Chassis.mpc_tick++;
-        if (Chassis.mpc_tick >= Chassis_Config.mpc.decimation)
+        if (Chassis_Config.output.mpc_flag != 0U)
         {
-            float mpc_x0[CHASSIS_STATE_MPC_COUNT];
+            Chassis.mpc_tick++;
+            if (Chassis.mpc_tick >= Chassis_Config.mpc.decimation)
+            {
+                float mpc_x0[CHASSIS_STATE_MPC_COUNT];
 
-            Chassis.mpc_tick = 0U;
-            mpc_x0[0] = roll;
-            mpc_x0[1] = d_roll;
-            mpc_x0[2] = H;
-            mpc_x0[3] = d_H;
-            Chassis_MPC_Solve(mpc_x0, H_target);
+                Chassis.mpc_tick = 0U;
+                mpc_x0[0] = roll;
+                mpc_x0[1] = d_roll;
+                mpc_x0[2] = H;
+                mpc_x0[3] = d_H;
+                Chassis_MPC_Solve(mpc_x0, H_target);
+            }
         }
 
         /* F0_left/F0_right 的正负号沿用原写法，两者当前均为0。 */

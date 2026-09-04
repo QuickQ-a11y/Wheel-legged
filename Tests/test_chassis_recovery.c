@@ -1329,6 +1329,28 @@ static void test_recovery_stuck_reverse(void)
     assert(first_direction != 0.0f);
     phi0_total_rad = Chassis.leg[CHASSIS_LEFT].phi0_total;
 
+    /*
+     * stuck_time 是可调参数，填 <=0 或大于 fallen_timeout 都表示"关掉卡死反转"。
+     * 关掉时本用例改为验证禁用路径：整个自救窗口里方向都不许翻。
+     * 不要把它写死成"一定会反转"——那样调参就会挂在这里。
+     */
+    if ((recovery->stuck_time <= 0.0f) ||
+        (recovery->stuck_time > recovery->fallen_timeout))
+    {
+        for (iteration = 0U;
+             iteration < (uint32_t)(recovery->fallen_timeout / APP_CTRL_DT_S);
+             iteration++)
+        {
+            if (Chassis.state != CHASSIS_FALLEN)
+            {
+                break;
+            }
+            Chassis_Recovery();
+            assert(Chassis.recovery_direction == first_direction);
+        }
+        return;
+    }
+
     /* 卡死计时未满之前方向不许变，目标被 rotate_lead_max 压住。 */
     for (iteration = 1U; iteration < stuck_tick; iteration++)
     {
