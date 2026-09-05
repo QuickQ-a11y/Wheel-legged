@@ -159,16 +159,41 @@ typedef struct
 /**
  * @brief 倒地自救、站立姿态保护和板凳模式的全部参数。
  *
- * 消费者有三处：Chassis_Recovery() 跑 FALLEN/FALLING_TO_STAND 两个阶段并做
- * 转腿卡死反转，Chassis_State_Update() 拿姿态门判断能不能站/什么时候判倒，
+ * 消费者有三处：Chassis_Recovery() 跑 TurnOver/Swing/DrawBack 三个阶段并做
+ * 卡死反转，Chassis_State_Update() 拿姿态门判断能不能站/什么时候判倒，
  * Chassis_Bench() 用板凳项。姿态门吃的是 Chassis.fall_pitch 不是 imu.pitch。
  */
 typedef struct
 {
-    /* 阶段目标姿态：先在 FALLEN 把腿收到 extend_L0，再摆到板凳姿态起身。 */
-    float extend_L0;         /* FALLEN转腿阶段的腿长目标，m。 */
-    float bench_L0;          /* FALLING_TO_STAND的腿长目标，m。 */
-    float bench_phi0;        /* FALLING_TO_STAND的腿杆角目标，rad。 */
+    /*
+     * 三阶段的目标姿态。腿长走的是"伸长-伸长-收短"：翻身和摆腿都要长腿
+     * （长腿力臂大、转动惯量大，机体才翻得动），最后收到 bench_L0 让轮子
+     * 把机体撑起来。ZJU取 lmax=0.331 / lmin=0.10。
+     * ⚠ 这三个数决定动作幅度，改之前先架空确认机构可达范围。
+     */
+    float turnover_L0;       /* 翻身和摆腿阶段的伸长腿长，m。取机构安全最长。 */
+    float extend_L0;         /* 摆腿阶段的腿长目标，m。留作与turnover_L0分开整定。 */
+    float bench_L0;          /* DrawBack收腿站起的腿长目标，m。取机构安全最短。 */
+    float bench_phi0;        /* DrawBack的腿杆角目标，rad。 */
+
+    /*
+     * 翻身阶段（ZJU TurnOver）。退出判据用竖向加速度而不是 fall_pitch：
+     * 倒地后四元数可能收敛到错误分支，重力方向的加速度投影始终可靠；
+     * 而且 az 是标量阈值，没有 fall_pitch 在 ±pi 附近符号跳变的问题。
+     */
+    float turnover_L0_rate;  /* 翻身段伸腿速率，m/s。要比站立段快，腿先伸开才翻得动。 */
+    float turnover_rate;     /* 翻身扫掠速率，rad/s。 */
+    float turnover_az_ratio; /* 机体朝上判据：az > 该比例*gravity。ZJU取0.4。 */
+    float turnover_hold;     /* 带惩罚计数达到多少秒算翻身成功。 */
+    /*
+     * 扫掠方向的机构符号，只取 +1 或 -1。哪一侧能把机体撬起来取决于机构，
+     * 实机架空试出来填这里，不要回头改 Chassis_Recovery() 里的表达式。
+     */
+    float turnover_dir_sign;
+
+    /* 收腿站起阶段（ZJU DrawBack）。ZJU用 1.2 m/s 收腿、200度/s 转竖直。 */
+    float drawback_L0_rate;   /* 收腿速率，m/s。 */
+    float drawback_phi0_rate; /* 摆到竖直向下的速率，rad/s。 */
 
     /* 目标斜坡：目标只按速率走、不跟随实际角，动作快慢全由这几项决定。 */
     float L0_rate;           /* 腿长目标斜率，m/s。站立段升腿也用它。 */

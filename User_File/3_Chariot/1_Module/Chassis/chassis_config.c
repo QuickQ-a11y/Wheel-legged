@@ -239,9 +239,21 @@ const Chassis_Config_t Chassis_Config = {
     /* 倒地转腿、小板凳准备和关节串级位置控制参数。 */
     .recovery = {
         /* 动作阶段参考 SPR，目标限制在本机构约0.296 m的最大可达腿长内。 */
+        .turnover_L0 = 0.29f,
         .extend_L0 = 0.29f,
-        .bench_L0 = 0.15f,
+        .bench_L0 = 0.13f,
         .bench_phi0 = CHASSIS_HALF_PI,
+
+        /* 翻身阶段。az判据和带惩罚计数取ZJU式121/122原值。 */
+        .turnover_L0_rate = 0.60f,
+        .turnover_rate = 2.0f,
+        .turnover_az_ratio = 0.4f,
+        .turnover_hold = 0.10f,
+        .turnover_dir_sign = 1.0f,
+
+        /* 收腿站起。ZJU用1.2 m/s和200度/s，这里先取保守值。 */
+        .drawback_L0_rate = 0.30f,
+        .drawback_phi0_rate = 1.50f,
 
         /* 斜坡速率。rotate_rate 单位rad/s，HERO_LEG用的是8.0，这里先取保守值。 */
         .L0_rate = 0.10f,
@@ -800,7 +812,7 @@ const Chassis_Config_t Chassis_Config = {
      */
     .model = {
         .gravity = 9.81f,     /* g_ac */
-        .body_mass = 8.0f,  /* m_b_ac */
+        .body_mass = 11.0f,  /* m_b_ac */
         .leg_mass = 1.65f,   /* m_l_ac */
         .wheel_mass = 0.537f, /* m_w_ac */
         .cg_to_hip = 0.120f,  /* l_c_ac */
@@ -872,9 +884,9 @@ const Chassis_Config_t Chassis_Config = {
     },
     /* 腿长PID输出作为虚拟支撑力修正，反馈速度直接作为阻尼项。 */
     .leg_length_pid = {
-        .kp = 400.0f,
+        .kp = 700.0f,
         .ki = 0.0f,
-        .kd = 20.0f,
+        .kd = 40.0f,
         .integralLimit = 5.0f,
         .outputLimit = 100.0f,
     },
@@ -888,25 +900,62 @@ const Chassis_Config_t Chassis_Config = {
     },
     /* 倒地转腿、小板凳准备和关节串级位置控制参数。 */
     .recovery = {
-        /* 动作阶段参考 SPR，目标限制在本机构的最大可达腿长内。 */
-        .extend_L0 = 0.15f,
+        /*
+         * 腿长走"伸长翻身 -> 伸长摆腿 -> 收短撑起"。杆长 l1=0.208/l2=0.252，
+         * 全伸0.460是奇异点不能用；lqr采样范围0.10~0.35。ZJU同级别车用
+         * lmax=0.331 / lmin=0.10。
+         * 实测机构可达 0.14~0.38 m，这里各留约0.03/0.01余量，避免关节PID
+         * 顶在机械硬限位上空耗力矩。
+         * ⚠ 原先 extend_L0 和 bench_L0 都是0.15，两个阶段的Move_Toward目标
+         *   是同一个数，等于整个自救过程腿长恒定不动——底朝天翻不过来的
+         *   直接原因。LITTLE那份是0.29/0.15，是本机克隆配置时漏改了。
+         * ⚠ lqr.L0_min=0.10 低于机构实际最短0.14，K的拟合网格下端有一截
+         *   够不着。不影响安全（实际腿长永远>=0.14，限幅不会生效），但
+         *   下次跑 ABK_LQR.m 时采样范围应该改成 0.14~0.35。
+         */
+        .turnover_L0 = 0.35f,
+        .extend_L0 = 0.35f,
         .bench_L0 = 0.15f,
         .bench_phi0 = CHASSIS_HALF_PI,
 
         /*
-         * 斜坡速率。rotate_rate 单位rad/s，HERO_LEG用的是8.0。
-         * ⚠ 临时降速：原值 L0_rate=0.20 / rotate_rate=4.0 / lag_rate=4.0，
-         * 4.0 rad/s 是 229度/s，躺倒自起时动作太猛已经把车甩翻过一次。
-         * 降到这一档是为了架空验转腿方向——慢到肉眼能看清、也来得及拨杆救车。
-         * 方向确认无误后再逐步调回去，别一步踩到 4.0。
+         * 翻身阶段。az判据和带惩罚计数取ZJU式121/122原值0.4g与100拍。
+         * turnover_dir_sign 是翻身扫掠方向，纯机构常量，只取 +1 或 -1。
+         * 和机器人倒向哪一边无关——ZJU的原则是"转完腿恰好摆在后面"的那个
+         * 方向，由机构决定。实机架空底朝天放一次，腿往错方向扫就改成
+         * -1.0f，不要去改控制代码里的表达式。
          */
-        .L0_rate = 0.10f,
-        .rotate_rate = 1.0f,
-        .lag_rate = 1.5f,
+        .turnover_L0_rate = 0.60f,
+        .turnover_rate = 4.0f,
+        .turnover_az_ratio = 0.4f,
+        .turnover_hold = 0.10f,
+        .turnover_dir_sign = 1.0f,
+
+        /* 收腿站起。ZJU用1.2 m/s和200度/s；先取保守值，方向确认后再加。 */
+        .drawback_L0_rate = 0.30f,
+        .drawback_phi0_rate = 1.50f,
+
+        /*
+         * 摆腿段斜坡速率。rotate_rate 单位rad/s，4.0 约229度/s，HERO_LEG用8.0。
+         * ⚠ lag_rate 是"离参考角更远的那条腿"改用的追赶速率，必须 > rotate_rate
+         *   才叫追赶。填成小于它的值会让落后腿反而更慢、双腿差越拉越大。
+         *   原始配置两个都是4.0，等于追赶功能没开。
+         */
+        .L0_rate = 0.40f,
+        .rotate_rate = 4.0f,
+        .lag_rate = 6.0f,
         .theta_diff = 0.80f,
         .rotate_lead_max = 0.35f,
 
-        /* 卡死反转。阈值取ZJU翻身阶段原值：35度/s持续600ms。 */
+        /*
+         * 卡死反转，现在按腿独立计时。阈值取ZJU翻身阶段原值：35度/s持续600ms。
+         * ⚠ stuck_d_phi0 必须跟着扫掠速率一起改：它是"转不动"的判据，如果
+         *   取到扫掠速率的一半以上，正常跟随也会被判成卡死，方向会周期性
+         *   翻转、腿原地乱甩。ZJU的0.61对应他们180度/s的扫掠，约20%。
+         *   当前 turnover_rate=4.0，0.61是15%，比例合适；降速时务必同步下调。
+         * stuck_time <= 0 或大到超过 fallen_timeout 都等于禁用；
+         * 当前是刻意禁用状态，方向确认无误后改回 0.60f。
+         */
         .stuck_d_phi0 = 0.61f,
         // .stuck_time = 0.60f,
         .stuck_time = 10000.0f,
@@ -929,23 +978,34 @@ const Chassis_Config_t Chassis_Config = {
         .L0_diff_tol = 0.04f,
         .angle_tol = 0.10f,
         .stable_time = 0.10f,
-        .fallen_timeout = 5.0f,
+        /* FALLEN 现在装 TurnOver 和 Swing 两个阶段，超时要够两段走完。 */
+        .fallen_timeout = 8.0f,
         .prepare_timeout = 3.0f,
 
         /* 姿态门。改斜坡速率后自救变慢，超时不够先加timeout，不要改回阶跃。 */
         .fall_pitch_filter = 0.05f,
         .direct_pitch = 0.80f,
-        .phi0_min = 1.0f,
-        .phi0_max = 2.80f,
+        /*
+         * 能不能跳过自救直接站的腿角窗口。必须比下面的 stand_phi0_min/max
+         * 明显窄——那一对是"能不能继续站"，两者相等就没有迟滞，腿摆到边界
+         * 上会在"够格开始站"和"刚好摘掉保护"之间反复横跳。
+         * 当前留 0.75 rad 迟滞。窗口中心 1.65 略高于 bench_phi0=pi/2=1.5708。
+         */
+        .phi0_min = 1.15f,
+        .phi0_max = 2.15f,
         /* 必须 < pi/2=1.5708，否则永不成立。原值1.60就是死分支。 */
         .pitch_limit = 1.30f,
         .stand_phi0_min = 0.40f,
         .stand_phi0_max = 2.80f,
 
-        /* 板凳模式下用左右摇杆分别微调两条腿，范围保守收在机构可达区内。 */
+        /*
+         * 板凳模式下用左右摇杆分别微调两条腿。下限原为0.09，低于实测机构
+         * 最短0.14——摇杆能把目标推到够不着的位置，关节PID会一直顶着
+         * 硬限位出力。上限0.25仍比实测最长0.38保守，先不动。
+         */
         .bench_L0_rate = 0.80f,
         .bench_phi0_rate = 3.20f,
-        .bench_L0_min = 0.09f,
+        .bench_L0_min = 0.15f,
         .bench_L0_max = 0.25f,
 
         /* 串级 PID 是输出封锁阶段的保守调试初值，后续按实机修改。 */
@@ -957,7 +1017,7 @@ const Chassis_Config_t Chassis_Config = {
             .outputLimit = 100.0f,
         },
         .joint_speed_pid = {
-            .kp = 2.0f,
+            .kp = 3.0f,
             .ki = 0.0f,
             .kd = 0.0f,
             .integralLimit = 0.0f,
@@ -1555,9 +1615,9 @@ const Chassis_Config_t Chassis_Config = {
         [CHASSIS_STATE_D_S] = 0.0f,       /* 实测原地站立平衡点，rad。 */
         [CHASSIS_STATE_FAI] = 0.0f,
         [CHASSIS_STATE_D_FAI] = 0.0f,
-        [CHASSIS_STATE_THETA_L] = 0.08f,
+        [CHASSIS_STATE_THETA_L] = 0.025f,
         [CHASSIS_STATE_D_THETA_L] = 0.0f,
-        [CHASSIS_STATE_THETA_R] = 0.08f,
+        [CHASSIS_STATE_THETA_R] = 0.025f,
         [CHASSIS_STATE_D_THETA_R] = 0.0f,
         [CHASSIS_STATE_THETA_B] = 0.0f,
         [CHASSIS_STATE_D_THETA_B] = 0.0f,

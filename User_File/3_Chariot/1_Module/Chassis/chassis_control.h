@@ -62,6 +62,19 @@ typedef enum
     CHASSIS_STEP_RECOVER,     /* 恢复腿长和腿摆角，交接回下一级。 */
 } Chassis_Step_Phase_t;
 
+/*
+ * 自救三阶段，取自ZJU §13.6 的 Recovery 子状态机，裁掉无云台的 YawFront。
+ * TURNOVER/SWING 都在 CHASSIS_FALLEN 下走，DrawBack 就是 CHASSIS_FALLING_TO_STAND。
+ * 分开的理由：翻身要长腿双腿同步扫掠、按竖向加速度退出；摆腿要长腿两腿
+ * 独立到位、按腿角窗口退出。两者的速率、卡死处理和退出判据都不一样，
+ * 压在一个阶段里只能取折中，底朝天就翻不过来。
+ */
+typedef enum
+{
+    CHASSIS_RECOVERY_TURNOVER = 0, /* 长腿双腿同步扫掠，把机体翻到腿朝下。 */
+    CHASSIS_RECOVERY_SWING,        /* 长腿两腿独立摆到起立预备角。 */
+} Chassis_Recovery_Phase_t;
+
 typedef struct
 {
     uint8_t init_flag;           /* BMI088硬件初始化完成。 */
@@ -214,14 +227,28 @@ struct Chassis
     float state_time;
     float stable_time;
     uint16_t mpc_tick;              /* MPC分频计数，到 mpc.decimation 求解一次。 */
-    float recovery_stuck_time;      /* 转腿卡死条件已连续满足的时间，s。 */
+    Chassis_Recovery_Phase_t recovery_phase;
+    /*
+     * 当前子阶段的切换条件已连续成立的时间，s。翻身阶段计"机体朝上"，
+     * 摆腿阶段计"机体翻扣"——两个阶段的切换互为反向，共用一个累加器和
+     * 一个阈值 recovery.turnover_hold。
+     * 累加方式取ZJU式122：满足加dt，不满足直接减半。相比硬清零，它容忍
+     * 动作过程中的偶发抖动，又拒绝断续满足，同时天然防住临界姿态上乒乓。
+     */
+    float recovery_phase_hold;
+    /* 卡死计时按腿分开。合并成一个的话单腿卡死永远检测不到——另一条腿在转。 */
+    float recovery_stuck_time[CHASSIS_LEG_COUNT];
     /*
      * 本次自救锁存的目标腿摆角，rad，0表示本轮还没锁存。符号由进入FALLEN
      * 那一拍的倒地方向决定，之后不再跟着姿态变——机体转过竖直位时
      * fall_pitch 会过零，每拍重算会让参考角来回翻符号、腿原地抖。
      */
     float recovery_theta_ref;
-    float recovery_direction;       /* 当前转腿扫掠方向，+1或-1，0表示还没锁存，卡死时反号。 */
+    /*
+     * 当前扫掠方向，+1或-1，0表示还没锁存，卡死时反号。翻身阶段两腿必须
+     * 取同一个值（不同步则机体翻不过来），摆腿阶段两腿各自就近选。
+     */
+    float recovery_direction[CHASSIS_LEG_COUNT];
     Chassis_Output_t output;
     uint32_t fault;
 

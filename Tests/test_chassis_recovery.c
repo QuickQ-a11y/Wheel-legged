@@ -18,6 +18,16 @@ static void set_online_feedback(void)
     Chassis.remote_online_flag = 1U;
     Chassis.remote_stop_flag = 0U;
     Chassis.can_error_count = 0U;
+    /*
+     * 直立静止的重力读数。真机加速度计永远读得到约1g，不可能全零；
+     * 而"机体是否朝上"现在由竖向加速度判定（ZJU式121），留全零会让所有
+     * 不显式摆倒地姿态的用例都被判成机体没朝上、进不了站立。
+     * 需要倒地姿态的用例在这之后再调 set_fall_pose() 覆盖。
+     */
+    Chassis.imu.accel_raw[0] = 0.0f;
+    Chassis.imu.accel_raw[1] = 0.0f;
+    Chassis.imu.accel_raw[2] =
+        9.80665f / Chassis_Config.imu.fall_accel_z_scale;
     for (index = 0U; index < APP_DM_COUNT; index++)
     {
         Chassis.dm_motor[index].online_flag = 1U;
@@ -322,6 +332,7 @@ static void test_fallen_timeout(void)
 {
     float left_phi0_rad;
     float left_L0_m;
+    float expected_dir;
 
     Chassis_Init();
     set_online_feedback();
@@ -335,11 +346,20 @@ static void test_fallen_timeout(void)
     left_L0_m = Chassis.leg[CHASSIS_LEFT].L0;
     Chassis_Recovery();
     assert(Chassis.state == CHASSIS_FALLEN);
+    /* 该姿态竖向加速度低于 0.4g 门槛，走翻身而不是摆腿。 */
+    assert(Chassis.recovery_phase == CHASSIS_RECOVERY_TURNOVER);
     /* 腿长和腿角目标都按速率推进，单拍只走一小步，不再阶跃到位。 */
     assert(fabsf(Chassis.leg[CHASSIS_LEFT].target_L0 -
-                 Chassis_Config.recovery.extend_L0) <
-           fabsf(left_L0_m - Chassis_Config.recovery.extend_L0));
-    assert(Chassis.leg[CHASSIS_LEFT].target_phi0 < left_phi0_rad);
+                 Chassis_Config.recovery.turnover_L0) <
+           fabsf(left_L0_m - Chassis_Config.recovery.turnover_L0));
+    /*
+     * 翻身方向是纯机构常量，不看姿态角，两腿必须同号——不同步则翻不过来。
+     */
+    expected_dir = Chassis_Config.recovery.turnover_dir_sign;
+    assert(Chassis.recovery_direction[CHASSIS_LEFT] == expected_dir);
+    assert(Chassis.recovery_direction[CHASSIS_RIGHT] == expected_dir);
+    assert(((Chassis.leg[CHASSIS_LEFT].target_phi0 - left_phi0_rad) *
+            expected_dir) > 0.0f);
     assert_zero_wheel_request();
     assert_zero_output();
 
@@ -1255,12 +1275,18 @@ static void test_step_contact_no_false_trigger(void)
 /*
  * 转腿目标必须跟着倒地方向对称。旧代码把 theta_ref 写死在正侧，机体往负
  * 方向倒时腿即使已经摆到位也判不到位，会一直转到超时。
+ *
+ * 分成两段：
+ * 前两段只验"两个倒地方向都能走到收腿站起"，不看 theta_ref——腿角落在
+ * phi0_min~phi0_max 之内时会走"直接跳过"捷径、根本不进摆腿阶段，而那个
+ * 窗口是要按实机调的参数，断言不能依赖它当前取什么值。
+ * 第三段把倾角放到 direct_pitch 之外堵掉捷径，强制走摆腿，专门验符号对称。
  */
 static void test_recovery_direction_symmetry(void)
 {
     uint32_t iteration;
 
-    /* 负方向倒，腿已摆到同侧对应位置：应当判到位并交给板凳准备阶段。 */
+    /* 负方向倒，腿已摆到同侧对应位置：应当判到位并交给收腿站起。 */
     Chassis_Init();
     set_online_feedback();
     set_symmetric_leg_pose(0.20f, 0.80f);
@@ -1277,8 +1303,6 @@ static void test_recovery_direction_symmetry(void)
             break;
         }
     }
-    /* 参考角在自救第一拍锁存，符号必须落在机体倾倒的同一侧。 */
-    assert(Chassis.recovery_theta_ref < 0.0f);
     assert(Chassis.state == CHASSIS_FALLING_TO_STAND);
 
     /* 镜像姿态必须同样成立，判据不能只在一个倒地方向有效。 */
@@ -1298,9 +1322,34 @@ static void test_recovery_direction_symmetry(void)
             break;
         }
     }
-    /* 参考角在自救第一拍锁存，符号必须落在机体倾倒的同一侧。 */
-    assert(Chassis.recovery_theta_ref > 0.0f);
     assert(Chassis.state == CHASSIS_FALLING_TO_STAND);
+
+    /*
+     * 符号对称单独验：把倾角放到 direct_pitch 之外堵掉捷径，强制走摆腿，
+     * 两个倒地方向各锁一次参考角。这里不要求走到板凳阶段——倾角超过
+     * ready_pitch，本来就不该判到位。
+     */
+    Chassis_Init();
+    set_online_feedback();
+    set_symmetric_leg_pose(0.20f, 0.80f);
+    set_fall_pose(-1.0f);
+    Chassis.mode = CHASSIS_MODE_SELF_SAVE;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_FALLEN);
+    assert(Chassis.recovery_phase == CHASSIS_RECOVERY_SWING);
+    Chassis_Recovery();
+    assert(Chassis.recovery_theta_ref < 0.0f);
+
+    Chassis_Init();
+    set_online_feedback();
+    set_symmetric_leg_pose(0.20f, 0.80f);
+    set_fall_pose(1.0f);
+    Chassis.mode = CHASSIS_MODE_SELF_SAVE;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_FALLEN);
+    assert(Chassis.recovery_phase == CHASSIS_RECOVERY_SWING);
+    Chassis_Recovery();
+    assert(Chassis.recovery_theta_ref > 0.0f);
 }
 
 /*
@@ -1313,6 +1362,7 @@ static void test_recovery_stuck_reverse(void)
     uint32_t stuck_tick = (uint32_t)(recovery->stuck_time / APP_CTRL_DT_S);
     float first_direction;
     float phi0_total_rad;
+    float step_rate;
     uint32_t iteration;
 
     Chassis_Init();
@@ -1325,7 +1375,7 @@ static void test_recovery_stuck_reverse(void)
     assert(Chassis.state == CHASSIS_FALLEN);
 
     Chassis_Recovery();
-    first_direction = Chassis.recovery_direction;
+    first_direction = Chassis.recovery_direction[CHASSIS_LEFT];
     assert(first_direction != 0.0f);
     phi0_total_rad = Chassis.leg[CHASSIS_LEFT].phi0_total;
 
@@ -1346,7 +1396,8 @@ static void test_recovery_stuck_reverse(void)
                 break;
             }
             Chassis_Recovery();
-            assert(Chassis.recovery_direction == first_direction);
+            assert(Chassis.recovery_direction[CHASSIS_LEFT] ==
+                   first_direction);
         }
         return;
     }
@@ -1355,17 +1406,19 @@ static void test_recovery_stuck_reverse(void)
     for (iteration = 1U; iteration < stuck_tick; iteration++)
     {
         Chassis_Recovery();
-        assert(Chassis.recovery_direction == first_direction);
+        assert(Chassis.recovery_direction[CHASSIS_LEFT] == first_direction);
     }
     assert(fabsf(Chassis.leg[CHASSIS_LEFT].target_phi0 - phi0_total_rad) >
            recovery->rotate_lead_max - TEST_TOLERANCE);
 
     Chassis_Recovery();
-    assert(Chassis.recovery_direction == -first_direction);
-    assert(Chassis.recovery_stuck_time < recovery->stuck_time);
+    assert(Chassis.recovery_direction[CHASSIS_LEFT] == -first_direction);
+    assert(Chassis.recovery_stuck_time[CHASSIS_LEFT] < recovery->stuck_time);
     /* 反转的同一拍把目标重锁回实际角，只留下反向的第一步。 */
+    step_rate = (Chassis.recovery_phase == CHASSIS_RECOVERY_TURNOVER) ?
+                    recovery->turnover_rate : recovery->lag_rate;
     assert(fabsf(Chassis.leg[CHASSIS_LEFT].target_phi0 - phi0_total_rad) <=
-           (recovery->rotate_rate * Chassis.dt) + TEST_TOLERANCE);
+           (step_rate * Chassis.dt) + TEST_TOLERANCE);
 }
 
 /*
@@ -1681,6 +1734,305 @@ static void test_joint_mapping(void)
            Chassis_Config.recovery.stand_phi0_max);
 }
 
+/*
+ * 底朝天进自救：翻身阶段必须真的把腿伸长。原先 extend_L0 和 bench_L0 都是
+ * 0.15，两个阶段的 Move_Toward 目标是同一个数，等于整个自救过程腿长恒定
+ * 不动——机体只能靠甩腿，底朝天甩不过来。这条用例锁住这个回归。
+ */
+static void test_recovery_turnover_extends_leg(void)
+{
+    const Chassis_Recovery_Config_t *recovery = &Chassis_Config.recovery;
+    float start_L0;
+    uint32_t iteration;
+
+    Chassis_Init();
+    set_online_feedback();
+    set_symmetric_leg_pose(0.15f, 0.80f);
+    /* 底朝天：竖向加速度为负，必须走翻身而不是直接摆腿。 */
+    set_fall_pose(CHASSIS_PI - 0.05f);
+    Chassis.mode = CHASSIS_MODE_SELF_SAVE;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_FALLEN);
+    assert(Chassis.recovery_phase == CHASSIS_RECOVERY_TURNOVER);
+    /* 配置层面就必须"先伸后收"，两个目标相等的话这条链根本不成立。 */
+    assert(recovery->turnover_L0 > recovery->bench_L0);
+
+    start_L0 = Chassis.leg[CHASSIS_LEFT].target_L0;
+    for (iteration = 0U; iteration < 200U; iteration++)
+    {
+        Chassis_Recovery();
+    }
+    assert(Chassis.leg[CHASSIS_LEFT].target_L0 > start_L0);
+    assert(Chassis.leg[CHASSIS_RIGHT].target_L0 > start_L0);
+    /* 目标只按速率走，不许越过 turnover_L0。 */
+    assert(Chassis.leg[CHASSIS_LEFT].target_L0 <=
+           recovery->turnover_L0 + TEST_TOLERANCE);
+}
+
+/*
+ * 进 FALLEN 那一拍按竖向加速度选子阶段（ZJU式121）：机体朝上就跳过翻身
+ * 直接摆腿，朝下才翻身。用加速度不用姿态角——倒地后四元数可能收敛到
+ * 错误分支，而重力方向的加速度投影始终可靠。
+ */
+static void test_recovery_phase_entry(void)
+{
+    Chassis_Init();
+    set_online_feedback();
+    set_symmetric_leg_pose(0.20f, 0.80f);
+    set_fall_pose(-0.20f);
+    Chassis.mode = CHASSIS_MODE_SELF_SAVE;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_FALLEN);
+    assert(Chassis.recovery_phase == CHASSIS_RECOVERY_SWING);
+
+    Chassis_Init();
+    set_online_feedback();
+    set_symmetric_leg_pose(0.20f, 0.80f);
+    set_fall_pose(2.60f);
+    Chassis.mode = CHASSIS_MODE_SELF_SAVE;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_FALLEN);
+    assert(Chassis.recovery_phase == CHASSIS_RECOVERY_TURNOVER);
+}
+
+/*
+ * 翻身退出用带惩罚计数（ZJU式122）：满足加dt、不满足直接减半。
+ * 断续满足永远攒不够，只有连续满足才切摆腿。
+ */
+static void test_recovery_turnover_exit_az(void)
+{
+    const Chassis_Recovery_Config_t *recovery = &Chassis_Config.recovery;
+    uint32_t iteration;
+
+    Chassis_Init();
+    set_online_feedback();
+    set_symmetric_leg_pose(0.15f, 0.80f);
+    set_fall_pose(2.60f);
+    Chassis.mode = CHASSIS_MODE_SELF_SAVE;
+    Chassis_State_Update();
+    assert(Chassis.recovery_phase == CHASSIS_RECOVERY_TURNOVER);
+
+    /*
+     * "朝上"取1.0 rad而不是接近0：az=9.8*cos(1.0)=5.30 已经过了0.4g门槛，
+     * 但倾角1.0 > direct_pitch=0.80，于是"姿态合格就两段都跳过"那条捷径
+     * 不会触发，本用例才验得到阶段推进本身。
+     * 这样写也不依赖 phi0_min/phi0_max 当前取什么值——那是要按实机调的参数。
+     */
+    /* 一拍朝上一拍朝下：减半压过累加，阶段不许推进。 */
+    for (iteration = 0U; iteration < 400U; iteration++)
+    {
+        set_fall_pose(((iteration & 1U) == 0U) ? 1.0f : 2.60f);
+        Chassis_Recovery();
+        assert(Chassis.recovery_phase == CHASSIS_RECOVERY_TURNOVER);
+    }
+
+    /* 持续朝上，攒满 turnover_hold 就切摆腿。 */
+    set_fall_pose(1.0f);
+    for (iteration = 0U;
+         iteration < (uint32_t)(recovery->turnover_hold / APP_CTRL_DT_S) + 5U;
+         iteration++)
+    {
+        Chassis_Recovery();
+    }
+    assert(Chassis.recovery_phase == CHASSIS_RECOVERY_SWING);
+}
+
+/*
+ * 收腿站起阶段（ZJU DrawBack）必须真的把腿收短，机体是靠轮子撑起来的。
+ * 原先这一段的腿长目标和上一段是同一个数，等于没有收腿动作。
+ */
+static void test_recovery_drawback_retracts(void)
+{
+    const Chassis_Recovery_Config_t *recovery = &Chassis_Config.recovery;
+    float start_L0;
+    uint32_t iteration;
+
+    Chassis_Init();
+    set_online_feedback();
+    set_symmetric_leg_pose(recovery->turnover_L0, CHASSIS_HALF_PI);
+    set_fall_pose(0.05f);
+    Chassis.mode = CHASSIS_MODE_SELF_SAVE;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_FALLEN);
+
+    /* 姿态已经合格，第一拍就该跳过转腿摆腿直接进收腿站起。 */
+    Chassis_Recovery();
+    assert(Chassis.state == CHASSIS_FALLING_TO_STAND);
+    start_L0 = Chassis.leg[CHASSIS_LEFT].target_L0;
+    assert(start_L0 > recovery->bench_L0);
+
+    for (iteration = 0U; iteration < 100U; iteration++)
+    {
+        if (Chassis.state != CHASSIS_FALLING_TO_STAND)
+        {
+            break;
+        }
+        Chassis_Recovery();
+    }
+    assert(Chassis.leg[CHASSIS_LEFT].target_L0 < start_L0);
+    assert(Chassis.leg[CHASSIS_RIGHT].target_L0 < start_L0);
+}
+
+/*
+ * 卡死计时必须按腿分开。原先两腿共用一个计时器、判据还是"两腿都不动"，
+ * 单腿被机构卡住时另一条腿还在转，卡死永远判不出来。
+ */
+static void test_recovery_stuck_per_leg(void)
+{
+    const Chassis_Recovery_Config_t *recovery = &Chassis_Config.recovery;
+    uint32_t iteration;
+
+    Chassis_Init();
+    set_online_feedback();
+    set_symmetric_leg_pose(0.20f, 0.80f);
+    set_fall_pose(2.60f);
+    Chassis.mode = CHASSIS_MODE_SELF_SAVE;
+    Chassis_State_Update();
+    assert(Chassis.recovery_phase == CHASSIS_RECOVERY_TURNOVER);
+
+    for (iteration = 0U; iteration < 50U; iteration++)
+    {
+        /* 左腿卡死不动，右腿正常在转。d_phi0 只被自救读，不会被覆盖。 */
+        Chassis.leg[CHASSIS_LEFT].d_phi0 = 0.0f;
+        Chassis.leg[CHASSIS_RIGHT].d_phi0 = recovery->stuck_d_phi0 * 2.0f;
+        Chassis_Recovery();
+    }
+    assert(Chassis.recovery_stuck_time[CHASSIS_LEFT] > 0.0f);
+    assert(Chassis.recovery_stuck_time[CHASSIS_RIGHT] == 0.0f);
+}
+
+/*
+ * 底朝天不许被判成"可以站"。实测机体倾过90度后 fall_pitch 会折返，底朝天
+ * 时的读数和直立分不开——只查倾角的话，拨到左中会直接跑LQR而不是自救。
+ * 这道门现在先过竖向加速度（ZJU式121），姿态角只在它放行之后才可信。
+ * 用例刻意把 fall_pitch 摆成"看起来直立"，只留 az 是负的，专门验这一条。
+ */
+static void test_upside_down_not_standing(void)
+{
+    Chassis_Init();
+    set_online_feedback();
+    set_symmetric_leg_pose(0.20f, CHASSIS_HALF_PI);
+    Chassis.imu.accel_raw[0] = 0.0f;
+    Chassis.imu.accel_raw[2] =
+        -9.80665f / Chassis_Config.imu.fall_accel_z_scale;
+    Chassis.fall_pitch = 0.0f;
+    Chassis.imu.pitch = 0.0f;
+    Chassis.mode = CHASSIS_MODE_FOLLOW;
+    Chassis_State_Update();
+    /* 姿态门必须拦住：走自救链，而不是直接进站立。 */
+    assert(Chassis.state == CHASSIS_FALLEN);
+    assert(Chassis.recovery_phase == CHASSIS_RECOVERY_TURNOVER);
+
+    /*
+     * 自救里"两段都跳过、直接收腿站起"的捷径同样不许放行。
+     * 腿角 pi/2 落在 phi0_min~phi0_max 内，缺了 az 这一项就会跳过去。
+     */
+    Chassis.fall_pitch = 0.0f;
+    Chassis_Recovery();
+    assert(Chassis.state == CHASSIS_FALLEN);
+    assert(Chassis.recovery_phase == CHASSIS_RECOVERY_TURNOVER);
+}
+
+/*
+ * 翻身扫掠方向与机体倒向哪一边无关，只由机构常量 turnover_dir_sign 决定。
+ * 原先是"倒地侧乘机构符号"，但 fall_pitch 过90度会折返、底朝天读0，拿它
+ * 选方向等于拿噪声选方向。ZJU的原则也是固定方向（转完腿恰好摆在后面）。
+ */
+static void test_turnover_direction_is_mechanical(void)
+{
+    float expected_dir = Chassis_Config.recovery.turnover_dir_sign;
+    float pitch_case[3] = { 2.60f, -2.60f, 3.10f };
+    uint32_t index;
+
+    for (index = 0U; index < 3U; index++)
+    {
+        Chassis_Init();
+        set_online_feedback();
+        set_symmetric_leg_pose(0.20f, 0.80f);
+        set_fall_pose(pitch_case[index]);
+        Chassis.mode = CHASSIS_MODE_SELF_SAVE;
+        Chassis_State_Update();
+        assert(Chassis.state == CHASSIS_FALLEN);
+        assert(Chassis.recovery_phase == CHASSIS_RECOVERY_TURNOVER);
+
+        Chassis_Recovery();
+        /* 三个倒地方向必须锁出同一个扫掠方向。 */
+        assert(Chassis.recovery_direction[CHASSIS_LEFT] == expected_dir);
+        assert(Chassis.recovery_direction[CHASSIS_RIGHT] == expected_dir);
+    }
+}
+
+/*
+ * 摆腿途中机体被自己甩翻过去：既不许判"到位"交给收腿站起，也不该干耗到
+ * 超时，而是退回翻身阶段重来。
+ * 缺了 az 这道门的话，fall_pitch 折返后 170 度只读出 0.17、照样满足
+ * ready_pitch，就会带着倒扣姿态交接出去。
+ */
+static void test_swing_falls_back_when_inverted(void)
+{
+    const Chassis_Recovery_Config_t *recovery = &Chassis_Config.recovery;
+    uint32_t hold_tick = (uint32_t)(recovery->turnover_hold / APP_CTRL_DT_S);
+    uint32_t iteration;
+
+    Chassis_Init();
+    set_online_feedback();
+    /* 腿角摆在窗口内、倾角也"看起来"合格，待会只把 az 翻负。 */
+    set_symmetric_leg_pose(0.20f, 0.80f);
+    set_fall_pose(-0.20f);
+    Chassis.mode = CHASSIS_MODE_SELF_SAVE;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_FALLEN);
+    assert(Chassis.recovery_phase == CHASSIS_RECOVERY_SWING);
+
+    /* 机体翻扣：az 转负，但 fall_pitch 因折返仍是小值。 */
+    Chassis.imu.accel_raw[0] = 0.0f;
+    Chassis.imu.accel_raw[2] =
+        -9.80665f / Chassis_Config.imu.fall_accel_z_scale;
+    for (iteration = 0U; iteration < (hold_tick + 5U); iteration++)
+    {
+        Chassis.fall_pitch = -0.20f;
+        /* 全程不许交接出去。 */
+        assert(Chassis.state == CHASSIS_FALLEN);
+        Chassis_Recovery();
+    }
+    assert(Chassis.state == CHASSIS_FALLEN);
+    assert(Chassis.recovery_phase == CHASSIS_RECOVERY_TURNOVER);
+    /* 退回翻身时方向和参考角都要重锁，留着上一阶段的值会摆错边。 */
+    assert(Chassis.recovery_theta_ref == 0.0f);
+}
+
+/*
+ * 阶段切换的带惩罚计数必须防住乒乓：机体在临界姿态上抖动、az 一拍正一拍
+ * 负时，减半永远压过累加，阶段不许来回切。
+ */
+static void test_phase_hold_no_pingpong(void)
+{
+    uint32_t iteration;
+
+    Chassis_Init();
+    set_online_feedback();
+    set_symmetric_leg_pose(0.20f, 0.80f);
+    set_fall_pose(-0.20f);
+    Chassis.mode = CHASSIS_MODE_SELF_SAVE;
+    Chassis_State_Update();
+    assert(Chassis.recovery_phase == CHASSIS_RECOVERY_SWING);
+
+    for (iteration = 0U; iteration < 600U; iteration++)
+    {
+        Chassis.imu.accel_raw[0] = 0.0f;
+        Chassis.imu.accel_raw[2] =
+            (((iteration & 1U) == 0U) ? 9.80665f : -9.80665f) /
+            Chassis_Config.imu.fall_accel_z_scale;
+        Chassis.fall_pitch = -0.20f;
+        if (Chassis.state != CHASSIS_FALLEN)
+        {
+            break;
+        }
+        Chassis_Recovery();
+        assert(Chassis.recovery_phase == CHASSIS_RECOVERY_SWING);
+    }
+}
+
 int main(void)
 {
     test_output_disabled();
@@ -1718,5 +2070,14 @@ int main(void)
     test_step_motion1_pitch_independent();
     test_step_contact_posture();
     test_step_contact_no_false_trigger();
+    test_recovery_phase_entry();
+    test_recovery_turnover_extends_leg();
+    test_recovery_turnover_exit_az();
+    test_recovery_stuck_per_leg();
+    test_recovery_drawback_retracts();
+    test_upside_down_not_standing();
+    test_turnover_direction_is_mechanical();
+    test_swing_falls_back_when_inverted();
+    test_phase_hold_no_pingpong();
     return 0;
 }
