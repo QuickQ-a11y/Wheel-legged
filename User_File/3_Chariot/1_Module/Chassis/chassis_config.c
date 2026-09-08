@@ -1575,8 +1575,21 @@ const Chassis_Config_t Chassis_Config = {
         .Q = { 2.0e4f, 2.0e2f, 5.0e4f, 5.0e2f },
         .R = { 0.05f, 0.05f },
         .rho = 5.0f,
-        .horizon = 15U,      /* 15*10ms = 0.15s，覆盖跳跃和下台阶的时间尺度 */
-        .max_iter = 50U,     /* PC端实测最坏16次，留足余量 */
+        /*
+         * N*decimation*1ms = 0.15s，覆盖跳跃和下台阶的 0.1~0.3s 时间尺度。
+         * 这是 100Hz 这套设计的原始论证：对 MPC 而言预测总时长比控制频率重要，
+         * 1kHz 下 N=15 只能看到未来 15ms，等于没预测。
+         */
+        .horizon = 15U,
+        /*
+         * ADMM 迭代硬上限，宁可次优也要让耗时确定。稳态靠 warm start 通常 5 次
+         * 就收敛（solved=1），这个上限只在大扰动的最坏情况生效。
+         * 实测 solve_us 在 N=8/max_iter=10 时是 200~400us，按 malloc 比例外推
+         * 本配置最坏约 3ms，仍远在 100Hz 的 10ms 预算内。
+         * ⚠ 前提是 TinyMPC 那四个文件走 -O2（见 CMakeLists）。跟随 Debug 的 -O0
+         *   会慢两个数量级，曾实测到 50ms。
+         */
+        .max_iter = 50U,
         .decimation = 10U,   /* 1kHz底盘任务，10拍=100Hz */
         .F_min = 10.0f,
         .F_max = 150.0f,
@@ -1591,11 +1604,11 @@ const Chassis_Config_t Chassis_Config = {
          * TMAX 寄存器逐位一致，否则所有力矩都会按两者之比缩放。
          * 参考量级：仅重力前馈就需要 5.7~7.8 N*m（随腿长变化），低于此值腿撑不起来。
          */
-        .joint_flag = 1U,
-        .wheel_flag = 1U,
+        .joint_flag = 0U,
+        .wheel_flag = 0U,
         /* 离地三项动作默认关，实机确认 all_off_flag 不误触发后再打开。 */
         .off_ground_act_flag = 1U,
-        .mpc_flag = 0U,   /* MPC默认关，先在Watch里和PID对照过再打开。 */
+        .mpc_flag = 1U,   /* MPC默认关，先在Watch里和PID对照过再打开。 */
         .joint_T_limit = 15.0f,
     },
     /* 整车公共目标、支撑力前馈和控制周期边界。 */

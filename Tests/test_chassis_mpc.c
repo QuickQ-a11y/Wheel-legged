@@ -3,6 +3,9 @@
  * 升级TinyMPC时悄悄退化。
  *
  * 求解器本身是C++，本文件仍是C——正好也验证了 extern "C" 壳是通的。
+ *
+ * 固件里 SetInput 由 1kHz 控制环调用、Solve 由独立的 MPC 任务调用；
+ * 主机上没有任务，就在同一处顺序调用，等价于两者刚好前后脚发生。
  */
 #include "chassis_mpc.h"
 #include "chassis_config.h"
@@ -23,7 +26,8 @@ static void solve_until_settled(float a, float da, float H, float dH, float Href
         float x0[4];
 
         x0[0] = a; x0[1] = da; x0[2] = H; x0[3] = dH;
-        Chassis_MPC_Solve(x0, Href);
+        Chassis_MPC_SetInput(x0, Href);
+        Chassis_MPC_Solve();
     }
 }
 
@@ -84,7 +88,8 @@ static void test_mpc_force_bounds(void)
         float sweep = (float)k * 0.01f - 2.0f;
 
         x0[0] = sweep; x0[1] = -sweep; x0[2] = 0.05f + sweep; x0[3] = sweep;
-        Chassis_MPC_Solve(x0, 0.30f);
+        Chassis_MPC_SetInput(x0, 0.30f);
+        Chassis_MPC_Solve();
         assert(Chassis_MPC.F[0] >= mpc->F_min - TOL);
         assert(Chassis_MPC.F[0] <= mpc->F_max + TOL);
         assert(Chassis_MPC.F[1] >= mpc->F_min - TOL);
@@ -111,7 +116,8 @@ static void test_mpc_rate_limit(void)
     {
         float x0[4] = {0.0f, 0.0f, 0.05f, 0.0f};
 
-        Chassis_MPC_Solve(x0, 0.30f);
+        Chassis_MPC_SetInput(x0, 0.30f);
+        Chassis_MPC_Solve();
         assert(fabsf(Chassis_MPC.F[0] - prev[0]) <= dF + TOL);
         assert(fabsf(Chassis_MPC.F[1] - prev[1]) <= dF + TOL);
         prev[0] = Chassis_MPC.F[0];
@@ -131,7 +137,8 @@ static void test_mpc_iteration_bounded(void)
         float s = ((k % 2U) == 0U) ? 0.30f : -0.30f;
 
         x0[0] = s; x0[1] = -s; x0[2] = 0.05f + 0.2f * (float)(k % 3U); x0[3] = s;
-        Chassis_MPC_Solve(x0, 0.30f);
+        Chassis_MPC_SetInput(x0, 0.30f);
+        Chassis_MPC_Solve();
         if (Chassis_MPC.iter > worst) { worst = Chassis_MPC.iter; }
     }
     assert(worst <= (uint32_t)Chassis_Config.mpc.max_iter);

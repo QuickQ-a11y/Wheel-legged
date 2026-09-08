@@ -1760,30 +1760,27 @@ void Chassis_Control(void)
                 cosf(Chassis.leg[side].theta);
         }
         /*
-         * MPC按固定拍数分频求解，不用累加实际dt——模型里的Ts是按decimation
-         * 写死的，dt抖动会让离散模型失配。
+         * 只发布输入，不求解。求解跑在独立的低优先级 MPC 任务里、按自己的周期
+         * 自定时，见 chassis_task.c 的 Chassis_MPC_Task_Entry()。
          *
-         * ⚠ 求解必须挂在 mpc_flag 下面。原先写成"开关关着也照算，方便在Watch
-         * 里对照两路输出"，结果 Debug(-O0) 下 Eigen 模板完全没优化，单次求解
-         * 撑爆了 1kHz 的控制周期：底盘任务被拖住 -> Chassis_Command_Send() 停发
-         * CAN -> DM电机在MIT模式下保持最后一条力矩 -> 腿持续出力且遥控拨回中位
-         * 也没人处理。实机表现就是自起正常、一进STANDING立刻疯车且断不了电。
-         * 想对照两路输出，等 Release 上把 Chassis_MPC.cycles_max 量清楚再开。
+         * ⚠ 求解绝对不能挪回这里。实测单次求解是毫秒级，而本函数在 1kHz 控制环
+         * 里跑：任务被拖住 -> Chassis_Command_Send() 停发CAN -> DM在MIT模式下
+         * 保持最后力矩 -> 腿持续出力且遥控拨回中位也断不了电。见 commit 3caf81a。
+         * 分频(mpc.decimation)也一并挪走了：分频只降平均负载、不降峰值延迟，
+         * 求解落在哪一拍，哪一拍就照样被撑爆。
+         *
+         * age 每拍加一、求解完成时清零，用来观察拿到的 F 有多旧。
          */
         if (Chassis_Config.output.mpc_flag != 0U)
         {
-            Chassis.mpc_tick++;
-            if (Chassis.mpc_tick >= Chassis_Config.mpc.decimation)
-            {
-                float mpc_x0[CHASSIS_STATE_MPC_COUNT];
+            float mpc_x0[CHASSIS_STATE_MPC_COUNT];
 
-                Chassis.mpc_tick = 0U;
-                mpc_x0[0] = roll;
-                mpc_x0[1] = d_roll;
-                mpc_x0[2] = H;
-                mpc_x0[3] = d_H;
-                Chassis_MPC_Solve(mpc_x0, H_target);
-            }
+            mpc_x0[0] = roll;
+            mpc_x0[1] = d_roll;
+            mpc_x0[2] = H;
+            mpc_x0[3] = d_H;
+            Chassis_MPC_SetInput(mpc_x0, H_target);
+            Chassis_MPC.age++;
         }
 
         /* F0_left/F0_right 的正负号沿用原写法，两者当前均为0。 */

@@ -1,6 +1,7 @@
 #include "chassis_task.h"
 
 #include "app_config.h"
+#include "chassis_mpc.h"
 #include "device_motor_dji.h"
 #include "device_motor_dm.h"
 #include "task_can.h"
@@ -15,6 +16,24 @@ static const osThreadAttr_t chassisTaskAttributes = {
     .name = "ChassisTask",
     .stack_size = 1024U * 4U,
     .priority = (osPriority_t)osPriorityHigh,
+};
+
+/*
+ * MPC 求解任务。单独一个任务、优先级低于底盘，是这套架构的关键：
+ * 实测单次求解是毫秒级，放在 1kHz 控制环里会把那一拍撑爆（见 3caf81a）。
+ * 独立任务后求解随时可被底盘任务抢占，控制环的 deadline 不再受它影响，
+ * 求解慢了只会让自己降频，表现为 Chassis_MPC.solve_count 增速变慢、age 变大。
+ *
+ * 栈 4096：实测 Release(-Os) 最深一支 Chassis_MPC_Solve(112) -> solve(256)
+ * -> backward_pass_grad(800) -> Eigen(424) 约 1.8 KB。Debug(-O0) 因为 Eigen
+ * 模板不展开要到 3.8 KB，也还装得下。溢出的表现不是报错而是整个任务冻结
+ * （vApplicationStackOverflowHook 里 taskDISABLE_INTERRUPTS(); while(1);），
+ * 极难和"求解超时"区分，所以宁可给足。
+ */
+static const osThreadAttr_t mpcTaskAttributes = {
+    .name = "MpcTask",
+    .stack_size = 1024U * 4U,
+    .priority = (osPriority_t)osPriorityLow,
 };
 
 /**
@@ -135,6 +154,8 @@ static void Chassis_Task_Entry(void *argument)
     const float tickSec = 1.0f / (float)osKernelGetTickFreq();
     uint32_t controlLastTick = 0U;
     uint32_t wakeTick = osKernelGetTickCount();
+    /* 栈余量1秒查一次就够（历史最小值只增不减），每拍查会扫上千个字，白费周期。 */
+    uint32_t stackCheckTick = 0U;
 
     (void)argument;
 
@@ -157,8 +178,18 @@ static void Chassis_Task_Entry(void *argument)
         }
         else
         {
-            Chassis.dt =
+            /*
+             * dt_raw 先留一份未钳位的：下面的越界回退会把"严重超时"换成
+             * default_dt，两者在 dt 上分不开，判不了任务是不是被某一轮拖住了。
+             */
+            Chassis.dt_raw =
                 (float)(controlTick - controlLastTick) * tickSec;
+            if (Chassis.dt_raw > Chassis.dt_raw_max)
+            {
+                Chassis.dt_raw_max = Chassis.dt_raw;
+            }
+
+            Chassis.dt = Chassis.dt_raw;
             if ((Chassis.dt < Chassis_Config.dt_min) ||
                 (Chassis.dt > Chassis_Config.dt_max))
             {
@@ -200,6 +231,12 @@ static void Chassis_Task_Entry(void *argument)
 
         Chassis_Command_Send();
 
+        if (++stackCheckTick >= 1000U)
+        {
+            stackCheckTick = 0U;
+            Chassis.task_stack_free = osThreadGetStackSpace(osThreadGetId());
+        }
+
         wakeTick += APP_CTRL_TICKS;
         if ((int32_t)(osKernelGetTickCount() - wakeTick) >= 0)
         {
@@ -209,8 +246,41 @@ static void Chassis_Task_Entry(void *argument)
     }
 }
 
+/**
+ * @brief 按 MPC 自己的周期反复求解，吃控制环发布的最新输入。
+ *
+ * 用 osDelayUntil 自定时，不和底盘任务做握手：控制环每拍只管发布 x0、读 F，
+ * 两边谁也不等谁。求解超过一个周期时下面的补偿分支会把节拍拉回来，
+ * 表现为求解频率自然下降，而不是把延迟传导给控制环。
+ */
+static void Chassis_MPC_Task_Entry(void *argument)
+{
+    const uint32_t periodTicks =
+        (uint32_t)Chassis_Config.mpc.decimation * APP_CTRL_TICKS;
+    uint32_t wakeTick = osKernelGetTickCount();
+
+    (void)argument;
+
+    for (;;)
+    {
+        if (Chassis_Config.output.mpc_flag != 0U)
+        {
+            Chassis_MPC_Solve();
+        }
+
+        wakeTick += periodTicks;
+        if ((int32_t)(osKernelGetTickCount() - wakeTick) >= 0)
+        {
+            wakeTick = osKernelGetTickCount() + periodTicks;
+        }
+        (void)osDelayUntil(wakeTick);
+    }
+}
+
 void Chassis_Task_Init(void)
 {
     Chassis_Init();
     (void)osThreadNew(Chassis_Task_Entry, NULL, &chassisTaskAttributes);
+    /* 求解器已在 Chassis_Init() 里建好，这之后再放 MPC 任务出来。 */
+    (void)osThreadNew(Chassis_MPC_Task_Entry, NULL, &mpcTaskAttributes);
 }

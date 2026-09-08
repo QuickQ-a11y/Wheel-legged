@@ -125,11 +125,28 @@ target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-fno-use-cxa-atexit>
 )
 
-# vendored TinyMPC 单独放宽 unused-variable：那几个残差量原本只被 std::cout 使用，
+# TinyMPC 和 chassis_mpc.cpp 强制 -O2，不跟随 Debug 的 -O0。
+#
+# TinyMPC 是模板密集的 C++ + Eigen，-O0 下模板完全不展开，每个表达式求值都变成
+# 真实的函数调用，比优化构建慢一个数量级以上（官方 benchmark 全部是优化构建：
+# Teensy 4.1 / Cortex-M7 600MHz 上 N=16 只要 45us/迭代）。这四个文件都是 vendored
+# 模板代码和算法包装，源码级单步本来就没有意义；业务代码仍是 -O0，Live Watch 和
+# 断点照旧。这样调试期烧 Debug 也能让求解器跑在正常速度，不必为了量耗时切 Release。
+#
+# per-file 的 COMPILE_OPTIONS 排在全局 -O0 之后，GCC 取最后一个 -O，所以这里生效。
+set_source_files_properties(
+    User_File/1_Middleware/2_Algorithm/TinyMPC/tinympc/tiny_api.cpp
+    User_File/1_Middleware/2_Algorithm/TinyMPC/tinympc/rho_benchmark.cpp
+    User_File/3_Chariot/1_Module/Chassis/chassis_mpc.cpp
+    PROPERTIES COMPILE_OPTIONS "-O2"
+)
+
+# admm.cpp 除 -O2 外还要放宽 unused-variable：那几个残差量原本只被 std::cout 使用，
 # 我们摘掉打印后就成了未使用量。不为第三方代码改写源码，也不放宽自己代码的警告级别。
+# ⚠ set_source_files_properties 是覆盖不是追加，两项必须写在同一次调用里。
 set_source_files_properties(
     User_File/1_Middleware/2_Algorithm/TinyMPC/tinympc/admm.cpp
-    PROPERTIES COMPILE_OPTIONS "-Wno-unused-variable"
+    PROPERTIES COMPILE_OPTIONS "-O2;-Wno-unused-variable"
 )
 
 # Add project symbols (macros)

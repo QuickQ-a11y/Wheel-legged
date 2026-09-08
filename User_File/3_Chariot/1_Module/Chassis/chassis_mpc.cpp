@@ -18,17 +18,28 @@
 Chassis_MPC_t Chassis_MPC;
 
 static TinySolver *mpcSolver;
-static tinyMatrix mpcUmin;   /* nu x (N-1)，第0列每拍按变化率约束刷新 */
-static tinyMatrix mpcUmax;
-static tinyMatrix mpcXmin;
-static tinyMatrix mpcXmax;
-static tinyMatrix mpcXref;
-static tinyMatrix mpcUref;
+/*
+ * 控制环发布、MPC任务消费的求解输入。裸全局不加锁：都是32位对齐的float，
+ * 单字读写在Cortex-M上是原子的，最坏只会读到跨一拍的一组值，物理量1ms内的
+ * 变化远小于测量噪声。
+ */
+static float mpcInputX[CHASSIS_STATE_MPC_COUNT];
+static float mpcInputHref;
 
-/** @brief 使能DWT周期计数器，用来量单次求解耗时。 */
+/**
+ * @brief 使能DWT周期计数器，用来量单次求解耗时。
+ *
+ * LAR 那一行不能省：Cortex-M7 的 DWT 带软件锁（CMSIS 的 DWT_Type 里有
+ * LAR/LSR 就是证据），锁着的时候对 CTRL 和 CYCCNT 的写入会被【静默忽略】
+ * ——不报错、不置位，CYCCNT 恒为 0，于是 cycles = t1 - t0 恒为 0，
+ * Chassis_MPC.cycles_max 永远停在 0。M4 没有这把锁，从 F4 工程搬代码过来
+ * 最容易漏的就是它。0xC5ACCE55 是 ARM 规定的解锁魔数。
+ * 顺序也有讲究：先开 TRCENA 总开关，再解锁，最后才配置计数器。
+ */
 static void Mpc_Cycle_Counter_Enable(void)
 {
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->LAR = 0xC5ACCE55U;
     DWT->CYCCNT = 0U;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 }
@@ -97,26 +108,53 @@ void Chassis_MPC_Init(void)
     mpcSolver->settings->en_tv_input_linear = 0;
     mpcSolver->settings->en_tv_state_linear = 0;
 
-    /* 工作矩阵一次分配好，Solve 里只改值不改尺寸，避免任何重分配。 */
-    mpcXmin = tinyMatrix::Constant(nx, N, -1.0e6f);
-    mpcXmax = tinyMatrix::Constant(nx, N,  1.0e6f);
-    mpcUmin = tinyMatrix::Constant(nu, N - 1, cfg->F_min);
-    mpcUmax = tinyMatrix::Constant(nu, N - 1, cfg->F_max);
-    mpcXref = tinyMatrix::Zero(nx, N);
-    mpcUref = tinyMatrix::Constant(nu, N - 1, F_eq);
+    /*
+     * 约束和参考量只在这里灌一次。这几个 tiny_set_* 都是【值传递】动态Eigen矩阵
+     * （见 tiny_api.hpp），一次调用要堆分配+拷贝两遍，放在求解环里纯属浪费：
+     * 状态限幅和输入参考自始至终不变，腿角参考只有第2行随 H_ref 变，
+     * 输入限幅只有第0列随变化率约束变。Solve() 里改成直写 mpcSolver->work，
+     * 省掉每拍 7 次矩阵拷贝。work 是 TinyMPC 的公开结构体，不算改它的代码。
+     */
+    tiny_set_bound_constraints(mpcSolver,
+                               tinyMatrix::Constant(nx, N, -1.0e6f),
+                               tinyMatrix::Constant(nx, N,  1.0e6f),
+                               tinyMatrix::Constant(nu, N - 1, cfg->F_min),
+                               tinyMatrix::Constant(nu, N - 1, cfg->F_max));
+    tiny_set_x_ref(mpcSolver, tinyMatrix::Zero(nx, N));
+    tiny_set_u_ref(mpcSolver, tinyMatrix::Constant(nu, N - 1, F_eq));
 
     Chassis_MPC.F[0] = F_eq;
     Chassis_MPC.F[1] = F_eq;
     Chassis_MPC.cycles_max = 0U;
+    Chassis_MPC.solve_us_max = 0U;
+    Chassis_MPC.solve_count = 0U;
+    Chassis_MPC.age = 0U;
+    /* 控制环还没发布过输入时，先喂一组静止平衡姿态，别让首次求解吃全零。 */
+    mpcInputX[0] = 0.0f;
+    mpcInputX[1] = 0.0f;
+    mpcInputX[2] = Chassis_Config.leg[CHASSIS_LEFT].target_L0;
+    mpcInputX[3] = 0.0f;
+    mpcInputHref = Chassis_Config.leg[CHASSIS_LEFT].target_L0;
 
     Mpc_Cycle_Counter_Enable();
     Chassis_MPC.ready_flag = 1U;
 }
 
-void Chassis_MPC_Solve(const float x0[4], float H_ref)
+void Chassis_MPC_SetInput(const float x0[4], float H_ref)
+{
+    for (int i = 0; i < (int)CHASSIS_STATE_MPC_COUNT; i++)
+    {
+        mpcInputX[i] = x0[i];
+    }
+    mpcInputHref = H_ref;
+}
+
+void Chassis_MPC_Solve(void)
 {
     const Chassis_MPC_Config_t *cfg = &Chassis_Config.mpc;
     const int nu = (int)CHASSIS_MPC_INPUT_COUNT;
+    float x0[CHASSIS_STATE_MPC_COUNT];
+    float H_ref;
     uint32_t t0;
     uint32_t t1;
 
@@ -125,21 +163,27 @@ void Chassis_MPC_Solve(const float x0[4], float H_ref)
         return;
     }
 
+    /* 先把本次要用的输入取到局部，后面整个求解期间不再看全局，免得中途被改。 */
     for (int i = 0; i < (int)CHASSIS_STATE_MPC_COUNT; i++)
     {
+        x0[i] = mpcInputX[i];
         Chassis_MPC.x[i] = x0[i];
     }
+    H_ref = mpcInputHref;
     Chassis_MPC.H_ref = H_ref;
 
-    tinyVector x0v(CHASSIS_STATE_MPC_COUNT);
-    x0v << x0[0], x0[1], x0[2], x0[3];
-    tiny_set_x0(mpcSolver, x0v);
+    /*
+     * 直写 workspace，不走 tiny_set_* ——那几个是值传递动态矩阵，每调一次就
+     * 堆分配加拷贝。这里改的都是原地赋值，零分配。尺寸在 Init 时已定，
+     * 不会变，所以 setter 里那些 check_dimension 也没有意义。
+     */
+    mpcSolver->work->x(0, 0) = x0[0];
+    mpcSolver->work->x(1, 0) = x0[1];
+    mpcSolver->work->x(2, 0) = x0[2];
+    mpcSolver->work->x(3, 0) = x0[3];
 
-    /* 参考轨迹：roll和两个速度都要0，高度跟H_ref。 */
-    mpcXref.setZero();
-    mpcXref.row(2).setConstant(H_ref);
-    tiny_set_x_ref(mpcSolver, mpcXref);
-    tiny_set_u_ref(mpcSolver, mpcUref);
+    /* 参考轨迹只有高度这一行随目标变，其余行在 Init 里已经是0且不再改动。 */
+    mpcSolver->work->Xref.row(2).setConstant(H_ref);
 
     /*
      * 只对第0步叠加变化率约束。滚动优化只下发第0步，而上一拍的u是已知常量，
@@ -151,10 +195,9 @@ void Chassis_MPC_Solve(const float x0[4], float H_ref)
         const tinytype lo = Chassis_MPC.F[j] - cfg->dF_max;
         const tinytype hi = Chassis_MPC.F[j] + cfg->dF_max;
 
-        mpcUmin(j, 0) = (lo > cfg->F_min) ? lo : cfg->F_min;
-        mpcUmax(j, 0) = (hi < cfg->F_max) ? hi : cfg->F_max;
+        mpcSolver->work->u_min(j, 0) = (lo > cfg->F_min) ? lo : cfg->F_min;
+        mpcSolver->work->u_max(j, 0) = (hi < cfg->F_max) ? hi : cfg->F_max;
     }
-    tiny_set_bound_constraints(mpcSolver, mpcXmin, mpcXmax, mpcUmin, mpcUmax);
 
     t0 = DWT->CYCCNT;
     (void)tiny_solve(mpcSolver);
@@ -165,8 +208,16 @@ void Chassis_MPC_Solve(const float x0[4], float H_ref)
     {
         Chassis_MPC.cycles_max = Chassis_MPC.cycles;
     }
+    /* 用运行时主频换算，免得把 480MHz 写死（历史交接文档写成 550 过）。 */
+    Chassis_MPC.solve_us = Chassis_MPC.cycles / (SystemCoreClock / 1000000U);
+    if (Chassis_MPC.solve_us > Chassis_MPC.solve_us_max)
+    {
+        Chassis_MPC.solve_us_max = Chassis_MPC.solve_us;
+    }
     Chassis_MPC.iter = (uint32_t)mpcSolver->solution->iter;
     Chassis_MPC.solved = (uint32_t)mpcSolver->solution->solved;
     Chassis_MPC.F[0] = mpcSolver->solution->u(0, 0);
     Chassis_MPC.F[1] = mpcSolver->solution->u(1, 0);
+    Chassis_MPC.solve_count++;
+    Chassis_MPC.age = 0U;
 }

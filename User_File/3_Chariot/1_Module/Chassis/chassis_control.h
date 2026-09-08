@@ -174,7 +174,19 @@ struct Chassis
     uint8_t remote_stop_flag;       /* 急停请求，只封锁最终电机输出。 */
     uint8_t yaw_stick_flag;         /* 航向摇杆已离开中位，供松杆边沿锁存航向。 */
     uint32_t can_error_count;
-    float dt;                       /* 本轮实际控制周期，s。 */
+    /*
+     * 底盘任务历史最小剩余栈，字节，1Hz更新。逼近0说明快溢出了——溢出不会报错，
+     * 只会让整个任务在钩子里死循环，现象和"求解卡住"分不开，所以要能直接看到。
+     */
+    uint32_t task_stack_free;
+    float dt;                       /* 本轮实际控制周期，s。越界时回退到 default_dt。 */
+    /*
+     * 未钳位的实际周期，s，只供观察不参与控制。dt 越界会被换成 default_dt，
+     * 于是"严重超时"和"正常 1ms"在 dt 上长得一模一样，判不了任务有没有被拖住。
+     * 这一份保留原值：正常应等于 dt，明显大于它就是某一轮把周期撑爆了。
+     */
+    float dt_raw;
+    float dt_raw_max;               /* dt_raw 的历史最大值，s。 */
 
     Chassis_Goal_t goal;
 
@@ -219,7 +231,6 @@ struct Chassis
     /* 恢复、板凳和站立控制共同使用的目标与请求量。 */
     float state_time;
     float stable_time;
-    uint16_t mpc_tick;              /* MPC分频计数，到 mpc.decimation 求解一次。 */
     Chassis_Recovery_Phase_t recovery_phase;
     /*
      * 当前子阶段的切换条件已连续成立的时间，s。翻身阶段计"机体朝上"，

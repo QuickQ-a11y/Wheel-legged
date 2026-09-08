@@ -103,6 +103,89 @@
                 "panel": "shared",
                 "clear": true
             }
+        },
+        // ── 以下是 Release（-Os）。量执行耗时必须用这一组 ────────────────────
+        //
+        // Debug 是 -O0，Eigen 模板完全不优化：Release 的 text 是 143 KB，
+        // Debug 是 503 KB，差 3.5 倍，基本都是 Eigen。拿 Debug 量 MPC 求解
+        // 耗时不但没有参考价值，而且危险——commit 3caf81a 就是 Debug 下单次
+        // 求解撑爆 1 kHz 周期，任务卡住导致 CAN 停发、DM 保持最后力矩、
+        // 遥控断不了电。
+        //
+        // build/Release 与 build/Debug 是两个独立目录，互不影响，可以来回切。
+        // 首次使用前要先配置一次：cmake --preset Release
+        {
+            "label": "编译 (Release)",
+            "type": "shell",
+            "command": "cmake --build build/Release",
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            },
+            "group": "build"
+        },
+        {
+            "label": "烧录 (OpenOCD, Release)",
+            "type": "shell",
+            "command": "openocd -f openocd.cfg -c \"program build/Release/Wheel-legged.elf verify reset exit\"",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
+            "label": "编译 + 烧录 (OpenOCD, Release)",
+            "type": "shell",
+            "command": "cmake --build build/Release && openocd -f openocd.cfg -c \"program build/Release/Wheel-legged.elf verify reset exit\"",
+            "windows": {
+                "command": "cmake --build build/Release; if ($LASTEXITCODE -eq 0) { openocd -f openocd.cfg -c \"program build/Release/Wheel-legged.elf verify reset exit\" }"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
+            // J-Link Commander 的 elf 路径写在脚本里，所以 Release 单独一份
+            // flash_release.jlink，不能和 Debug 共用 flash.jlink。
+            "label": "烧录 (J-Link, Release)",
+            "type": "shell",
+            "command": "JLinkExe -device STM32H723VG -if SWD -speed 4000 -autoconnect 1 -CommanderScript flash_release.jlink",
+            "windows": {
+                "command": "& 'C:/Program Files/SEGGER/JLink/JLink.exe' -device STM32H723VG -if SWD -speed 4000 -autoconnect 1 -CommanderScript flash_release.jlink"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
+            "label": "编译 + 烧录 (J-Link, Release)",
+            "type": "shell",
+            "command": "cmake --build build/Release && JLinkExe -device STM32H723VG -if SWD -speed 4000 -autoconnect 1 -CommanderScript flash_release.jlink",
+            "windows": {
+                "command": "cmake --build build/Release; if ($LASTEXITCODE -eq 0) { & 'C:/Program Files/SEGGER/JLink/JLink.exe' -device STM32H723VG -if SWD -speed 4000 -autoconnect 1 -CommanderScript flash_release.jlink }"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
         }
     ]
 }
