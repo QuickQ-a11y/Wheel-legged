@@ -13,6 +13,7 @@ extern "C" {
 
 #define CHASSIS_PI 3.14159265358979323846f
 #define CHASSIS_HALF_PI 1.57079632679489661923f
+#define CHASSIS_TWO_PI 6.28318530717958647692f
 #define CHASSIS_STATE_COUNT 10U   /* 十维整车LQR状态数量。 */
 #define CHASSIS_STATE_MPC_COUNT 4U /* MPC状态数：alpha, d_alpha, H, d_H。 */
 #define CHASSIS_MPC_INPUT_COUNT 2U /* MPC输入数：左右腿支撑力。 */
@@ -100,16 +101,11 @@ typedef struct
     uint8_t lateral_accel_axis;       /* 横向运动加速度数组下标，供转向观测。 */
     uint8_t vertical_accel_axis;      /* 竖直运动加速度数组下标，供支撑力观测。 */
     /*
-     * 倒地方向判据的原始加速度轴符号，只被 Chassis.fall_pitch 消费：
-     *   fall_pitch = atan2(x_scale * accel_raw[0], z_scale * accel_raw[2])
-     * 默认 1.0/1.0 由现有代码推出：QuaternionEKF 内部用
-     * pitch = atan2(-ax, sqrt(ay^2+az^2))，说明内部系直立静止时
-     * accel_raw ≈ (0, 0, +9.8)；task_imu 发布到整车系时 pitch 再取反，
-     * 两步合起来等价的全角形式就是 atan2(+ax, +az)。
-     * 换IMU或改安装方向必须重新标定：直立时 fall_pitch≈0，小角度下与
-     * Chassis.imu.pitch 同号同值，且倒过90度后单调不折返。
+     * 竖向加速度的轴符号，只被 Body_Upward() 消费，用来判机体是不是朝上：
+     *   az = z_scale * accel_raw[2]，直立静止时应为 +9.8。
+     * 换IMU或改安装方向必须重新标定，标定方法：直立读 accel_raw[2] 为正、
+     * 底朝天读为负。这一项判错的后果是底朝天被当成可以站，直接跑LQR。
      */
-    float fall_accel_x_scale;
     float fall_accel_z_scale;
 } Chassis_IMU_Config_t;
 
@@ -161,7 +157,8 @@ typedef struct
  *
  * 消费者有三处：Chassis_Recovery() 跑 TurnOver/Swing/DrawBack 三个阶段并做
  * 卡死反转，Chassis_State_Update() 拿姿态门判断能不能站/什么时候判倒，
- * Chassis_Bench() 用板凳项。姿态门吃的是 Chassis.fall_pitch 不是 imu.pitch。
+ * Chassis_Bench() 用板凳项。凡是"机体朝向"的判断都先过 Body_Upward()（az），
+ * 姿态角只在它放行之后才可信——pitch 过90度会折返，底朝天与直立分不开。
  */
 typedef struct
 {
@@ -177,9 +174,9 @@ typedef struct
     float bench_phi0;        /* DrawBack的腿杆角目标，rad。 */
 
     /*
-     * 翻身阶段（ZJU TurnOver）。退出判据用竖向加速度而不是 fall_pitch：
+     * 翻身阶段（ZJU TurnOver）。退出判据用竖向加速度而不是姿态角：
      * 倒地后四元数可能收敛到错误分支，重力方向的加速度投影始终可靠；
-     * 而且 az 是标量阈值，没有 fall_pitch 在 ±pi 附近符号跳变的问题。
+     * 而且 pitch 过90度会折返，底朝天读0，根本分不出机体是正是反。
      */
     float turnover_L0_rate;  /* 翻身段伸腿速率，m/s。要比站立段快，腿先伸开才翻得动。 */
     float turnover_rate;     /* 翻身扫掠速率，rad/s。 */
@@ -194,6 +191,17 @@ typedef struct
     /* 收腿站起阶段（ZJU DrawBack）。ZJU用 1.2 m/s 收腿、200度/s 转竖直。 */
     float drawback_L0_rate;   /* 收腿速率，m/s。 */
     float drawback_phi0_rate; /* 摆到竖直向下的速率，rad/s。 */
+    /*
+     * 卡滞屏障：腿不许跨过的腿角，rad，主值口径。摆腿和收腿站起两个阶段共用，
+     * 是机构属性不是某个阶段的属性。
+     * 腿在正前方（phi0接近0）时直接往下转会把腿怼进地里卡住，所以屏障下侧
+     * 一律绕远路——从机体正上方绕到后方再转到下方。
+     *   摆腿：下侧强制反转，上侧沿用就近原则（上侧的近路不会跨屏障，已全周验过）。
+     *   收腿：把圆在屏障处剪开展成[0,2pi)，在展开坐标里直着走到 bench_phi0。
+     * ⚠ 改大它会让更多起始姿态绕远路，收腿行程最长可达 2pi-|bench_phi0-barrier|，
+     *   必须同时确认 prepare_timeout 和 fallen_timeout 够走完。
+     */
+    float phi0_barrier;
 
     /* 目标斜坡：目标只按速率走、不跟随实际角，动作快慢全由这几项决定。 */
     float L0_rate;           /* 腿长目标斜率，m/s。站立段升腿也用它。 */
@@ -226,8 +234,7 @@ typedef struct
     float prepare_timeout;   /* FALLING_TO_STAND超时，s。同上。 */
 
     /* 姿态门：能不能跳过转腿直接站，以及站立中什么时候判倒。 */
-    float fall_pitch_filter; /* fall_pitch一阶低通系数，0~1。原始加速度含运动分量，需去噪。 */
-    float direct_pitch;      /* 允许直接进站立/跳过转腿的倾角上限，rad。判据用fall_pitch。 */
+    float direct_pitch;      /* 允许直接进站立/跳过转腿的倾角上限，rad。 */
     float phi0_min;          /* 上面这道门的腿杆角区间下限，rad。 */
     float phi0_max;          /* 区间上限，rad。 */
     /*

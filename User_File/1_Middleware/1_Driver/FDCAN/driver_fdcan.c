@@ -4,11 +4,12 @@
 
 driver_fdcan_object_t driverFdcan1Object = {0};
 driver_fdcan_object_t driverFdcan2Object = {0};
+driver_fdcan_object_t driverFdcan3Object = {0};
 
 /**
  * @brief 根据 HAL 句柄找到对应管理对象。
  *
- * 当前硬件只使用 FDCAN1 和 FDCAN2。
+ * 当前硬件使用 FDCAN1、FDCAN2 和板间通信专用的 FDCAN3。
  */
 static driver_fdcan_object_t *Driver_FDCAN_GetObject(FDCAN_HandleTypeDef *handle)
 {
@@ -20,6 +21,11 @@ static driver_fdcan_object_t *Driver_FDCAN_GetObject(FDCAN_HandleTypeDef *handle
     if (handle->Instance == FDCAN2)
     {
         return &driverFdcan2Object;
+    }
+
+    if (handle->Instance == FDCAN3)
+    {
+        return &driverFdcan3Object;
     }
 
     return NULL;

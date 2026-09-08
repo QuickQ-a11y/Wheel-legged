@@ -28,6 +28,7 @@ typedef struct
 
 extern driver_fdcan_object_t driverFdcan1Object;
 extern driver_fdcan_object_t driverFdcan2Object;
+extern driver_fdcan_object_t driverFdcan3Object;
 
 /**
  * @brief 初始化 FDCAN 外设并启用标准帧接收。

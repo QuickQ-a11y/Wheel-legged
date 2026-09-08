@@ -88,8 +88,8 @@ typedef struct
     float accel[APP_IMU_AXIS_COUNT];      /* 导航坐标运动加速度，m/s^2。 */
     /*
      * BMI088传感器原始坐标加速度，含重力，m/s^2。上面三个都是扣掉重力的
-     * 运动加速度，判不了倒地姿态；这一份不做轴向镜像、不扣重力，只供
-     * Chassis.fall_pitch 用。轴符号见 Chassis_Config.imu.fall_accel_*_scale。
+     * 运动加速度，判不了倒地姿态；这一份不做轴向镜像、不扣重力，供
+     * Body_Upward() 判机体朝向用。轴符号见 Chassis_Config.imu.fall_accel_z_scale。
      */
     float accel_raw[APP_IMU_AXIS_COUNT];
 } Chassis_IMU_t;
@@ -175,13 +175,6 @@ struct Chassis
     uint8_t yaw_stick_flag;         /* 航向摇杆已离开中位，供松杆边沿锁存航向。 */
     uint32_t can_error_count;
     float dt;                       /* 本轮实际控制周期，s。 */
-    /*
-     * 重力矢量给出的整车俯仰角，rad，范围±pi、倒过90度也不折返。
-     * imu.pitch来自EKF的asinf，上界就是pi/2，车真趴下去以后会折返回来，
-     * 符号不再代表倒地方向。凡是"我现在是不是躺着/往哪边躺"的判断都用这一份，
-     * 站立控制和站立中判倒仍然用imu.pitch。由Chassis_State_Update()每周期更新。
-     */
-    float fall_pitch;
 
     Chassis_Goal_t goal;
 
@@ -239,9 +232,9 @@ struct Chassis
     /* 卡死计时按腿分开。合并成一个的话单腿卡死永远检测不到——另一条腿在转。 */
     float recovery_stuck_time[CHASSIS_LEG_COUNT];
     /*
-     * 本次自救锁存的目标腿摆角，rad，0表示本轮还没锁存。符号由进入FALLEN
+     * 本次自救锁存的目标腿摆角，rad，0表示本轮还没锁存。符号由进入摆腿
      * 那一拍的倒地方向决定，之后不再跟着姿态变——机体转过竖直位时
-     * fall_pitch 会过零，每拍重算会让参考角来回翻符号、腿原地抖。
+     * pitch 会过零，每拍重算会让参考角来回翻符号、腿原地抖。
      */
     float recovery_theta_ref;
     /*
@@ -249,6 +242,11 @@ struct Chassis
      * 取同一个值（不同步则机体翻不过来），摆腿阶段两腿各自就近选。
      */
     float recovery_direction[CHASSIS_LEG_COUNT];
+    /*
+     * 收腿站起的连续目标腿角，rad，进 FALLING_TO_STAND 那一拍按腿锁存。
+     * 不能每拍用最短弧重算：绕远路时最短弧会指回来，腿会掉头撞进卡滞区。
+     */
+    float drawback_goal_phi0[CHASSIS_LEG_COUNT];
     Chassis_Output_t output;
     uint32_t fault;
 

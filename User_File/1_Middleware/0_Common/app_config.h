@@ -81,9 +81,15 @@ static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) !=
 #define APP_REMOTE_TIMEOUT_TICKS 100U
 #define APP_REMOTE_SYNC_FRAMES 2U
 
-/* DR16输入整形参数；轴值已经由DBUS解析为约-660..660。 */
+/* DR16输入整形死区；轴值已经由DBUS解析为约-660..660。 */
 #define APP_DR16_DB 10
-#define APP_DR16_DIAL 400
+
+/*
+ * 滚轮选腿长的阈值，比较的是归一化后的值。
+ * 归一化把死区外重映射到满量程，原来的原始阈值 400 对应 (400-10)/650 = 0.6。
+ * 放在这里而不是 DR16 设备层，是因为板间 CAN 数据源也要用同一个阈值。
+ */
+#define APP_RC_DIAL_THRESHOLD 0.6f
 
 /*
  * 与具体遥控协议无关的底盘运动目标。
@@ -95,7 +101,7 @@ static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) !=
 #define APP_RC_VEL_RATE 1.0f  /* 爬台阶接近段的速度目标斜率，m/s^2。 */
 #define APP_RC_LEG_S 0.14f
 #define APP_RC_LEG_M 0.14f
-#define APP_RC_LEG_L 0.14f
+#define APP_RC_LEG_L 0.25f
 
 /*
  * 控制器第一阶段只计算中间状态和安全输出。
@@ -137,11 +143,40 @@ static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) !=
 #define APP_IMU_Z_BIAS_LPF_S 10.0f
 #define APP_IMU_Z_BIAS_GYRO_MAX_RADPS 0.3f
 
+/*
+ * 板间通信：云台板 -> 底盘板，走 FDCAN3 专用总线，两帧各 200 Hz。
+ * 16 位字段低字节在前，与本工程 USB 协议一致。
+ * ID 选在 0x0A0 段，避开 DM 的 0x001~0x014 和 DJI 的 0x1FF/0x200~0x208，
+ * 将来真要并到电机总线上救急也不会撞。
+ *
+ * 0x0A0 摇杆帧：leftX/leftY/rightX/rightY 各 int16 = 归一化值 * 10000。
+ * 0x0A1 状态帧：[0]leftSwitch [1]rightSwitch [2..3]dial*10000
+ *               [4]flags(bit0=dialValid, bit1=遥控在线) [5]seq
+ *               [6..7]云台 YAW 关节角(归一化到 ±pi) * 10000。
+ */
+#define APP_BOARD_STICK_ID 0x0A0U
+#define APP_BOARD_STATE_ID 0x0A1U
+#define APP_BOARD_FRAME_LEN 8U
+
+/* 归一化量和角度统一的定点比例；-1..1 正好用满 int16，pi*10000=31416 也不溢出。 */
+#define APP_BOARD_SCALE 10000.0f
+
+/* 状态帧 flags 位。 */
+#define APP_BOARD_FLAG_DIAL_VALID 0x01U
+#define APP_BOARD_FLAG_REMOTE_ONLINE 0x02U
+
+/* 板间帧超时，单位 HAL tick；200 Hz 发送下等于连丢 10 帧。 */
+#define APP_BOARD_TIMEOUT_TICKS 50U
+
+/* 云台主循环 1 kHz，分频到 200 Hz 发送。 */
+#define APP_BOARD_SEND_DIV 5U
+
 typedef enum
 {
     APP_CAN_BUS_UNKNOWN = 0,
     APP_CAN_BUS_FDCAN1,
     APP_CAN_BUS_FDCAN2,
+    APP_CAN_BUS_FDCAN3,
 } app_can_bus_t;
 
 #ifdef __cplusplus

@@ -136,7 +136,6 @@ static Remote_Switch_t DR16_ConvertSwitch(dr16_switch_t value)
 
 void DR16_MakeRemote(const dr16_data_t *data,
                      int16_t deadband,
-                     int16_t dialThreshold,
                      Remote_t *remote)
 {
     Remote_t converted = {0};
@@ -153,58 +152,6 @@ void DR16_MakeRemote(const dr16_data_t *data,
         converted.dial = DR16_NormalizeAxis(data->dial, deadband);
     }
 
-    /*
-     * 右拨杆决定使能级别，右上时才由左拨杆选模式。
-     * 具体档位对应哪个模式全部由 remote_input.h 的 REMOTE_MAP_* 决定，
-     * 改拨杆分配不需要动这里。右下急停由 rightSwitch 字段单独上报。
-     */
-    if (converted.rightSwitch == REMOTE_SWITCH_MID)
-    {
-        converted.modeRequest = REMOTE_MAP_RIGHT_MID;
-    }
-    else if (converted.rightSwitch == REMOTE_SWITCH_UP)
-    {
-        switch (converted.leftSwitch)
-        {
-        case REMOTE_SWITCH_UP:
-            converted.modeRequest = REMOTE_MAP_LEFT_UP;
-            break;
-
-        case REMOTE_SWITCH_MID:
-            converted.modeRequest = REMOTE_MAP_LEFT_MID;
-            break;
-
-        case REMOTE_SWITCH_DOWN:
-            converted.modeRequest = REMOTE_MAP_LEFT_DOWN;
-            break;
-
-        case REMOTE_SWITCH_UNKNOWN:
-        default:
-            converted.modeRequest = REMOTE_MODE_NONE;
-            break;
-        }
-    }
-    else
-    {
-        converted.modeRequest = REMOTE_MODE_NONE;
-    }
-
-    if (data->dialValid == 0U)
-    {
-        converted.legRequest = REMOTE_LEG_KEEP;
-    }
-    else if (data->dial > dialThreshold)
-    {
-        converted.legRequest = REMOTE_LEG_SHORT;
-    }
-    else if (data->dial < -dialThreshold)
-    {
-        converted.legRequest = REMOTE_LEG_LONG;
-    }
-    else
-    {
-        converted.legRequest = REMOTE_LEG_MIDDLE;
-    }
 
     *remote = converted;
 }

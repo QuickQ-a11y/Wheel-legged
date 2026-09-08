@@ -80,10 +80,12 @@ float DR16_NormalizeAxis(int16_t axis, int16_t deadband);
 
 /**
  * @brief 将DR16物理控件转换为归一化遥控快照。
+ *
+ * 只做归一化，拨杆和滚轮到模式/腿长的映射由 Remote_ApplyMapping 统一负责，
+ * 因为板间 CAN 数据源也要用同一份映射。
  */
 void DR16_MakeRemote(const dr16_data_t *data,
                      int16_t deadband,
-                     int16_t dialThreshold,
                      Remote_t *remote);
 
 #ifdef __cplusplus

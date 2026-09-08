@@ -1,4 +1,5 @@
 #include "device_dr16.h"
+#include "remote_input.h"
 
 #include <assert.h>
 #include <math.h>
@@ -219,7 +220,8 @@ static void testGenericInputMapping(void)
     };
     Remote_t remote = {0};
 
-    DR16_MakeRemote(&data, 10, 400, &remote);
+    DR16_MakeRemote(&data, 10, &remote);
+    Remote_ApplyMapping(&remote);
     assert(remote.leftStick.x == 0.5f);
     assert(remote.leftStick.y == 1.0f);
     assert(remote.rightStick.x == -1.0f);
@@ -236,16 +238,19 @@ static void testGenericInputMapping(void)
     /* 右中恒为零力矩，与左拨杆无关。 */
     data.rightSwitch = DR16_SWITCH_MID;
     data.dial = 400;
-    DR16_MakeRemote(&data, 10, 400, &remote);
+    DR16_MakeRemote(&data, 10, &remote);
+    Remote_ApplyMapping(&remote);
     assert(remote.modeRequest == REMOTE_MAP_RIGHT_MID);
     data.leftSwitch = DR16_SWITCH_DOWN;
-    DR16_MakeRemote(&data, 10, 400, &remote);
+    DR16_MakeRemote(&data, 10, &remote);
+    Remote_ApplyMapping(&remote);
     assert(remote.modeRequest == REMOTE_MAP_RIGHT_MID);
 
     /* 右上时才由左拨杆选模式。 */
     data.rightSwitch = DR16_SWITCH_UP;
     data.leftSwitch = DR16_SWITCH_MID;
-    DR16_MakeRemote(&data, 10, 400, &remote);
+    DR16_MakeRemote(&data, 10, &remote);
+    Remote_ApplyMapping(&remote);
     assert(remote.rightSwitch == REMOTE_SWITCH_UP);
     assert(remote.leftSwitch == REMOTE_SWITCH_MID);
     assert(fabsf(remote.dial - 0.6f) < TEST_TOLERANCE);
@@ -253,22 +258,26 @@ static void testGenericInputMapping(void)
     assert(remote.legRequest == REMOTE_LEG_MIDDLE);
 
     data.leftSwitch = DR16_SWITCH_UP;
-    DR16_MakeRemote(&data, 10, 400, &remote);
+    DR16_MakeRemote(&data, 10, &remote);
+    Remote_ApplyMapping(&remote);
     assert(remote.modeRequest == REMOTE_MAP_LEFT_UP);
 
     data.leftSwitch = DR16_SWITCH_DOWN;
     data.dial = -400;
-    DR16_MakeRemote(&data, 10, 400, &remote);
+    DR16_MakeRemote(&data, 10, &remote);
+    Remote_ApplyMapping(&remote);
     assert(remote.leftSwitch == REMOTE_SWITCH_DOWN);
     assert(remote.modeRequest == REMOTE_MAP_LEFT_DOWN);
     assert(remote.legRequest == REMOTE_LEG_MIDDLE);
 
     data.dial = -401;
-    DR16_MakeRemote(&data, 10, 400, &remote);
+    DR16_MakeRemote(&data, 10, &remote);
+    Remote_ApplyMapping(&remote);
     assert(remote.legRequest == REMOTE_LEG_LONG);
 
     data.dialValid = 0U;
-    DR16_MakeRemote(&data, 10, 400, &remote);
+    DR16_MakeRemote(&data, 10, &remote);
+    Remote_ApplyMapping(&remote);
     assert(remote.dial == 0.0f);
     assert(remote.dialValid == 0U);
     assert(remote.legRequest == REMOTE_LEG_KEEP);

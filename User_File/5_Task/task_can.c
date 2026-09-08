@@ -50,6 +50,11 @@ static app_can_bus_t CAN_Task_GetBus(FDCAN_HandleTypeDef *handle)
         return APP_CAN_BUS_FDCAN2;
     }
 
+    if (handle == &hfdcan3)
+    {
+        return APP_CAN_BUS_FDCAN3;
+    }
+
     return APP_CAN_BUS_UNKNOWN;
 }
 
@@ -164,6 +169,7 @@ static void CAN_Task_Entry(void *argument)
 
     Driver_FDCAN_Init(&hfdcan1, CAN_Task_RxCallback);
     Driver_FDCAN_Init(&hfdcan2, CAN_Task_RxCallback);
+    Driver_FDCAN_Init(&hfdcan3, CAN_Task_RxCallback);
 
     for (;;)
     {

@@ -152,8 +152,7 @@ const Chassis_Config_t Chassis_Config = {
         .forward_accel_scale = 1.0f,
         .lateral_accel_axis = 1U,
         .vertical_accel_axis = 2U,
-        /* 倒地方向判据符号，实机标定方法见 Chassis_IMU_Config_t 的注释。 */
-        .fall_accel_x_scale = 1.0f,
+        /* 机体朝向判据符号，实机标定方法见 Chassis_IMU_Config_t 的注释。 */
         .fall_accel_z_scale = 1.0f,
     },
     /* 左右scale同时约束反馈和命令，避免同一轮方向在两处独立维护。 */
@@ -254,6 +253,7 @@ const Chassis_Config_t Chassis_Config = {
         /* 收腿站起。ZJU用1.2 m/s和200度/s，这里先取保守值。 */
         .drawback_L0_rate = 0.30f,
         .drawback_phi0_rate = 1.50f,
+        .phi0_barrier = 0.4f,
 
         /* 斜坡速率。rotate_rate 单位rad/s，HERO_LEG用的是8.0，这里先取保守值。 */
         .L0_rate = 0.10f,
@@ -288,7 +288,6 @@ const Chassis_Config_t Chassis_Config = {
         .prepare_timeout = 3.0f,
 
         /* 姿态门。改斜坡速率后自救变慢，超时不够先加timeout，不要改回阶跃。 */
-        .fall_pitch_filter = 0.05f,
         .direct_pitch = 0.80f,
         .phi0_min = 0.70f,
         .phi0_max = 3.00f,
@@ -832,8 +831,7 @@ const Chassis_Config_t Chassis_Config = {
         .forward_accel_scale = 1.0f,
         .lateral_accel_axis = 1U,
         .vertical_accel_axis = 2U,
-        /* 倒地方向判据符号，实机标定方法见 Chassis_IMU_Config_t 的注释。 */
-        .fall_accel_x_scale = 1.0f,
+        /* 机体朝向判据符号，实机标定方法见 Chassis_IMU_Config_t 的注释。 */
         .fall_accel_z_scale = 1.0f,
     },
     /* 左右scale同时约束反馈和命令，避免同一轮方向在两处独立维护。 */
@@ -884,7 +882,7 @@ const Chassis_Config_t Chassis_Config = {
     },
     /* 腿长PID输出作为虚拟支撑力修正，反馈速度直接作为阻尼项。 */
     .leg_length_pid = {
-        .kp = 700.0f,
+        .kp = 600.0f,
         .ki = 0.0f,
         .kd = 40.0f,
         .integralLimit = 5.0f,
@@ -892,7 +890,7 @@ const Chassis_Config_t Chassis_Config = {
     },
     /* roll PID输出以左右腿差动支撑力的形式作用。 */
     .roll_pid = {
-        .kp = 400.0f,
+        .kp = 300.0f,
         .ki = 0.0f,
         .kd = 0.0f,
         .integralLimit = 5.0f,
@@ -934,6 +932,8 @@ const Chassis_Config_t Chassis_Config = {
         /* 收腿站起。ZJU用1.2 m/s和200度/s；先取保守值，方向确认后再加。 */
         .drawback_L0_rate = 0.30f,
         .drawback_phi0_rate = 1.50f,
+        /* 卡滞屏障，实机定出来的：腿从正前方直接往下转会怼进地里。摆腿和收腿共用。 */
+        .phi0_barrier = 0.4f,
 
         /*
          * 摆腿段斜坡速率。rotate_rate 单位rad/s，4.0 约229度/s，HERO_LEG用8.0。
@@ -941,7 +941,7 @@ const Chassis_Config_t Chassis_Config = {
          *   才叫追赶。填成小于它的值会让落后腿反而更慢、双腿差越拉越大。
          *   原始配置两个都是4.0，等于追赶功能没开。
          */
-        .L0_rate = 0.40f,
+        .L0_rate = 0.20f,
         .rotate_rate = 4.0f,
         .lag_rate = 6.0f,
         .theta_diff = 0.80f,
@@ -980,10 +980,13 @@ const Chassis_Config_t Chassis_Config = {
         .stable_time = 0.10f,
         /* FALLEN 现在装 TurnOver 和 Swing 两个阶段，超时要够两段走完。 */
         .fallen_timeout = 8.0f,
-        .prepare_timeout = 3.0f,
+        /*
+         * 收腿站起要够绕远路走完：最坏行程 2pi-(bench_phi0-barrier)=5.11 rad，
+         * 按 drawback_phi0_rate=1.50 需要 3.41 s，原值 3.0 必然超时。
+         */
+        .prepare_timeout = 6.0f,
 
         /* 姿态门。改斜坡速率后自救变慢，超时不够先加timeout，不要改回阶跃。 */
-        .fall_pitch_filter = 0.05f,
         .direct_pitch = 0.80f,
         /*
          * 能不能跳过自救直接站的腿角窗口。必须比下面的 stand_phi0_min/max
@@ -1027,7 +1030,7 @@ const Chassis_Config_t Chassis_Config = {
     /* 小陀螺保留速度和姿态反馈，关闭位移与航向角位置反馈。 */
     .top = {
         .max_d_s = 0.6f,
-        .spin_d_fai = 9.0f,
+        .spin_d_fai = 6.0f,
         /* 缺这一项时斜坡步长为0，小陀螺角速度目标会永远停在0转不起来。 */
         .d_fai_rate = 9.0f,
         .scale = {
@@ -1591,7 +1594,7 @@ const Chassis_Config_t Chassis_Config = {
         .joint_flag = 1U,
         .wheel_flag = 1U,
         /* 离地三项动作默认关，实机确认 all_off_flag 不误触发后再打开。 */
-        .off_ground_act_flag = 0U,
+        .off_ground_act_flag = 1U,
         .mpc_flag = 0U,   /* MPC默认关，先在Watch里和PID对照过再打开。 */
         .joint_T_limit = 15.0f,
     },
@@ -1615,9 +1618,9 @@ const Chassis_Config_t Chassis_Config = {
         [CHASSIS_STATE_D_S] = 0.0f,       /* 实测原地站立平衡点，rad。 */
         [CHASSIS_STATE_FAI] = 0.0f,
         [CHASSIS_STATE_D_FAI] = 0.0f,
-        [CHASSIS_STATE_THETA_L] = 0.025f,
+        [CHASSIS_STATE_THETA_L] = 0.0f,
         [CHASSIS_STATE_D_THETA_L] = 0.0f,
-        [CHASSIS_STATE_THETA_R] = 0.025f,
+        [CHASSIS_STATE_THETA_R] = 0.0f,
         [CHASSIS_STATE_D_THETA_R] = 0.0f,
         [CHASSIS_STATE_THETA_B] = 0.0f,
         [CHASSIS_STATE_D_THETA_B] = 0.0f,

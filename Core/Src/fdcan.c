@@ -26,6 +26,8 @@
 
 FDCAN_HandleTypeDef hfdcan1;
 FDCAN_HandleTypeDef hfdcan2;
+/* 板间通信专用总线。CubeMX 不可用，本实例及其 MSP/中断为手工添加。 */
+FDCAN_HandleTypeDef hfdcan3;
 
 /* FDCAN1 init function */
 void MX_FDCAN1_Init(void)
@@ -124,6 +126,55 @@ void MX_FDCAN2_Init(void)
 
 }
 
+void MX_FDCAN3_Init(void)
+{
+
+  /* USER CODE BEGIN FDCAN3_Init 0 */
+
+  /* USER CODE END FDCAN3_Init 0 */
+
+  /* USER CODE BEGIN FDCAN3_Init 1 */
+
+  /* USER CODE END FDCAN3_Init 1 */
+  hfdcan3.Instance = FDCAN3;
+  hfdcan3.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
+  hfdcan3.Init.Mode = FDCAN_MODE_NORMAL;
+  hfdcan3.Init.AutoRetransmission = DISABLE;
+  hfdcan3.Init.TransmitPause = DISABLE;
+  hfdcan3.Init.ProtocolException = DISABLE;
+  hfdcan3.Init.NominalPrescaler = 3;
+  hfdcan3.Init.NominalSyncJumpWidth = 10;
+  hfdcan3.Init.NominalTimeSeg1 = 29;
+  hfdcan3.Init.NominalTimeSeg2 = 10;
+  hfdcan3.Init.DataPrescaler = 3;
+  hfdcan3.Init.DataSyncJumpWidth = 10;
+  hfdcan3.Init.DataTimeSeg1 = 29;
+  hfdcan3.Init.DataTimeSeg2 = 10;
+    /* 三个实例共享 2560 字 Message RAM，按 CubeMX 的三等分取 1706。 */
+  hfdcan3.Init.MessageRAMOffset = 1706;
+  hfdcan3.Init.StdFiltersNbr = 1;
+  hfdcan3.Init.ExtFiltersNbr = 0;
+  hfdcan3.Init.RxFifo0ElmtsNbr = 16;
+  hfdcan3.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
+  hfdcan3.Init.RxFifo1ElmtsNbr = 0;
+  hfdcan3.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
+  hfdcan3.Init.RxBuffersNbr = 0;
+  hfdcan3.Init.RxBufferSize = FDCAN_DATA_BYTES_8;
+  hfdcan3.Init.TxEventsNbr = 0;
+  hfdcan3.Init.TxBuffersNbr = 0;
+  hfdcan3.Init.TxFifoQueueElmtsNbr = 16;
+  hfdcan3.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
+  hfdcan3.Init.TxElmtSize = FDCAN_DATA_BYTES_8;
+  if (HAL_FDCAN_Init(&hfdcan3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN FDCAN3_Init 2 */
+
+  /* USER CODE END FDCAN3_Init 2 */
+
+}
+
 static uint32_t HAL_RCC_FDCAN_CLK_ENABLED=0;
 
 void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* fdcanHandle)
@@ -214,6 +265,49 @@ void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* fdcanHandle)
   /* USER CODE BEGIN FDCAN2_MspInit 1 */
 
   /* USER CODE END FDCAN2_MspInit 1 */
+  }
+  else if(fdcanHandle->Instance==FDCAN3)
+  {
+  /* USER CODE BEGIN FDCAN3_MspInit 0 */
+
+  /* USER CODE END FDCAN3_MspInit 0 */
+
+  /** Initializes the peripherals clock
+  */
+    PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_FDCAN;
+    PeriphClkInitStruct.FdcanClockSelection = RCC_FDCANCLKSOURCE_PLL;
+    if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    /* FDCAN3 clock enable */
+    HAL_RCC_FDCAN_CLK_ENABLED++;
+    if(HAL_RCC_FDCAN_CLK_ENABLED==1){
+      __HAL_RCC_FDCAN_CLK_ENABLE();
+    }
+
+    __HAL_RCC_GPIOD_CLK_ENABLE();
+    /**FDCAN3 GPIO Configuration
+    PD12     ------> FDCAN3_RX
+    PD13     ------> FDCAN3_TX
+    注意 FDCAN3 在 PD12/PD13 上是 AF5，不是 FDCAN1/2 的 AF9。
+    */
+    GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_13;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF5_FDCAN3;
+    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+    /* FDCAN3 interrupt Init */
+    HAL_NVIC_SetPriority(FDCAN3_IT0_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(FDCAN3_IT0_IRQn);
+    HAL_NVIC_SetPriority(FDCAN3_IT1_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(FDCAN3_IT1_IRQn);
+  /* USER CODE BEGIN FDCAN3_MspInit 1 */
+
+  /* USER CODE END FDCAN3_MspInit 1 */
   }
 }
 

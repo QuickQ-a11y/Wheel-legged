@@ -73,6 +73,15 @@ typedef struct
 
 extern Remote_t Remote;
 
+/**
+ * @brief 由拨杆位置和滚轮推导出模式请求与腿长请求。
+ *
+ * 这份映射与接收机协议无关：DT7/DR16 和板间 CAN 两个数据源产出的都是归一化后的
+ * 摇杆、拨杆和滚轮，模式和腿长统一在这里推导，保证换数据源时行为完全一致。
+ * 具体档位对应哪个模式由上面的 REMOTE_MAP_* 决定。
+ */
+void Remote_ApplyMapping(Remote_t *remote);
+
 #ifdef __cplusplus
 }
 #endif

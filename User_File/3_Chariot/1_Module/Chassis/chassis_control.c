@@ -158,9 +158,9 @@ static uint8_t Angle_In_Range(float angle_rad,
  *
  * 取自ZJU式121。他们的原话：倒地后IMU的姿态解算可能已经跨过奇异区、
  * 四元数收敛到错误分支，而重力方向的加速度投影始终可靠。
- * 本机实测印证了这一点：机体倾过90度以后 fall_pitch 会折返，底朝天时的
- * 读数和直立分不开——原先"用 fall_pitch 替掉 imu.pitch 以躲开折返"的做法
- * 只是把折返从一个量搬到了另一个量，并没有解决问题。
+ * 本机实测印证了这一点：机体倾过90度以后 pitch 会折返（pi-pitch），底朝天
+ * 读0、和直立分不开。曾经用加速度 atan2 另算过一个全角 fall_pitch 想绕开
+ * 折返，实测它折返得一模一样，已经删掉。
  * 凡是"能不能直接站/要不要先翻身"这类判断都必须过这道门，姿态角只允许
  * 在这道门放行之后再用（ZJU也是这个顺序：Swing和DrawBack的退出才看pitch）。
  */
@@ -366,6 +366,35 @@ static void State_Enter(Chassis_State_t state)
                 (leg_valid != 0U) ? Chassis.leg[side].L0
                                   : Chassis_Config.leg[side].target_L0;
         }
+
+        if (state == CHASSIS_FALLING_TO_STAND)
+        {
+            /*
+             * 收腿站起的目标角按腿锁存一次。腿不许跨过 phi0_barrier：
+             * 在正前方（phi0接近0）直接往下转会把腿怼进地里卡住，那一侧必须
+             * 绕远路——从机体正上方绕到后方再转到下方。
+             * 做法是把圆在屏障处剪开、展成[0,2pi)，在展开坐标里直着走到
+             * bench_phi0 即可，行程的符号就是转向，屏障自动绕开。
+             * 只锁一次：屏障本身是不连续点，腿正好停在那儿时两个方向差2pi，
+             * 每拍重算会让腿在那里掉头。
+             */
+            float barrier = Chassis_Config.recovery.phi0_barrier;
+            float u_target = fmodf(
+                Chassis_Config.recovery.bench_phi0 - barrier + CHASSIS_TWO_PI,
+                CHASSIS_TWO_PI);
+
+            for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+            {
+                float u_now = fmodf(
+                    Chassis.leg[side].phi0 - barrier + CHASSIS_TWO_PI,
+                    CHASSIS_TWO_PI);
+
+                Chassis.drawback_goal_phi0[side] =
+                    (leg_valid != 0U) ?
+                        (Chassis.leg[side].phi0_total + (u_target - u_now)) :
+                        Chassis_Config.recovery.bench_phi0;
+            }
+        }
     }
     else if (state == CHASSIS_STEP)
     {
@@ -542,21 +571,6 @@ void Chassis_State_Update(void)
     uint32_t active_fault;
     uint32_t last_output_fault;
 
-    /*
-     * 0. 重力矢量俯仰角。必须放在任何 return 之前每周期更新：模式边沿那一拍
-     * 就要用它判姿态，只在 FALLEN 里更新会读到陈旧值，低通也得一直是热的。
-     * 角度差先归一化再滤波，机体接近 ±pi 时不会穿过断点被滤向反方向。
-     */
-    Chassis.fall_pitch = Algorithm_AngleNormalizeRad(
-        Chassis.fall_pitch +
-        (Chassis_Config.recovery.fall_pitch_filter *
-         Algorithm_AngleNormalizeRad(
-             atan2f(Chassis_Config.imu.fall_accel_x_scale *
-                        Chassis.imu.accel_raw[0],
-                    Chassis_Config.imu.fall_accel_z_scale *
-                        Chassis.imu.accel_raw[2]) -
-             Chassis.fall_pitch)));
-
     /* 1. 外部主动零力具有最高优先级，不进入任何闭环控制。 */
     if (Chassis.mode == CHASSIS_MODE_ZERO_FORCE)
     {
@@ -604,14 +618,14 @@ void Chassis_State_Update(void)
          * 能否直接进入站立：左右腿正解有效、机体倾角较小且两条虚拟腿都
          * 位于准备角区间；正解无效时也放行，中间量继续计算，最终输出
          * 由故障门封锁。TOP和FOLLOW共用同一个姿态门。
-         * ⚠ 这里必须先过 Body_Upward()。fall_pitch 同样会折返——实测底朝天
-         * 时它的读数和直立分不开——只查它的话底朝天会被判成"可以站"，
-         * 直接跳过自救去跑LQR。姿态角只在 az 确认机体朝上之后才可信。
+         * ⚠ 这里必须先过 Body_Upward()。姿态角过90度会折返，实测底朝天时
+         * 的读数和直立分不开，只查它的话底朝天会被判成"可以站"、跳过自救
+         * 直接跑LQR。姿态角只在 az 确认机体朝上之后才可信。
          */
         attitude_ready =
             ((leg_valid_flag == 0U) ||
              ((Body_Upward() != 0U) &&
-              (fabsf(Chassis.fall_pitch) <=
+              (fabsf(theta_b) <=
                Chassis_Config.recovery.direct_pitch) &&
               (Angle_In_Range(
                    Chassis.leg[CHASSIS_LEFT].phi0_total,
@@ -908,7 +922,7 @@ static void Recovery_Turnover(float dt)
     /*
      * 扫掠方向是纯机构常量，不看姿态角——ZJU的原则："方向为旋转后恰腿摆
      * 在后面对应的方向"，跟机器人当前朝哪边倒无关。
-     * 也不能看 fall_pitch：实测它过90度会折返，底朝天读0，和直立分不开，
+     * 也不能看姿态角：实测它过90度会折返，底朝天读0，和直立分不开，
      * 拿它选方向等于拿噪声选方向。整个翻身阶段只信竖向加速度。
      * 只锁存一次是为了防抖，两腿共用同一个值——不同步则机体翻不过来。
      */
@@ -969,9 +983,9 @@ static void Recovery_Turnover(float dt)
     }
 
     /*
-     * 退出判据用竖向加速度而不是 fall_pitch。ZJU的理由：倒地后四元数可能
-     * 收敛到错误分支，而重力方向的加速度投影始终可靠。对我们还多一条好处：
-     * az 是标量阈值，没有 fall_pitch 在 ±pi 附近符号跳变的问题。
+     * 退出判据用竖向加速度而不是姿态角。ZJU的理由：倒地后四元数可能收敛
+     * 到错误分支，而重力方向的加速度投影始终可靠。对我们还多一条：pitch
+     * 过90度会折返，底朝天读0，根本区分不出机体是正是反。
      * ZJU式122的带惩罚计数：满足加dt，不满足直接减半。翻身过程中机体会晃，
      * 硬清零计数永远攒不起来；减半既容忍偶发抖动，又拒绝断续满足。
      */
@@ -1005,7 +1019,7 @@ static void Recovery_Turnover(float dt)
  * 对应ZJU §13.6 的 Swing。机体此时已经翻正，两腿各自就近摆进窗口即可，
  * 所以扫掠方向和卡死反向都按腿独立处理。
  */
-static void Recovery_Swing(float dt)
+static void Recovery_Swing(float dt, float theta_b)
 {
     const Chassis_Recovery_Config_t *recovery = &Chassis_Config.recovery;
     float theta[CHASSIS_LEG_COUNT];
@@ -1018,7 +1032,7 @@ static void Recovery_Swing(float dt)
     /*
      * 机体被甩翻回去就退回翻身阶段重来。摆腿时两条腿正在扫，机体有可能
      * 被自己的角动量带过头翻扣过去，这时继续摆腿是没有意义的。
-     * 判据只看 az：fall_pitch 折返，倒扣时读数和直立分不开。
+     * 判据只看 az：姿态角折返，倒扣时读数和直立分不开。
      * ZJU的Recovery是单向状态机、没有这条回退——他们的翻身速率高、一次
      * 到位；本机扫掠速率还在保守档，甩过头是现实存在的情况。
      * 计数用和翻身退出同一套带惩罚逻辑，两个方向共用一个累加器，
@@ -1052,13 +1066,13 @@ static void Recovery_Swing(float dt)
      * 一侧；我们的翻身方向由 turnover_dir_sign 决定、不保证是那一侧，
      * 所以目标仍然要跟着倒地方向对称取符号，否则往一个方向倒时要多转约
      * 两倍窗口中心角——这就是"舍近求远"。
-     * 只在本阶段第一拍锁存：机体转过竖直位时 fall_pitch 会过零，每拍重算
-     * 会让参考角来回翻符号、腿原地抖。
+     * 只在本阶段第一拍锁存：机体转过竖直位时 pitch 会过零，每拍重算会让
+     * 参考角来回翻符号、腿原地抖。
      */
     if (Chassis.recovery_theta_ref == 0.0f)
     {
         Chassis.recovery_theta_ref =
-            ((Chassis.fall_pitch < 0.0f) ? -1.0f : 1.0f) *
+            ((theta_b < 0.0f) ? -1.0f : 1.0f) *
             (recovery->theta_min + recovery->theta_max) * 0.5f;
     }
     theta_ref = Chassis.recovery_theta_ref;
@@ -1067,12 +1081,13 @@ static void Recovery_Swing(float dt)
     for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
     {
         /*
-         * 这里必须用 fall_pitch 而不是 theta_b：theta 是虚拟腿相对大地竖直方向
-         * 的角，机体倒过90度以后 EKF pitch 会折返，theta 会跟着算成另一个值。
+         * theta 是虚拟腿相对大地竖直方向的角，所以要把机体倾角加回去。
+         * 这里用 theta_b 是安全的：摆腿只在 Body_Upward() 放行后进入、
+         * 退出也再查一次 az，全程 |theta_b| 都在不折返的区间内。
          */
         theta[side] = Algorithm_AngleNearestEquivalentRad(
             Chassis.leg[side].phi0_total -
-                Chassis_Config.phi0_offset + Chassis.fall_pitch,
+                Chassis_Config.phi0_offset + theta_b,
             theta_ref);
         /*
          * 窗口跟着 theta_ref 的符号走。这里不能写成 fabsf(theta)：
@@ -1084,11 +1099,17 @@ static void Recovery_Swing(float dt)
                 1U : 0U;
         rotate_rate[side] = recovery->rotate_rate;
 
-        /* 扫掠方向按就近原则，每条腿各锁一次。 */
+        /*
+         * 扫掠方向每条腿各锁一次。腿在卡滞屏障下侧时不能用就近原则——那条
+         * 近路要穿过屏障、把腿怼进地里卡住；改成强制反转，从机体正上方绕过去。
+         * 屏障上侧仍按就近：全周扫掠验证过，上侧的近路不会跨屏障。
+         * 判据用主值 phi0，和收腿站起同一个口径。
+         */
         if (Chassis.recovery_direction[side] == 0.0f)
         {
             Chassis.recovery_direction[side] =
-                (theta[side] < theta_ref) ? 1.0f : -1.0f;
+                (Chassis.leg[side].phi0 < recovery->phi0_barrier) ?
+                    -1.0f : ((theta[side] < theta_ref) ? 1.0f : -1.0f);
         }
 
         /* 摆腿阶段两腿本来就不要求同步，卡死可以只反这一条。 */
@@ -1117,7 +1138,7 @@ static void Recovery_Swing(float dt)
      */
     if ((fabsf(theta[CHASSIS_LEFT] - theta[CHASSIS_RIGHT]) >
           recovery->theta_diff) &&
-        (fabsf(Chassis.fall_pitch) > recovery->ready_pitch))
+        (fabsf(theta_b) > recovery->ready_pitch))
     {
         if (fabsf(theta[CHASSIS_LEFT] - theta_ref) >
             fabsf(theta[CHASSIS_RIGHT] - theta_ref))
@@ -1143,7 +1164,7 @@ static void Recovery_Swing(float dt)
                         recovery->extend_L0,
                         recovery->turnover_L0_rate * dt);
         if ((theta_flag[side] == 0U) ||
-            (fabsf(Chassis.fall_pitch) > recovery->direct_pitch))
+            (fabsf(theta_b) > recovery->direct_pitch))
         {
             Chassis.leg[side].target_phi0 +=
                 Chassis.recovery_direction[side] * rotate_rate[side] * dt;
@@ -1158,13 +1179,13 @@ static void Recovery_Swing(float dt)
     /*
      * 双腿到位且机体倾角足够小并持续稳定后才进入收腿站起阶段。
      * Body_Upward() 不能省：摆腿过程中腿在扫，机体有可能被自己甩过头翻扣
-     * 过去，而 fall_pitch 折返后 170 度也只读出 0.17、照样满足 ready_pitch，
-     * 于是带着倒扣的姿态判"到位"交给收腿站起。az 是这里唯一可信的量。
+     * 过去，而姿态角折返后 170 度也只读出 0.17、照样满足 ready_pitch，于是
+     * 带着倒扣的姿态判"到位"交给收腿站起。az 是这里唯一可信的量。
      */
     if ((theta_flag[CHASSIS_LEFT] != 0U) &&
         (theta_flag[CHASSIS_RIGHT] != 0U) &&
         (Body_Upward() != 0U) &&
-        (fabsf(Chassis.fall_pitch) <= recovery->ready_pitch))
+        (fabsf(theta_b) <= recovery->ready_pitch))
     {
         Chassis.stable_time += dt;
     }
@@ -1209,11 +1230,14 @@ static void Recovery_Drawback(float dt, float theta_b)
             Move_Toward(Chassis.leg[side].target_L0,
                         recovery->bench_L0,
                         recovery->drawback_L0_rate * dt);
+        /*
+         * 走进 FALLING_TO_STAND 时锁存的目标，已经绕开了卡滞屏障。
+         * 这里不能再用 AngleNearestEquivalentRad 取最短弧——绕远路时它会
+         * 指回来，腿掉头就撞进卡滞区，那正是实机上"腿卡住"的成因。
+         */
         Chassis.leg[side].target_phi0 =
             Move_Toward(Chassis.leg[side].target_phi0,
-                        Algorithm_AngleNearestEquivalentRad(
-                            recovery->bench_phi0,
-                            Chassis.leg[side].target_phi0),
+                        Chassis.drawback_goal_phi0[side],
                         recovery->drawback_phi0_rate * dt);
         Chassis.leg[side].target_phi0 = Algorithm_LimitRange(
             Chassis.leg[side].target_phi0,
@@ -1299,11 +1323,11 @@ void Chassis_Recovery(void)
         /*
          * 姿态已经满足准备条件时两段都跳过，直接收腿站起。
          * ZJU把 TurnOver 和 Swing 都标成"可跳过"，就是这条。
-         * Body_Upward() 不能省：fall_pitch 过90度会折返，底朝天时读数和
-         * 直立分不开，只查它的话会带着机体倒扣的姿态直接进收腿站起。
+         * Body_Upward() 不能省：姿态角过90度会折返，底朝天时读数和直立
+         * 分不开，只查它的话会带着机体倒扣的姿态直接进收腿站起。
          */
         if ((Body_Upward() != 0U) &&
-            (fabsf(Chassis.fall_pitch) <= recovery->direct_pitch) &&
+            (fabsf(theta_b) <= recovery->direct_pitch) &&
             (Angle_In_Range(
                  Chassis.leg[CHASSIS_LEFT].phi0_total,
                  recovery->phi0_min,
@@ -1321,7 +1345,7 @@ void Chassis_Recovery(void)
         }
         else
         {
-            Recovery_Swing(dt);
+            Recovery_Swing(dt, theta_b);
         }
 
         /* 上面可能已经切走；超时判在阶段推进之后，同一拍成功优先于超时。 */

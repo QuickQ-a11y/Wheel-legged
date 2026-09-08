@@ -1,6 +1,7 @@
 #include "task_can_dispatch.h"
 
 #include "task_can.h"
+#include "device_board.h"
 #include "device_motor_dji.h"
 #include "device_motor_dm.h"
 
@@ -9,7 +10,8 @@
  *
  * 当前硬件映射：
  * FDCAN1 接右侧 2 个 DM 髋关节电机和 2 个 DJI 轮电机；
- * FDCAN2 接左侧 2 个 DM 髋关节电机。
+ * FDCAN2 接左侧 2 个 DM 髋关节电机；
+ * FDCAN3 接云台板下发的板间报文。
  */
 void CAN_Task_RxMessageCallback(const task_can_rx_message_t *message)
 {
@@ -18,6 +20,15 @@ void CAN_Task_RxMessageCallback(const task_can_rx_message_t *message)
                                  message->identifier,
                                  message->data) != 0U))
     {
+        return;
+    }
+
+    if (message->bus == APP_CAN_BUS_FDCAN3)
+    {
+        if (message->length == APP_BOARD_FRAME_LEN)
+        {
+            Board_UpdateFeedback(message->identifier, message->data);
+        }
         return;
     }
 

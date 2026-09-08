@@ -1,6 +1,7 @@
 #include "task_remote.h"
 
 #include "app_config.h"
+#include "device_board.h"
 #include "driver_uart.h"
 #include "main.h"
 #include "usart.h"
@@ -165,10 +166,7 @@ static void Remote_Task_ProcessFrame(task_remote_state_t *state,
     }
 
     state->dr16Data = parsed;
-    DR16_MakeRemote(&parsed,
-                    APP_DR16_DB,
-                    APP_DR16_DIAL,
-                    &converted);
+    DR16_MakeRemote(&parsed, APP_DR16_DB, &converted);
     if (state->online != 0U)
     {
         converted.online = 1U;
@@ -216,6 +214,18 @@ static void Remote_Task_Entry(void *argument)
         }
 
         nowTick = HAL_GetTick();
+
+        /*
+         * 两个数据源：板间 CAN 优先，超时才回退到本地 DT7/DR16。
+         * 板间在线判定在 device_board 里做，这里只选源。两源都离线时
+         * remote 保持 DR16 路径给出的全零快照，online 为 0，底盘据此急停。
+         */
+        if (Board_IsOnline(nowTick) != 0U)
+        {
+            Board_GetRemote(&remote);
+        }
+        Remote_ApplyMapping(&remote);
+
         if ((state.online != 0U) &&
             ((nowTick - state.lastValidTick) > APP_REMOTE_TIMEOUT_TICKS))
         {
