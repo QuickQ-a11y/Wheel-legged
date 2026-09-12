@@ -60,11 +60,26 @@ static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) !=
 #define APP_DM_PMIN (-12.5f)
 #define APP_DM_PMAX 12.5f
 
-/* 速度单位 rad/s，力矩单位 N*m；范围按当前 J8009P 协议配置。 */
+/*
+ * 速度单位 rad/s，力矩单位 N*m；范围按当前 J8009P 协议配置。
+ *
+ * ⚠⚠ APP_DM_TOR_MIN/MAX 必须与达妙上位机烧进电机的 TMAX 寄存器【逐位一致】，
+ * 否则所有力矩（命令和反馈两个方向）都会按两者之比缩放。
+ *
+ * 2026-09-12 由 ±15 放宽到 ±25，原因是装了 350N 气弹簧：抵消它之后站立本身就要
+ * 6.1~10.9 N*m（装弹簧前只要 3.6~4.7），15 N*m 只剩约 4 N*m 给平衡用。
+ * 25 N*m 把余量还原到装弹簧前的水平，也仍在 J8009P 的能力之内。
+ *
+ * ⚠ 改这一对和烧 TMAX 是【两件事，顺序不能反】：
+ *   先改固件(这里)、后烧电机 —— 中间窗口固件按25编码、电机按15解码，力矩变成
+ *     命令值的 0.6 倍，偏弱，安全；
+ *   先烧电机、后改固件 —— 中间窗口力矩变成命令值的 1.67 倍，危险，不许这么做。
+ *   窗口期内反馈力矩会被高估 1.67 倍，离地观测的 Fn 不可信，别在这期间标阈值。
+ */
 #define APP_DM_VEL_MIN (-30.0f)
 #define APP_DM_VEL_MAX 30.0f
-#define APP_DM_TOR_MIN (-15.0f)
-#define APP_DM_TOR_MAX 15.0f
+#define APP_DM_TOR_MIN (-25.0f)
+#define APP_DM_TOR_MAX 25.0f
 
 #define APP_CAN_PERIOD_TICKS 1U
 /* IMU和底盘控制统一按1 kHz运行，延迟时由各任务使用实际dt补偿。 */

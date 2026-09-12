@@ -313,6 +313,8 @@ typedef struct
      * 同步变快，切入瞬间对平衡的扰动更大——先架空确认切入不发飘再落地。
      * 参考：HERO_LEG 的腿长目标完全没有斜坡(硬阶跃)，但它有 450N 气弹簧
      * 托底、腿长 PID 也到 kp=2000/限幅180N，数值不能直接照搬。
+     * 本车现在也有气弹簧了(见 Chassis_Spring_Config_t)，但补偿正确时闭环与
+     * 无弹簧等价，斜坡该留还得留——气弹簧买到的是关节力矩余量，不是柔顺性。
      */
     float L0_rate;
     /*
@@ -405,6 +407,60 @@ static inline float Chassis_Model_Mass(const Chassis_Model_Config_t *config)
     //        2.0f * config->wheel_mass;
     return config->body_mass;
 }
+
+/**
+ * @brief 气弹簧机械参数。每条腿一根，跨过膝关节接在 l1 杆和 l2 杆之间。
+ *
+ * 几何关系（本车 l5=0，两根主动杆共轴于髋点 O，所以三角形 O-B-C 的三边
+ * 就是 l1、l2、L0，膝角只是腿长的函数）：
+ *
+ *         O  髋轴                  P = l1 杆上的铰点（靠髋侧）
+ *        / \                      Q = l2 杆上的铰点（靠膝侧）
+ *   l1  P   \ l4                  B = 膝点，alpha = 角 OBC
+ *      /     \                    s = |PQ| = 气弹簧两铰点中心距
+ *     B--Q    D
+ *      \      /
+ *   l2  \    / l3
+ *         C  轮轴，L0 = |OC|
+ *
+ *   alpha(L0) = acos((l1^2 + l2^2 - L0^2) / (2*l1*l2))
+ *   s(L0)     = sqrt(r1^2 + r2^2 - 2*r1*r2*cos(alpha - mount_offset))
+ *   F0_spring = force * ds/dL0
+ *
+ * ⚠ 因为 P、Q 分别固连在两根杆上，两者相对位姿只由膝角决定，而膝角只依赖
+ * L0，所以 ds/dphi0 恒等于零——【气弹簧没有 Tp 分量】。这一条依赖 l5=0，
+ * 换成 l5 不为零的机构必须重新推导。SPR 就是在这一项上估错、只好用一个负的
+ * 离地阈值兜底，本车从几何上就没有这个问题。
+ *
+ * ⚠ 杠杆比 ds/dL0 在本车工作区间内变化约 2.4 倍（L0=0.10 时约 0.13，
+ * L0=0.35 时约 0.31），而它要扛的体重是常数。所以气弹簧只在某一个腿长上
+ * 刚好托平，其余腿长电机都要补或者反向拉，必须按几何实时算，不能填常数。
+ */
+typedef struct
+{
+    /* 总开关。默认0：杠杆比公式和装配方向没在实机上验证过之前不许开。 */
+    uint8_t enable_flag;
+    /*
+     * 单根气弹簧标称推力，N。气弹簧把两端【推开】的方向为正。
+     * 手动把腿压短时气弹簧应当被压缩；若实机相反，说明装配拓扑与上图相反，
+     * 这里填负值，并且必须先复核 r1/r2 的量取基准。
+     */
+    float force;
+    float r1;            /* 膝点销轴中心到 l1 杆上铰点中心的距离，m。 */
+    float r2;            /* 膝点销轴中心到 l2 杆上铰点中心的距离，m。 */
+    /*
+     * 两个铰点各自偏离所在杆轴线的角度之和，rad。铰点正好在杆轴线上时填0。
+     * 难以直接量角度时，改为在两个已知腿长下各量一次 s，反解本项更可靠。
+     */
+    float mount_offset;
+    /*
+     * 自由长度和行程，m。【不进控制公式】，只供主机单测校核 s(L0) 在整个
+     * 腿长区间内没有顶到行程两端——顶到就是硬限位，气弹簧模型在那里完全失效。
+     * 填0表示尚未录入，单测跳过该项校核。
+     */
+    float free_length;
+    float stroke;
+} Chassis_Spring_Config_t;
 
 /**
  * @brief 打滑、离地、转向和卡腿观测参数。
@@ -561,6 +617,7 @@ typedef struct
 {
     Chassis_Leg_Config_t leg[CHASSIS_LEG_COUNT];
     Chassis_Model_Config_t model;
+    Chassis_Spring_Config_t spring;
     Chassis_IMU_Config_t imu;
     Chassis_Wheel_Config_t wheel;
     Chassis_Kalman_Config_t speed_kalman;

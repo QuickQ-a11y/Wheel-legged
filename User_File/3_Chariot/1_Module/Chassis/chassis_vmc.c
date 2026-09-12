@@ -307,6 +307,71 @@ static uint8_t VMC_Matrix_Calc(const Chassis_Leg_Config_t *config,
 }
 
 /**
+ * @brief 由当前腿长算气弹簧折算到虚拟腿轴向的等效支撑力。
+ *
+ * 本车 l5=0，两根主动杆共轴于髋点，所以三角形 O-B-C 的三边就是 l1、l2、L0，
+ * 膝角 alpha 只是 L0 的函数；气弹簧两个铰点分别固连在 l1 和 l2 上，两者相对
+ * 位姿只由 alpha 决定，因此气弹簧长度 s 也只是 L0 的函数，虚功给出
+ *
+ *     F0_spring = force * ds/dL0，        Tp_spring 恒为 0
+ *
+ * 完整几何图和参数含义见 Chassis_Spring_Config_t 的注释。
+ */
+float VMC_Spring_Force_Calc(const Chassis_Spring_Config_t *spring,
+                            const Chassis_Leg_Config_t *config,
+                            const Chassis_Leg_t *leg)
+{
+    const Chassis_Geometry_Config_t *geometry = &config->geometry;
+    float link_product;
+    float cos_alpha;
+    float alpha;
+    float sin_alpha;
+    float included;
+    float s;
+    float ds_dL0;
+
+    if ((spring->enable_flag == 0U) || (leg->valid_flag == 0U))
+    {
+        return 0.0f;
+    }
+
+    link_product = geometry->l1 * geometry->l2;
+    /* 连杆长度退化或腿长为零时膝角无定义。 */
+    if ((link_product < VMC_LEN_EPS) || (leg->L0 < VMC_LEN_EPS))
+    {
+        return 0.0f;
+    }
+
+    cos_alpha = ((geometry->l1 * geometry->l1) +
+                 (geometry->l2 * geometry->l2) -
+                 (leg->L0 * leg->L0)) / (2.0f * link_product);
+    /* L0 落在 |l1-l2| ~ l1+l2 之外时三角形不闭合，先夹住 acos 的定义域。 */
+    cos_alpha = Algorithm_LimitRange(cos_alpha, -1.0f, 1.0f);
+    alpha = acosf(cos_alpha);
+    sin_alpha = sinf(alpha);
+    /* 腿完全伸直或完全折叠是几何奇异点，膝角对腿长的导数发散。 */
+    if (fabsf(sin_alpha) < VMC_SIN_EPS)
+    {
+        return 0.0f;
+    }
+
+    included = alpha - spring->mount_offset;
+    s = sqrtf((spring->r1 * spring->r1) + (spring->r2 * spring->r2) -
+              (2.0f * spring->r1 * spring->r2 * cosf(included)));
+    /* 两铰点重合时气弹簧长度对膝角的导数无定义。 */
+    if (s < VMC_LEN_EPS)
+    {
+        return 0.0f;
+    }
+
+    /* ds/dL0 = (ds/dalpha)*(dalpha/dL0)，两段都用解析式，不做数值差分。 */
+    ds_dL0 = ((spring->r1 * spring->r2 * sinf(included)) / s) *
+             (leg->L0 / (link_product * sin_alpha));
+
+    return spring->force * ds_dL0;
+}
+
+/**
  * @brief 使用虚功关系把虚拟腿广义力映射为两个主动关节力矩。
  */
 uint8_t VMC_Torque_Calc(const Chassis_Leg_Config_t *config,

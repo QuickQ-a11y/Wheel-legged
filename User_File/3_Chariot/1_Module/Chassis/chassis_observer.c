@@ -274,11 +274,17 @@ void Chassis_Ground_Update(const Chassis_Config_t *config, Chassis_t *chassis)
              * 地面反力；我们用实测力，那几项是真实存在的物理力，减掉就错了。
              * 对照HERO时不要把"少了四项减法"当成遗漏。
              *
+             * ⚠ 气弹簧是唯一要【加】回去的一项，方向与上面那几项相反：它是真实
+             * 存在、地面确实感受得到、但【不经过电机力矩】的力，所以反解不出来。
+             * 不加回来，站立时 Fn_ratio 会整体偏低，所有按单腿静载比例定义的阈值
+             * （离地、落地、离地推力、卡腿）会一起静默偏掉且没有任何报警。
+             * 气弹簧没有 Tp 分量（几何依据见 Chassis_Spring_Config_t），故 Tp 不动。
+             *
              * 腿和轮的自重也压在地面上，与 Observer_Static_Load() 同口径，
              * 否则站立时 Fn_ratio 不会落在1.0附近，比例阈值就名不副实。
              */
             float Fn =
-                (ground->force[side].F0 * cosf(leg->theta) +
+                ((ground->force[side].F0 + leg->F0_spring) * cosf(leg->theta) +
                  ground->force[side].Tp * sinf(leg->theta) / leg->L0) +
                 (config->model.leg_mass + config->model.wheel_mass) *
                     (config->model.gravity + leg_accel);

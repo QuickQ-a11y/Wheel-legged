@@ -26,6 +26,7 @@ typedef struct
     float target_phi0;           /* 当前连续目标腿角，rad。 */
     float F0;                    /* 虚拟腿轴向力，N；大于零为伸腿撑地。 */
     float Tp;                    /* 虚拟腿摆矩，N*m。 */
+    float F0_spring;             /* 气弹簧折算的轴向力，N；大于零为伸腿撑地。 */
     float K_L0_fit;              /* 限幅后实际拟合腿长，m。 */
     uint8_t valid_flag;          /* 本轮五连杆状态有数学定义。 */
 } Chassis_Leg_t;
@@ -84,6 +85,17 @@ uint8_t VMC_Torque_Calc(const Chassis_Leg_Config_t *config,
                         float F0,
                         float Tp,
                         VMC_Torque_t *torque);
+
+/**
+ * @brief 由当前腿长算气弹簧折算到虚拟腿轴向的等效支撑力，N。
+ *
+ * 返回值与本工程 F0 同号：大于零为伸腿撑地方向。几何推导、符号约定和
+ * "气弹簧没有 Tp 分量"的依据见 Chassis_Spring_Config_t 的注释。
+ * 开关关闭、腿状态无解或几何超出定义域时返回 0。
+ */
+float VMC_Spring_Force_Calc(const Chassis_Spring_Config_t *spring,
+                            const Chassis_Leg_Config_t *config,
+                            const Chassis_Leg_t *leg);
 
 /**
  * @brief 将phi1和phi4电机反馈力矩反解为虚拟支撑力和腿摆力矩。

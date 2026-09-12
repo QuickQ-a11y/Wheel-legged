@@ -207,6 +207,39 @@ static void assert_joint_request(void)
     assert(maximum_joint_request_nm > 0.0f);
 }
 
+/*
+ * 关节位置串级(Joint_Control)在 PID 输出之上还叠了气弹簧前馈，所以请求量的
+ * 上界必须现算：那一笔随腿长变，长腿上有十几个 N*m，写死一个数不是假过就是假挂。
+ * 这里按 Joint_Control 的同一口径重算一次，取该电机对应的那一路。
+ */
+static float joint_spring_ff_nm(uint32_t motor_index)
+{
+    uint32_t side;
+
+    for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+    {
+        const Chassis_Leg_Config_t *leg_config = &Chassis_Config.leg[side];
+        VMC_Torque_t torque;
+
+        if (VMC_Torque_Calc(leg_config, &Chassis.leg[side],
+                            -Chassis.leg[side].F0_spring, 0.0f,
+                            &torque) == 0U)
+        {
+            continue;
+        }
+        if (leg_config->joint[CHASSIS_JOINT_PHI1].motor_index == motor_index)
+        {
+            return fabsf(torque.T1);
+        }
+        if (leg_config->joint[CHASSIS_JOINT_PHI4].motor_index == motor_index)
+        {
+            return fabsf(torque.T4);
+        }
+    }
+
+    return 0.0f;
+}
+
 static void test_bench_control(void)
 {
     float maximum_request_nm = 0.0f;
@@ -239,10 +272,10 @@ static void test_bench_control(void)
     {
         float request_nm = fabsf(Chassis.output.T_joint_req[index]);
 
-        /* 请求量不再限幅，其量级由串级PID的输出限幅界定。 */
+        /* 请求量不再限幅，其量级由串级PID输出限幅加上气弹簧前馈界定。 */
         assert(request_nm <=
                Chassis_Config.recovery.joint_speed_pid.outputLimit +
-                   TEST_TOLERANCE);
+                   joint_spring_ff_nm(index) + TEST_TOLERANCE);
         if (request_nm > maximum_request_nm)
         {
             maximum_request_nm = request_nm;
@@ -824,9 +857,26 @@ static void test_remote_goal(void)
     assert_zero_output();
 }
 
+/*
+ * 小陀螺平移投影的期望值，与 Motion_Update 的公式同源。
+ *
+ * top.phase_lead 是实机标定量（当前 BIG 块是 PI），期望值必须从它反算：
+ * 早先这里写死了按 phase_lead=0 手算的 -0.10/0.25，标定一改就整片变红，
+ * 而红的是测试不是代码。断言真正要守住的是"参考角取自云台相对角而不是
+ * top_fai"、"yaw_scale 参与投影"、"d_y 走 sin 分量"这三件事。
+ */
+static float top_projection_expect(float yaw_rel, float d_s, float d_y)
+{
+    float phase = -(yaw_rel * Chassis_Config.follow.yaw_scale) +
+                  Chassis_Config.top.phase_lead;
+
+    return (d_s * cosf(phase)) + (d_y * sinf(phase));
+}
+
 static void test_top_projection(void)
 {
     float yaw_anchor_rad = 0.40f;
+    float forward_d_s;
     uint32_t index;
 
     Chassis_Init();
@@ -856,7 +906,8 @@ static void test_top_projection(void)
         -CHASSIS_HALF_PI / Chassis_Config.follow.yaw_scale;
     Chassis_Control();
 
-    assert(fabsf(Chassis.top_d_s + 0.10f) <
+    assert(fabsf(Chassis.top_d_s -
+                 top_projection_expect(Chassis.gimbal_yaw_rel, 0.25f, -0.10f)) <
            TEST_TOLERANCE);
     assert(fabsf(Chassis.lqr.target[CHASSIS_STATE_D_S] -
                  Chassis.top_d_s) < TEST_TOLERANCE);
@@ -871,10 +922,22 @@ static void test_top_projection(void)
     assert(Chassis.lqr.scale[CHASSIS_STATE_D_S] == 1.0f);
     assert(Chassis.lqr.scale[CHASSIS_STATE_D_FAI] == 1.0f);
 
-    /* 云台与车体同向时退化为车体系，前杆全额通过。 */
+    /* 云台与车体同向时投影角只剩 phase_lead 本身。 */
     Chassis.gimbal_yaw_rel = 0.0f;
     Chassis_Control();
-    assert(fabsf(Chassis.top_d_s - 0.25f) < TEST_TOLERANCE);
+    assert(fabsf(Chassis.top_d_s -
+                 top_projection_expect(0.0f, 0.25f, -0.10f)) < TEST_TOLERANCE);
+    forward_d_s = Chassis.top_d_s;
+
+    /*
+     * 与 phase_lead 取值无关的结构性判据：云台相对角转半圈，投影向量整体反号。
+     * 它守的是"参考角确实进了 cos/sin"，phase_lead 怎么标都不会让它失效。
+     */
+    Chassis.gimbal_yaw_rel = CHASSIS_PI / Chassis_Config.follow.yaw_scale;
+    Chassis_Control();
+    assert(fabsf(Chassis.top_d_s + forward_d_s) < TEST_TOLERANCE);
+    Chassis.gimbal_yaw_rel = 0.0f;
+    Chassis_Control();
 
     /* 板间链路掉线就没有可用参考方向，平移归零，只保留自转。 */
     Chassis.board_online_flag = 0U;
@@ -1531,7 +1594,13 @@ static void enter_all_off_ground(void)
         const Chassis_Leg_Config_t *leg_config = &Chassis_Config.leg[side];
         VMC_Torque_t torque;
 
-        assert(VMC_Torque_Calc(leg_config, &Chassis.leg[side], -30.0f, 0.0f,
+        /*
+         * -30N 说的是【腿的总轴向力】，而这里写进去的是电机反馈力矩。
+         * 装了气弹簧之后两者不再相等：气弹簧那份不经过电机，电机只欠差额。
+         * 不扣的话总力会凭空多出约100N，离地永远判不成立。
+         */
+        assert(VMC_Torque_Calc(leg_config, &Chassis.leg[side],
+                               -30.0f - Chassis.leg[side].F0_spring, 0.0f,
                                &torque) == 1U);
         Chassis.dm_motor[leg_config->joint[CHASSIS_JOINT_PHI1].motor_index]
             .torque_nm = torque.T1;
@@ -1625,7 +1694,13 @@ static void test_off_ground_push_L0_cap(void)
         const Chassis_Leg_Config_t *leg_config = &Chassis_Config.leg[side];
         VMC_Torque_t torque;
 
-        assert(VMC_Torque_Calc(leg_config, &Chassis.leg[side], -30.0f, 0.0f,
+        /*
+         * -30N 说的是【腿的总轴向力】，而这里写进去的是电机反馈力矩。
+         * 装了气弹簧之后两者不再相等：气弹簧那份不经过电机，电机只欠差额。
+         * 不扣的话总力会凭空多出约100N，离地永远判不成立。
+         */
+        assert(VMC_Torque_Calc(leg_config, &Chassis.leg[side],
+                               -30.0f - Chassis.leg[side].F0_spring, 0.0f,
                                &torque) == 1U);
         Chassis.dm_motor[leg_config->joint[CHASSIS_JOINT_PHI1].motor_index]
             .torque_nm = torque.T1;
@@ -1638,9 +1713,16 @@ static void test_off_ground_push_L0_cap(void)
            (Chassis_Config.lqr.L0_max - margin));
     assert(Chassis.leg[CHASSIS_RIGHT].L0 <
            (Chassis_Config.lqr.L0_max - margin));
-    /* 只有右腿拿到推力，左腿被保护线挡掉。 */
-    assert(fabsf((Chassis.leg[CHASSIS_RIGHT].F0 -
-                  Chassis.leg[CHASSIS_LEFT].F0) -
+    /*
+     * 只有右腿拿到推力，左腿被保护线挡掉。
+     * 比较前要先把气弹簧那份加回去：两条腿此刻【腿长不同】，F0_spring 也就不同，
+     * 而它已经在 Chassis_Control 里从各自的 F0 扣掉了。不还原就会把气弹簧的
+     * 左右差当成推力差，本用例验的是 fn_comp，不是气弹簧。
+     */
+    assert(fabsf(((Chassis.leg[CHASSIS_RIGHT].F0 +
+                   Chassis.leg[CHASSIS_RIGHT].F0_spring) -
+                  (Chassis.leg[CHASSIS_LEFT].F0 +
+                   Chassis.leg[CHASSIS_LEFT].F0_spring)) -
                  Chassis.ground.fn_comp[CHASSIS_RIGHT]) < 1.0e-3f);
 }
 
@@ -2262,10 +2344,63 @@ static void test_swing_short_arc_above_barrier(void)
     assert(Chassis.leg[CHASSIS_LEFT].target_phi0 > start_target);
 }
 
+/*
+ * 气弹簧的注入点和观测器必须口径一致：控制侧从 F0 里【扣掉】气弹簧，
+ * 观测侧再往 Fn 里【加回】同一份，两边抵消，地面仍应感受到完整静载。
+ *
+ * 这一对一旦只改了一边，站立时不报任何错、也不影响平衡，只是 Fn_ratio 整体
+ * 偏掉，于是离地/落地/卡腿这些按单腿静载比例定义的阈值全部一起失准——
+ * 是最难靠现象发现的那类错误，所以专门钉一条。
+ */
+static void test_spring_observer_consistency(void)
+{
+    uint32_t side;
+    uint32_t iteration;
+
+    Chassis_Init();
+    set_online_feedback();
+    set_symmetric_leg_pose(0.20f, CHASSIS_HALF_PI);
+    Chassis.mode = CHASSIS_MODE_FOLLOW;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_STANDING);
+
+    /* 电机出"静载 - 气弹簧"，也就是补偿正确时控制器真正会下发的那一份。 */
+    for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+    {
+        const Chassis_Leg_Config_t *leg_config = &Chassis_Config.leg[side];
+        float static_F0 = 0.5f * Chassis_Config.model.body_mass *
+                          Chassis_Config.model.gravity *
+                          cosf(Chassis.leg[side].theta);
+        VMC_Torque_t torque;
+
+        assert(VMC_Torque_Calc(leg_config, &Chassis.leg[side],
+                               static_F0 - Chassis.leg[side].F0_spring,
+                               0.0f, &torque) == 1U);
+        Chassis.dm_motor[leg_config->joint[CHASSIS_JOINT_PHI1].motor_index]
+            .torque_nm = torque.T1;
+        Chassis.dm_motor[leg_config->joint[CHASSIS_JOINT_PHI4].motor_index]
+            .torque_nm = torque.T4;
+    }
+
+    /* Fn 走一阶低通，要跑够拍数才收敛。 */
+    for (iteration = 0U; iteration < 2000U; iteration++)
+    {
+        Chassis_Control();
+    }
+
+    for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+    {
+        assert(fabsf(Chassis.ground.Fn_ratio[side] - 1.0f) < 0.02f);
+    }
+    assert(Chassis.ground.all_off_flag == 0U);
+    assert_zero_output();
+}
+
 int main(void)
 {
     test_output_disabled();
     test_joint_mapping();
+    test_spring_observer_consistency();
     test_off_ground_actions();
     test_off_ground_action_needs_both_legs();
     test_off_ground_push_L0_cap();

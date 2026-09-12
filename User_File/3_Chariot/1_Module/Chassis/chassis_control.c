@@ -592,6 +592,16 @@ void Chassis_Leg_Update(void)
             /* 当前phi0无定义时保留上次连续角，避免恢复后丢失圈数。 */
             Chassis.leg[side].phi0_total = last_phi0;
         }
+
+        /*
+         * 气弹簧折算力只依赖本轮腿长，和五连杆状态一起算一次，唯一所有者在此。
+         * 下游三个消费点（LQR路径扣除、关节位置环前馈、离地观测器还原地面反力）
+         * 都读这一份，不各算一遍。
+         */
+        Chassis.leg[side].F0_spring =
+            VMC_Spring_Force_Calc(&Chassis_Config.spring,
+                                  &Chassis_Config.leg[side],
+                                  &Chassis.leg[side]);
     }
 }
 
@@ -923,6 +933,33 @@ static void Joint_Control(void)
 
                 Chassis.output.T_joint_req[phi1_motor] += gravity_torque.T1;
                 Chassis.output.T_joint_req[phi4_motor] += gravity_torque.T4;
+            }
+        }
+
+        /*
+         * 气弹簧在关节位置环里是纯扰动：它按腿长一路顶着位置环，而位置环没有
+         * 前馈通道、只能靠误差硬扛。按实测腿长把它前馈掉，位置环回到只管误差。
+         * 取反号是因为要抵消气弹簧，不是补偿重力；无Tp分量所以第二个参数为0。
+         */
+        if (Chassis.leg[side].F0_spring != 0.0f)
+        {
+            VMC_Torque_t spring_torque;
+
+            if (VMC_Torque_Calc(&Chassis_Config.leg[side],
+                                &Chassis.leg[side],
+                                -Chassis.leg[side].F0_spring,
+                                0.0f,
+                                &spring_torque) != 0U)
+            {
+                uint8_t phi1_motor =
+                    Chassis_Config.leg[side].joint[CHASSIS_JOINT_PHI1]
+                        .motor_index;
+                uint8_t phi4_motor =
+                    Chassis_Config.leg[side].joint[CHASSIS_JOINT_PHI4]
+                        .motor_index;
+
+                Chassis.output.T_joint_req[phi1_motor] += spring_torque.T1;
+                Chassis.output.T_joint_req[phi4_motor] += spring_torque.T4;
             }
         }
     }
@@ -1842,6 +1879,19 @@ void Chassis_Control(void)
                 height_force - roll_force -
                 gravity_force[CHASSIS_RIGHT] -
                 Chassis_Config.F0_right;
+        }
+
+        /*
+         * 气弹簧出的那份力电机不用再出。上面两条分支给的都是【总】轴向支撑力
+         * ——PID路径的重力前馈按 model.body_mass 补足额，MPC路径把重力作为仿射
+         * 项建在模型里、输出也是绝对支撑力——所以统一在这里扣一次即可。
+         *
+         * ⚠ 扣完之后 MPC 的 F_min/F_max 约束的是总力而不是电机力，电机侧允许
+         * 为负（拉腿），真正卡电机的是 output.joint_T_limit。
+         */
+        for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+        {
+            Chassis.leg[side].F0 -= Chassis.leg[side].F0_spring;
         }
 
         /*
