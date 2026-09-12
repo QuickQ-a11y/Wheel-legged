@@ -6,6 +6,7 @@
 #   ./Tests/run_mpc_host.sh            断言测试 + 堆分配计数
 #   ./Tests/run_mpc_host.sh assert     只跑 test_chassis_mpc.c 的断言
 #   ./Tests/run_mpc_host.sh malloc     只数 Chassis_MPC_Solve 的 malloc 次数
+#   ./Tests/run_mpc_host.sh stiff      量等效高度刚度 dF/dH 和稳态力（整定用）
 #
 # 三个坑（照抄别的单测配方会失败）：
 #   1. chassis_mpc.cpp 要 include "stm32h7xx.h" 取 DWT，主机上没有，本脚本现造一个桩。
@@ -130,6 +131,57 @@ int main(void)
 }
 EOF
 
+cat > "$TMP/stiff_main.cpp" <<'EOF'
+/*
+ * 量 MPC 的等效高度刚度 dF/dH 和稳态输出力，整定 Q/R/body_mass 时用。
+ *
+ * 为什么需要它：MPC 没有积分作用，刚度决定了"未建模的恒定力偏差会造成多大的
+ * 稳态腿长误差"。历史上踩过两次——
+ *   1) R=0.05 而 rho=5.0，rho 把 R 淹没 100 倍，刚度只有 73 N/m，
+ *      21N 的前馈误差 => 29cm 偏差 => 腿直接顶到机构限位。
+ *   2) R 调到 500 以为能治抖，刚度掉回 ~80 N/m，遥控拨轮伸腿推不动。
+ * 腿长 PID 的 kp=600 N/m 是天然的对照基准。
+ */
+#include <cstdio>
+extern "C" {
+#include "chassis_mpc.h"
+#include "chassis_config.h"
+}
+static float settle(float H, float Href)
+{
+    /* 变化率约束每拍只放行 dF_max，要跑够拍数才到稳态 */
+    for (int k = 0; k < 600; k++) {
+        float x0[4] = { 0.0f, 0.0f, H, 0.0f };
+        Chassis_MPC_SetInput(x0, Href);
+        Chassis_MPC_Solve();
+    }
+    return Chassis_MPC.F[0];
+}
+int main(void)
+{
+    Chassis_MPC_Init();
+    if (Chassis_MPC.ready_flag != 1U) { std::printf("tiny_setup 失败\n"); return 2; }
+    const Chassis_MPC_Config_t *c = &Chassis_Config.mpc;
+    const float M = Chassis_Config.model.body_mass, g = Chassis_Config.model.gravity;
+
+    std::printf("  body_mass=%.2f kg  ->  F_eq = 0.5*M*g = %.2f N（= Uref，必须等于实测单腿静载）\n",
+                M, 0.5f * M * g);
+    std::printf("  Q=[%.1e %.1e %.1e %.1e]  R=%.2f  rho=%.2f  ->  R1=R+rho=%.2f\n",
+                c->Q[0], c->Q[1], c->Q[2], c->Q[3], c->R[0], c->rho, c->R[0] + c->rho);
+    if (c->R[0] < c->rho) {
+        std::printf("  ⚠ R < rho：rho 会淹没 R，Q/R 比值失效，刚度会远低于设计值\n");
+    }
+
+    const float H0 = 0.14f;
+    float a = settle(H0, H0), b = settle(H0 + 0.01f, H0);
+    std::printf("\n  H=%.3f(到位) -> F=%6.2f N\n", H0, a);
+    std::printf("  H=%.3f(高1cm)-> F=%6.2f N\n", H0 + 0.01f, b);
+    std::printf("  等效高度刚度 dF/dH = %.0f N/m      （腿长PID 的 kp = 600 N/m）\n", (a - b) / 0.01f);
+    std::printf("  该刚度下 21N 未建模偏差 -> 稳态腿长误差 %.1f cm\n", 21.0f / ((a - b) / 0.01f) * 100.0f);
+    return 0;
+}
+EOF
+
 # ── 编译 ──────────────────────────────────────────────────────────────────────
 # test_chassis_mpc.c 的 main() 断言 output.mpc_flag == 0U（出厂安全默认）。
 # 实机整定期间这一位会被置 1，那时直接编就会在第一个断言 abort。
@@ -161,6 +213,13 @@ if [ "$MODE" = all ] || [ "$MODE" = assert ]; then
         "$TMP/test_mpc" && echo "PASS" || { echo "FAIL"; fail=1; }
     fi
     rm -f "$TMP/obj/t.o"
+fi
+
+if [ "$MODE" = stiff ]; then
+    echo "═══════ 等效高度刚度 ═══════"
+    g++ $CXX_FLAGS -DEIGEN_NO_DEBUG $INC -c "$TMP/stiff_main.cpp" -o "$TMP/obj/sm.o" \
+        && g++ -o "$TMP/st" "$TMP/obj"/*.o -lm
+    if [ $? -ne 0 ]; then echo "编译失败"; fail=1; else "$TMP/st" || fail=1; fi
 fi
 
 if [ "$MODE" = all ] || [ "$MODE" = malloc ]; then

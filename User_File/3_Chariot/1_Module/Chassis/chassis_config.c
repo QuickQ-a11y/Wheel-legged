@@ -323,6 +323,7 @@ const Chassis_Config_t Chassis_Config = {
         .max_d_s = 0.25f,
         .spin_d_fai = 6.0f,
         .d_fai_rate = 3.0f,
+        .phase_lead = 0.0f,
         .scale = {
             [CHASSIS_STATE_S] = 0.0f,
             [CHASSIS_STATE_D_S] = 1.0f,
@@ -335,6 +336,14 @@ const Chassis_Config_t Chassis_Config = {
             [CHASSIS_STATE_THETA_B] = 1.0f,
             [CHASSIS_STATE_D_THETA_B] = 1.0f,
         },
+    },
+    /*
+     * 跟随云台。上电默认关：yaw_scale 符号错了会让车原地打转，
+     * 必须先架空、输出门关着、只看 target[CHASSIS_STATE_FAI] 定完符号再开。
+     */
+    .follow = {
+        .enable_flag = 0U,
+        .yaw_scale = 1.0f,
     },
     /* 当前均为输出封锁阶段的保守调试初值。 */
     .step = {
@@ -811,7 +820,23 @@ const Chassis_Config_t Chassis_Config = {
      */
     .model = {
         .gravity = 9.81f,     /* g_ac */
-        .body_mass = 11.0f,  /* m_b_ac */
+        /*
+         * ⚠ 这一项【不再等于机体真实质量】，而是实测的"腿轴向等效支撑质量"。
+         * 依据：mpc_flag=0 稳态实测 leg[0].F0=31N、leg[1].F0=35N，单腿静载约33N，
+         * 反推 2*33/9.81 = 6.7kg。差额不是丢了——VMC 把 (F0,Tp) 一起映射到关节
+         * 力矩，腿不竖直时一部分体重由摆角力矩 Tp 承担，不走 F0。
+         *
+         * 固件里它只有两个消费点：Chassis_Model_Mass()（PID 重力前馈）和
+         * chassis_mpc.cpp 的 M（既定输入增益 Ts/M，又定平衡点 F_eq=0.5*M*g）。
+         * 两处要的都是"F0 通路上的等效质量"，所以填实测值是对的。
+         *
+         * ⚠ 但它原本带着 m_b_ac 标记、镜像 ABK_LQR.py 的同名参数（工作区
+         * CLAUDE.md：物理参数两侧必须一致，否则 K 不是这台车的增益）。改成 6.7
+         * 之后这个对应关系已断。固件里 K 是烘死的 poly22 系数、不读这里，所以
+         * 当前无害；但重跑 ABK_LQR.py 时 m_b_ac 必须填【机体真实质量】(约11~12.5)，
+         * 不是这里的 6.7。
+         */
+        .body_mass = 6.7f,
         .leg_mass = 1.65f,   /* m_l_ac */
         .wheel_mass = 0.537f, /* m_w_ac */
         .cg_to_hip = 0.120f,  /* l_c_ac */
@@ -1030,9 +1055,18 @@ const Chassis_Config_t Chassis_Config = {
     /* 小陀螺保留速度和姿态反馈，关闭位移与航向角位置反馈。 */
     .top = {
         .max_d_s = 0.6f,
-        .spin_d_fai = 6.0f,
+        .spin_d_fai = 9.42f,
         /* 缺这一项时斜坡步长为0，小陀螺角速度目标会永远停在0转不起来。 */
-        .d_fai_rate = 9.0f,
+        .d_fai_rate = 12.0f,
+        /*
+         * 平移方向修正。这里的 PI 是坐标系约定，不是动力学补偿：实测推前杆
+         * 车往后飘，说明 yaw_rel 的零位与车体前轴差半圈，加 PI 把整个投影
+         * 向量翻过来。cos 是偶函数，yaw_scale 的正负改不动前后，只有整体
+         * 取反能改，所以前后反了必定落在这一项上。
+         * 真正的相位超前 Delta（补速度环滞后）叠加在它上面，填 PI + Delta。
+         * PI 自反，spin_d_fai 变号时【不】跟着变号；变号规则只对 Delta 成立。
+         */
+        .phase_lead = CHASSIS_PI,
         .scale = {
             [CHASSIS_STATE_S] = 0.0f,
             [CHASSIS_STATE_D_S] = 1.0f,
@@ -1046,11 +1080,19 @@ const Chassis_Config_t Chassis_Config = {
             [CHASSIS_STATE_D_THETA_B] = 1.4f,
         },
     },
+    /*
+     * 跟随云台。上电默认关：yaw_scale 符号错了会让车原地打转，
+     * 必须先架空、输出门关着、只看 target[CHASSIS_STATE_FAI] 定完符号再开。
+     */
+    .follow = {
+        .enable_flag = 1U,
+        .yaw_scale = 1.0f,
+    },
     /* 当前均为输出封锁阶段的保守调试初值。 */
     .step = {
         .approach_L0 = 0.35f,
         /* ZJU Motion2收到行程最短，收得越短机体被拉得越高。lqr.L0_min=0.10，留余量。 */
-        .retract_L0 = 0.11f,
+        .retract_L0 = 0.145f,
         .approach_d_s = 1.5f,
         /* 台阶专用腿长斜率，比同块的 recovery.L0_rate 快，台阶要抢时间。 */
         .L0_rate = 0.50f,
@@ -1151,7 +1193,7 @@ const Chassis_Config_t Chassis_Config = {
         .error_limit = {
             [CHASSIS_STATE_S] = 0.50f,        /* m */
             [CHASSIS_STATE_D_S] = 0.0f,
-            [CHASSIS_STATE_FAI] = 0.50f,      /* rad */
+            [CHASSIS_STATE_FAI] = 1.50f,      /* rad */
             [CHASSIS_STATE_D_FAI] = 0.0f,
             [CHASSIS_STATE_THETA_L] = 0.50f,  /* rad */
             [CHASSIS_STATE_D_THETA_L] = 0.0f,
@@ -1563,17 +1605,33 @@ const Chassis_Config_t Chassis_Config = {
      * 数值依据见 Chassis_MPC_Config_t 的注释。
      */
     .mpc = {
-        /* I_roll 目前是 body_mass*half_track^2 的估算值，实机大概率要调。 */
-        .I_roll = 0.5324f,
+        /*
+         * 横滚转动惯量。当前值 = body_mass * half_track^2 = 6.7 * 0.22^2，
+         * 只是"和 body_mass 自洽"，不是"正确"——它把质量当成集中在两轮上，
+         * 而真实机体质量靠近横滚轴，惯量应该更小。实机 roll 通道若仍抖，
+         * 继续往下调；改 body_mass 时记得同步重算这一项。
+         */
+        .I_roll = 0.324f,
         .damping = 8.0f,
         .roll_sign = 1.0f,
         /*
-         * Q/R 的配平：力偏差量级 O(50N) 使 u^2 到 O(2500)，高度误差 O(0.05m)
-         * 使 H^2 只有 O(0.0025)，两者要可比就得 Q_H/R 到 1e6 量级。
+         * Q/R 的【比值】按物理量级配平：力偏差 O(50N) 使 u^2 到 O(2500)，高度误差
+         * O(0.05m) 使 H^2 只有 O(0.0025)，两者要可比就得 Q_H/R 到 1e6 量级。
          * 按 Qi-Q26 的原始量级填会让 R 完全压过 Q，0.2m 高度差只换来 2N 力。
+         *
+         * ⚠ 绝对尺度也有讲究，这是 TinyMPC(ADMM) 特有的坑，标准 QP 方案没有：
+         * tiny_api.cpp 的 Riccati 用的是 R1 = R + rho（:337），rho 是 ADMM 的罚参数。
+         * 原先 R=0.05 而 rho=5.0，R1=5.05——【rho 把 R 淹没了 100 倍】，等效高度刚度
+         * 只有 73 N/m（腿长PID 是 kp=600）。实机表现：任何未建模的力偏差都把腿一路
+         * 推到机构限位 0.39m，MPC 只能把力从 54N 软绵绵减到 34N。
+         * ADMM 理论上收敛后与 rho 无关，但实测 iter=1 就退出，压根没迭代到那一步。
+         *
+         * 修法是把 Q 和 R 【同比】放大 100 倍：比值不变，但 R 抬到和 rho 同量级，
+         * rho 也留在 TinyMPC 期望的 O(1~100) 区间。主机实测等效刚度 73 -> 463 N/m。
+         * 改 Q/R 的绝对值时务必连带检查它与 rho 的相对大小，只看比值会再踩一次。
          */
-        .Q = { 2.0e4f, 2.0e2f, 5.0e4f, 5.0e2f },
-        .R = { 0.05f, 0.05f },
+        .Q = { 2.0e6f, 2.0e4f, 2.0e7f, 2.0e4f },
+        .R = { 40.0f, 40.0f },
         .rho = 5.0f,
         /*
          * N*decimation*1ms = 0.15s，覆盖跳跃和下台阶的 0.1~0.3s 时间尺度。
@@ -1593,7 +1651,7 @@ const Chassis_Config_t Chassis_Config = {
         .decimation = 10U,   /* 1kHz底盘任务，10拍=100Hz */
         .F_min = 10.0f,
         .F_max = 150.0f,
-        .dF_max = 15.0f,
+        .dF_max = 50.0f,
     },
     /* 最终物理输出开关；关闭不影响请求量和控制中间量计算。 */
     .output = {
@@ -1604,8 +1662,8 @@ const Chassis_Config_t Chassis_Config = {
          * TMAX 寄存器逐位一致，否则所有力矩都会按两者之比缩放。
          * 参考量级：仅重力前馈就需要 5.7~7.8 N*m（随腿长变化），低于此值腿撑不起来。
          */
-        .joint_flag = 0U,
-        .wheel_flag = 0U,
+        .joint_flag = 1U,
+        .wheel_flag = 1U,
         /* 离地三项动作默认关，实机确认 all_off_flag 不误触发后再打开。 */
         .off_ground_act_flag = 1U,
         .mpc_flag = 1U,   /* MPC默认关，先在Watch里和PID对照过再打开。 */
@@ -1616,8 +1674,12 @@ const Chassis_Config_t Chassis_Config = {
     .roll_target = 0.0f,
     /*
      * 重力前馈按 0.5*Chassis_Model_Mass()*gravity*cos(theta) 计算，随腿摆角投影。
-     * 1.0表示按实测质量足额补偿；实机若发现腿长稳态偏差，先调这个系数，
-     * 不要回头改 model.body_mass。
+     * 1.0 表示按 model.body_mass 足额补偿，而那一项现在填的就是实测等效支撑
+     * 质量（见其注释），所以这里保持 1.0。
+     *
+     * ⚠ 原注释写着"有稳态偏差先调这个系数、不要改 body_mass"，已作废：
+     * MPC 直接读 model.body_mass，根本不看这个系数，只调它修不了 MPC 那一半。
+     * 两条路径要口径一致，就得改 body_mass 本身。
      */
     .F0_gravity_scale = 1.0f,
     .F0_left = 0.0f,

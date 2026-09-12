@@ -52,10 +52,27 @@ static float Motor_DM_UintToFloat(uint16_t value,
 
 /**
  * @brief 根据应用层 CAN 总线枚举取得 HAL 句柄。
+ *
+ * 刻意不写 default 分支：漏掉某个总线时编译器会以 -Wswitch 报警，而不是静默落到
+ * hfdcan1。底盘四个髋关节目前都在 FDCAN1/2，但云台工程就是栽在这个静默兜底上——
+ * 电机配置改挂 FDCAN3、这里没跟着改，帧全发到了空总线。
  */
 static FDCAN_HandleTypeDef *Motor_DM_GetCanHandle(app_can_bus_t bus)
 {
-    return (bus == APP_CAN_BUS_FDCAN2) ? &hfdcan2 : &hfdcan1;
+    switch (bus)
+    {
+    case APP_CAN_BUS_FDCAN2:
+        return &hfdcan2;
+
+    case APP_CAN_BUS_FDCAN3:
+        return &hfdcan3;
+
+    case APP_CAN_BUS_FDCAN1:
+    case APP_CAN_BUS_UNKNOWN:
+        break;
+    }
+
+    return &hfdcan1;
 }
 
 /**

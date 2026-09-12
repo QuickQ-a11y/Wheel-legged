@@ -25,8 +25,13 @@ static void Remote_Goal_Update(const Remote_t *remote)
         Chassis.goal.d_s =
             remote->leftStick.y *
             Chassis_Config.top.max_d_s;
+        /*
+         * 负号把摇杆的"右为正"翻成业务坐标的"Y 左为正"（见 chassis_config.c
+         * 开头的坐标约定）。少这个负号时小陀螺平移的左右是反的：投影公式
+         * sin 项按左正推导，而 DR16 的 leftStick.x 是右正。
+         */
         Chassis.goal.d_y =
-            remote->leftStick.x *
+            -remote->leftStick.x *
             Chassis_Config.top.max_d_s;
         /* 小陀螺按配置的固定转速自转，右摇杆不参与调速。 */
         Chassis.goal.d_fai = Chassis_Config.top.spin_d_fai;

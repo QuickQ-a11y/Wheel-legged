@@ -114,7 +114,7 @@ typedef struct
 typedef struct
 {
     float d_s;               /* 期望前进速度，m/s。 */
-    float d_y;               /* 小陀螺参考系横向速度，m/s。 */
+    float d_y;               /* 小陀螺参考系横向速度，m/s，左为正。 */
     float d_fai;             /* 期望偏航角速度，rad/s。 */
     float L0;                /* 左右对称目标腿长，m。 */
     float bench_d_L0[CHASSIS_LEG_COUNT];   /* 板凳单腿腿长调节速率，m/s。 */
@@ -171,6 +171,8 @@ struct Chassis
     Chassis_DM_Motor_t dm_motor[APP_DM_COUNT];
     Chassis_DJI_Motor_t wheel_motor[APP_WHEEL_COUNT];
     uint8_t remote_online_flag;     /* 当前遥控输入后端处于在线状态。 */
+    uint8_t board_online_flag;      /* 板间链路在线，由任务层按超时判定后写入。 */
+    float gimbal_yaw_rel;           /* 云台YAW相对底盘的关节角，rad，由云台下发。 */
     uint8_t remote_stop_flag;       /* 急停请求，只封锁最终电机输出。 */
     uint8_t yaw_stick_flag;         /* 航向摇杆已离开中位，供松杆边沿锁存航向。 */
     uint32_t can_error_count;

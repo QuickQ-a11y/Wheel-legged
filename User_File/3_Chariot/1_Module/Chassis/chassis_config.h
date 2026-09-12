@@ -267,8 +267,37 @@ typedef struct
      */
     float spin_d_fai;
     float d_fai_rate;                 /* 自转角速度目标斜率，rad/s^2。 */
+    /*
+     * 平移方向的角度修正，rad。实机标定：起转后只推前杆，看车实际往哪飘，
+     * 飘偏多少填多少。它承担两件事，性质不同，别混着调：
+     *   1) 坐标系约定。yaw_rel 的零位不一定对着车体前轴，差半圈就填 PI。
+     *      前后反了只可能是这一项——cos 是偶函数，yaw_scale 的正负改不动
+     *      前后分量，只有整体取反能改。PI 自反，不随 spin_d_fai 变号。
+     *   2) 相位超前 Delta。纯几何投影只在准静态下成立：自转频率远高于速度环
+     *      带宽，实际漂移方向滞后 Delta = spin_d_fai * tau，tau 是速度环等效
+     *      延时。只有这一部分在 spin_d_fai 变号时要跟着变号。
+     */
+    float phase_lead;
     float scale[CHASSIS_STATE_COUNT]; /* 十维误差逐状态缩放，0关闭该状态反馈。 */
 } Chassis_Top_Config_t;
+
+/**
+ * @brief 底盘跟随云台。
+ *
+ * 只在 CHASSIS_MODE_FOLLOW 生效，且要求板间链路在线。跟随期间底盘不再读右摇杆，
+ * 航向完全由云台相对角决定。误差饱和沿用 lqr.error_limit[CHASSIS_STATE_FAI]，
+ * 这里不再设第二个限幅点。
+ */
+typedef struct
+{
+    uint8_t enable_flag;  /* 总开关。默认0：符号错了会原地打转，实机确认前不许开。 */
+    /*
+     * 云台相对角折算到底盘航向目标的符号，+1或-1。
+     * 云台编码器角误差与底盘航向误差的符号关系取决于两者的正方向定义，
+     * 参考工程里这笔账是靠LQR中航向项的一个负号还的。这里放配置，实机定。
+     */
+    float yaw_scale;
+} Chassis_Follow_Config_t;
 
 /** @brief 正向辅助爬台阶动作参数。 */
 typedef struct
@@ -539,6 +568,7 @@ typedef struct
     algorithm_pid_config_t roll_pid;
     Chassis_Recovery_Config_t recovery;
     Chassis_Top_Config_t top;
+    Chassis_Follow_Config_t follow;
     Chassis_Step_Config_t step;
     Chassis_Observer_Config_t observer;
     Chassis_LQR_Config_t lqr;

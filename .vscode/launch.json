@@ -70,7 +70,7 @@
             "runToEntryPoint": "main",
             "liveWatch": {
                 "enabled": true,
-                "samplesPerSecond": 2
+                "samplesPerSecond": 
             }
         },
         {
@@ -80,90 +80,6 @@
             "request": "launch",
             "cwd": "${workspaceFolder}",
             "executable": "${workspaceFolder}/build/Debug/Wheel-legged.elf",
-            "servertype": "jlink",
-            "serverpath": "C:/Program Files/SEGGER/JLink/JLinkGDBServerCL.exe",
-            "armToolchainPath": "${env:LOCALAPPDATA}/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin",
-            "device": "STM32H723VG",
-            "interface": "swd",
-            "runToEntryPoint": "main",
-            "liveWatch": {
-                "enabled": true,
-                "samplesPerSecond": 2
-            }
-        },
-        // ── 以下是 Release（-Os）。量执行耗时必须用这一组 ────────────────────
-        //
-        // 配套任务见 tasks.json 的「... (Release)」几条，理由也写在那里。
-        //
-        // ⚠ -Os 下 Watch 能看到的东西比 Debug 少：全局量（Chassis、
-        //    Chassis_Config、Chassis_MPC）都在，但局部变量和被内联掉的
-        //    静态函数会显示 <optimized out>，这是正常现象不是配置错了。
-        //    单步也会跳行。要逐行调试就换回上面的 Debug 配置。
-        {
-            "name": "OpenOCD Live Watch (Linux, Release)",
-            "type": "cortex-debug",
-            "request": "launch",
-            "cwd": "${workspaceFolder}",
-            "executable": "${workspaceFolder}/build/Release/Wheel-legged.elf",
-            "servertype": "openocd",
-            "searchDir": [
-                "${workspaceFolder}"
-            ],
-            "configFiles": [
-                "openocd.cfg"
-            ],
-            "gdbPath": "${env:HOME}/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-gdb",
-            "device": "STM32H723VG",
-            "runToEntryPoint": "main",
-            "liveWatch": {
-                "enabled": true,
-                "samplesPerSecond": 4
-            }
-        },
-        {
-            "name": "OpenOCD Live Watch (Windows, Release)",
-            "type": "cortex-debug",
-            "request": "launch",
-            "cwd": "${workspaceFolder}",
-            "executable": "${workspaceFolder}/build/Release/Wheel-legged.elf",
-            "servertype": "openocd",
-            "searchDir": [
-                "${workspaceFolder}"
-            ],
-            "configFiles": [
-                "openocd.cfg"
-            ],
-            "gdbPath": "${env:LOCALAPPDATA}/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-gdb.exe",
-            "device": "STM32H723VG",
-            "runToEntryPoint": "main",
-            "liveWatch": {
-                "enabled": true,
-                "samplesPerSecond": 4
-            }
-        },
-        {
-            "name": "J-Link Live Watch (Linux, Release)",
-            "type": "cortex-debug",
-            "request": "launch",
-            "cwd": "${workspaceFolder}",
-            "executable": "${workspaceFolder}/build/Release/Wheel-legged.elf",
-            "servertype": "jlink",
-            "serverpath": "/usr/bin/JLinkGDBServer",
-            "armToolchainPath": "${env:HOME}/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin",
-            "device": "STM32H723VG",
-            "interface": "swd",
-            "runToEntryPoint": "main",
-            "liveWatch": {
-                "enabled": true,
-                "samplesPerSecond": 2
-            }
-        },
-        {
-            "name": "J-Link Live Watch (Windows, Release)",
-            "type": "cortex-debug",
-            "request": "launch",
-            "cwd": "${workspaceFolder}",
-            "executable": "${workspaceFolder}/build/Release/Wheel-legged.elf",
             "servertype": "jlink",
             "serverpath": "C:/Program Files/SEGGER/JLink/JLinkGDBServerCL.exe",
             "armToolchainPath": "${env:LOCALAPPDATA}/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin",

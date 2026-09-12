@@ -79,8 +79,9 @@ int main(void)
     assert(Chassis.mode == CHASSIS_MODE_TOP);
     assert_near(Chassis.goal.d_s,
                Chassis_Config.top.max_d_s);
+    /* d_y 是左正，摇杆右正，所以推杆左半程给出正的 d_y。 */
     assert_near(Chassis.goal.d_y,
-               -0.5f * Chassis_Config.top.max_d_s);
+               0.5f * Chassis_Config.top.max_d_s);
     assert_near(Chassis.goal.d_fai,
                Chassis_Config.top.spin_d_fai);
 

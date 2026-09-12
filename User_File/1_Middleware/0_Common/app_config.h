@@ -99,9 +99,9 @@ static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) !=
 #define APP_RC_MAX_VEL 3.0f   /* 满杆前进速度，m/s。 */
 #define APP_RC_MAX_YAW 2.0f   /* 满杆偏航角速度，rad/s。 */
 #define APP_RC_VEL_RATE 1.0f  /* 爬台阶接近段的速度目标斜率，m/s^2。 */
-#define APP_RC_LEG_S 0.14f
-#define APP_RC_LEG_M 0.14f
-#define APP_RC_LEG_L 0.25f
+#define APP_RC_LEG_S 0.28f
+#define APP_RC_LEG_M 0.18f
+#define APP_RC_LEG_L 0.36f
 
 /*
  * 控制器第一阶段只计算中间状态和安全输出。
@@ -154,8 +154,8 @@ static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) !=
  *               [4]flags(bit0=dialValid, bit1=遥控在线) [5]seq
  *               [6..7]云台 YAW 关节角(归一化到 ±pi) * 10000。
  */
-#define APP_BOARD_STICK_ID 0x0A0U
-#define APP_BOARD_STATE_ID 0x0A1U
+#define APP_BOARD_STICK_ID 0x3U
+#define APP_BOARD_STATE_ID 0x4U
 #define APP_BOARD_FRAME_LEN 8U
 
 /* 归一化量和角度统一的定点比例；-1..1 正好用满 int16，pi*10000=31416 也不溢出。 */

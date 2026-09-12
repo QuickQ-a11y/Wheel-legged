@@ -844,6 +844,16 @@ static void test_top_projection(void)
     /* 固定转速自转：目标转速来自配置，不再由右摇杆给。 */
     Chassis.goal.d_fai = Chassis_Config.top.spin_d_fai;
     Chassis.imu.yaw_total = yaw_anchor_rad + CHASSIS_HALF_PI;
+
+    /*
+     * 平移方向以云台朝向为参考，不再用top_fai：摇杆给的是云台系方向，
+     * 车体只能沿自身前轴走，所以取该方向在车轴上的投影。
+     * 云台相对车体转-90度时车体前轴在云台系里是+90度，前杆分量归零、
+     * 侧杆分量满额，于是top_d_s只剩d_y。
+     */
+    Chassis.board_online_flag = 1U;
+    Chassis.gimbal_yaw_rel =
+        -CHASSIS_HALF_PI / Chassis_Config.follow.yaw_scale;
     Chassis_Control();
 
     assert(fabsf(Chassis.top_d_s + 0.10f) <
@@ -860,6 +870,18 @@ static void test_top_projection(void)
     assert(Chassis.lqr.scale[CHASSIS_STATE_FAI] == 0.0f);
     assert(Chassis.lqr.scale[CHASSIS_STATE_D_S] == 1.0f);
     assert(Chassis.lqr.scale[CHASSIS_STATE_D_FAI] == 1.0f);
+
+    /* 云台与车体同向时退化为车体系，前杆全额通过。 */
+    Chassis.gimbal_yaw_rel = 0.0f;
+    Chassis_Control();
+    assert(fabsf(Chassis.top_d_s - 0.25f) < TEST_TOLERANCE);
+
+    /* 板间链路掉线就没有可用参考方向，平移归零，只保留自转。 */
+    Chassis.board_online_flag = 0U;
+    Chassis_Control();
+    assert(Chassis.top_d_s == 0.0f);
+    assert(Chassis.lqr.target[CHASSIS_STATE_D_S] == 0.0f);
+    Chassis.board_online_flag = 1U;
 
     /* 持续运行后收敛到配置转速并停在目标上，不越过。 */
     for (index = 0U; index < 1000U; index++)

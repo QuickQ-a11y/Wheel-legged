@@ -64,3 +64,8 @@ void Board_GetRemote(Remote_t *remote)
 {
     *remote = boardDebugState.remote;
 }
+
+float Board_GetYawRel(void)
+{
+    return boardDebugState.yaw_rel;
+}

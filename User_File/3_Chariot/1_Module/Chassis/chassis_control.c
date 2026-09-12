@@ -61,10 +61,30 @@ static void Motion_Update(void)
 
     if (Chassis.mode == CHASSIS_MODE_TOP)
     {
-        top_phase_rad = model_yaw_rad - Chassis.top_fai;
-        Chassis.top_d_s =
-            Chassis.goal.d_s * cosf(top_phase_rad) +
-            Chassis.goal.d_y * sinf(top_phase_rad);
+        /*
+         * 摇杆给的方向在云台系（左摇杆前推=云台指向），车体只能沿自身前轴运动，
+         * 所以取该方向在车轴上的投影。车体前轴在云台系里的角度是 -yaw_rel。
+         *
+         * phase_lead 补速度环滞后：自转频率远高于速度环带宽，纯几何投影算出的
+         * 方向和车实际漂移的方向差一个 Delta = spin_d_fai * tau。
+         *
+         * 参考角不能用 top_fai——它每拍都被赋成当前航向，相位差恒为零，
+         * 投影会退化成"沿车体当前朝向前进"，车在转所以方向也跟着转。
+         */
+        if (Chassis.board_online_flag != 0U)
+        {
+            top_phase_rad =
+                -(Chassis.gimbal_yaw_rel * Chassis_Config.follow.yaw_scale) +
+                Chassis_Config.top.phase_lead;
+            Chassis.top_d_s =
+                Chassis.goal.d_s * cosf(top_phase_rad) +
+                Chassis.goal.d_y * sinf(top_phase_rad);
+        }
+        else
+        {
+            /* 拿不到云台朝向就没有可用的参考方向，平移归零，只保留自转。 */
+            Chassis.top_d_s = 0.0f;
+        }
         Chassis.lqr.target[CHASSIS_STATE_D_S] = Chassis.top_d_s;
         /* 小陀螺持续旋转，航向目标始终跟随实际，只靠角速度控制。 */
         Chassis.lqr.target[CHASSIS_STATE_FAI] = model_yaw_rad;
@@ -103,7 +123,26 @@ static void Motion_Update(void)
         Chassis.top_d_s = 0.0f;
         Chassis.lqr.target[CHASSIS_STATE_D_S] = Chassis.goal.d_s;
 
-        if (Chassis.goal.d_fai != 0.0f)
+        if ((Chassis.mode == CHASSIS_MODE_FOLLOW) &&
+            (Chassis_Config.follow.enable_flag != 0U) &&
+            (Chassis.board_online_flag != 0U))
+        {
+            /*
+             * 跟随云台：航向目标每拍从当前航向重新算，误差因此恒等于云台相对角，
+             * 不需要处理正负pi回绕——yaw_rel本来就在正负pi内，加到连续航向上不跨界。
+             * 目标跟着实际航向走，底盘被卡住时目标也不会跑远，天然抗积分饱和。
+             * 误差饱和由lqr.error_limit[CHASSIS_STATE_FAI]统一负责，这里不再限幅。
+             *
+             * 跟随期间右摇杆的偏航量交给云台消费，底盘不再叠加，避免两个输入源
+             * 抢同一个航向目标。板间链路超时则落到下面的摇杆分支。
+             */
+            Chassis.lqr.target[CHASSIS_STATE_FAI] =
+                model_yaw_rad +
+                (Chassis.gimbal_yaw_rel * Chassis_Config.follow.yaw_scale);
+            Chassis.lqr.target[CHASSIS_STATE_D_FAI] = 0.0f;
+            Chassis.yaw_stick_flag = 0U;
+        }
+        else if (Chassis.goal.d_fai != 0.0f)
         {
             /* 有偏航输入：按给定角速度积分出航向目标。 */
             Chassis.lqr.target[CHASSIS_STATE_D_FAI] = Chassis.goal.d_fai;

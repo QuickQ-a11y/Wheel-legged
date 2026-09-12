@@ -2,6 +2,7 @@
 
 #include "app_config.h"
 #include "chassis_mpc.h"
+#include "device_board.h"
 #include "device_motor_dji.h"
 #include "device_motor_dm.h"
 #include "task_can.h"
@@ -96,6 +97,10 @@ static void Chassis_Feedback_Update(void)
         Chassis.wheel_motor[index].speed_rpm = wheelState.speedRpm;
         Chassis.wheel_motor[index].current = wheelState.currentRaw;
     }
+
+    /* 板间链路和电机一样，在线判定在任务层做，模块层只读标志不碰HAL。 */
+    Chassis.board_online_flag = Board_IsOnline(nowTick);
+    Chassis.gimbal_yaw_rel = Board_GetYawRel();
 
     Chassis.can_error_count = CAN_Task_GetTxErrorCount();
 }

@@ -43,6 +43,14 @@ uint8_t Board_IsOnline(uint32_t nowTick);
 /** @brief 读取板间链路解出的遥控快照。 */
 void Board_GetRemote(Remote_t *remote);
 
+/**
+ * @brief 读取云台 YAW 相对底盘的关节角，单位 rad，已归一化到 ±pi。
+ *
+ * 由云台侧按自己的标定算好后下发，底盘不重复一份标定常量。
+ * 调用前应先用 Board_IsOnline() 确认链路在线，否则拿到的是陈旧值。
+ */
+float Board_GetYawRel(void);
+
 #ifdef __cplusplus
 }
 #endif
