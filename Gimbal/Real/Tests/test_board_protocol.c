@@ -9,10 +9,10 @@
  *   gcc -Wall -Wextra -I<stub> -IUser_File/1_Middleware/0_Common \
  *       -IUser_File/1_Middleware/2_Algorithm \
  *       -IUser_File/2_Device/Communication/Board \
- *       -I../../Wheel-legged/User_File/2_Device/Communication/Board \
+ *       -I../../Chassis/User_File/2_Device/Communication/Board \
  *       -o t Tests/test_board_protocol.c \
  *       User_File/2_Device/Communication/Board/device_board.c \
- *       ../../Wheel-legged/User_File/2_Device/Communication/Board/device_board.c -lm
+ *       ../../Chassis/User_File/2_Device/Communication/Board/device_board.c -lm
  */
 #include "app_config.h"
 #include "remote_input.h"
