@@ -1,3 +1,14 @@
+# 构建产物
 build
+CMakeCache.txt
+CMakeFiles/
+__pycache__/
+
+# CubeMX 临时文件
 mx.scratch
+
+# 备份文件（例如 IDE 或脚本生成的 *.bak-20260829-2027）
+*.bak-*
+
+# CubeCLT 的工具链清单要跟踪，它决定用哪套 bundle 构建
 !.settings

@@ -1,0 +1,95 @@
+{
+    // 每种调试器分 Linux / Windows 两套具名配置，选和自己系统匹配的那个。
+    //
+    // 之所以不能一份通吃：Cortex-Debug 的 cortex-debug.gdbPath.linux/.windows
+    // 这类平台设置不解析 ${env:} 变量，只能写死带用户名的绝对路径，不适合入库；
+    // 而 launch.json 里的 ${env:} 由 VS Code 原生解析，所以路径放这里。
+    //
+    // 工具链版本号跟着 STM32 VSCode 扩展 bundle manager 实际下载的版本走，
+    // 与本机 bundles 目录下的文件夹名不一致时，改下面四处 14.3.1+st.2。
+    "version": "0.2.0",
+    "configurations": [
+        {
+            // 探针和芯片配置都在仓库根目录 openocd.cfg，
+            // 和"烧录 (OpenOCD)"任务共用同一份，改调试器只改那个文件。
+            "name": "OpenOCD Live Watch (Linux)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/Gimbal_Debug.elf",
+            "servertype": "openocd",
+            "searchDir": [
+                "${workspaceFolder}"
+            ],
+            "configFiles": [
+                "openocd.cfg"
+            ],
+            "gdbPath": "${env:HOME}/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-gdb",
+            "device": "STM32H723VG",
+            "runToEntryPoint": "main",
+            "liveWatch": {
+                "enabled": true,
+                "samplesPerSecond": 4
+            }
+        },
+        {
+            // Windows 的 gdb 必须带 .exe：绝对路径不走 PATHEXT 自动补全。
+            "name": "OpenOCD Live Watch (Windows)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/Gimbal_Debug.elf",
+            "servertype": "openocd",
+            "searchDir": [
+                "${workspaceFolder}"
+            ],
+            "configFiles": [
+                "openocd.cfg"
+            ],
+            "gdbPath": "${env:LOCALAPPDATA}/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-gdb.exe",
+            "device": "STM32H723VG",
+            "runToEntryPoint": "main",
+            "liveWatch": {
+                "enabled": true,
+                "samplesPerSecond": 4
+            }
+        },
+        {
+            // 工具链与 OpenOCD 两套统一用 bundle 的 gcc/gdb：
+            // 固件是 bundle 的 gcc 14.3.1 编的，换别的大版本 gdb 有 DWARF 读不动的风险。
+            "name": "J-Link Live Watch (Linux)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/Gimbal_Debug.elf",
+            "servertype": "jlink",
+            "serverpath": "/usr/bin/JLinkGDBServer",
+            "armToolchainPath": "${env:HOME}/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin",
+            "device": "STM32H723VG",
+            "interface": "swd",
+            "runToEntryPoint": "main",
+            "liveWatch": {
+                "enabled": true,
+                "samplesPerSecond": 
+            }
+        },
+        {
+            // serverpath 按 J-Link 软件包的实际安装目录改，默认装在 Program Files 下。
+            "name": "J-Link Live Watch (Windows)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/Gimbal_Debug.elf",
+            "servertype": "jlink",
+            "serverpath": "C:/Program Files/SEGGER/JLink/JLinkGDBServerCL.exe",
+            "armToolchainPath": "${env:LOCALAPPDATA}/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin",
+            "device": "STM32H723VG",
+            "interface": "swd",
+            "runToEntryPoint": "main",
+            "liveWatch": {
+                "enabled": true,
+                "samplesPerSecond": 2
+            }
+        }
+    ]
+}
