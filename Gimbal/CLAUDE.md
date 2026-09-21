@@ -1,82 +1,53 @@
-# CLAUDE.md — Wheel-legged 工程协作规范
+# CLAUDE.md — Gimbal（云台）
 
-## 项目定位
+云台专属。**共享的协作规范、代码风格、构建/单测通则、板间协议、DM MIT 力矩标度陷阱
+都在仓库根 `../CLAUDE.md`，那份会自动一起加载，本文件不重复。**
 
-RoboMaster 本科生竞赛实验工程（轮腿底盘，STM32H723 + HAL + FreeRTOS），长期实验迭代，非产品、不上市。
-优先级：功能可跑、代码直白、易 Debug > 健壮性、可复用性。
-不要用"产品级"标准写这份代码：不加多余的防护、不做过度封装、不为"未来扩展"预留设计。
+## 两套独立工程
 
-## 修改代码前必读
+- `Real/` —— 真实应用，产物 `Gimbal_Real.elf`
+- `Debug/` —— 系统辨识用，产物 `Gimbal_Debug.elf`
 
-1. `Codex文档/代码风格要求.md` —— 详细代码风格规范（命名、注释、物理符号、坐标系、USB/CAN 协议、安全红线），修改任何业务代码前必须阅读并遵守。
-2. 上实机或改底盘参数前，还应阅读 `Codex文档/实机调试检查清单.md`（Watch 分组、拨杆分配、
-   电机方向标定、当前安全状态，以及 MATLAB 与固件参数不一致的未决问题）。
-3. 参考 HERO_LEG 前先看 `Codex文档/HERO_LEG参考要点.md`——那边源码是 GBK 编码，
-   `grep` 不加 `-a` 会静默跳过，看起来就像符号不存在。
+**两者各带一份完整的 `User_File/` 副本，允许发散。⚠ 绝不要假设在一个里改的东西
+自动传到了另一个——改之前先 `diff` 一遍对应文件。**
 
-本文档与 `Codex文档/代码风格要求.md` 冲突时，以本文档为准（本文档是本轮重构期的额外要求）。
+两者都自带 `.clangd` 和 `.vscode/`，用 `${workspaceFolder}` 相对寻址，
+所以**编辑器要么开 `Real/` 要么开 `Debug/`**，别开 `Gimbal/` 这一级。
 
-## 分层架构（严格单向依赖，上层只能调用下层）
+## 电机与力矩标度
 
-```
-5_Task                    chassis_task、task_can、task_imu、task_remote、task_usb、task_can_dispatch
-   │                      调度、分发、模块连接；每轮按 反馈 -> 状态选择 -> 控制 -> 命令发送 执行
-3_Chariot/1_Module        Chassis（config/control/observer/remote/vmc），功能模块
-   │
-2_Device                  BMI088、Motor_DM、Motor_DJI、DR16、USB 协议；解析并维护设备状态
-   │
-1_Middleware/2_Algorithm  PID、LQR、Kalman、QuaternionEKF、Angle、CRC（算法库）
-1_Middleware/1_Driver     FDCAN、SPI、UART、USB（只做硬件收发，不写业务解析）
-1_Middleware/0_Common     app_config.h、remote_input.h（公共配置与常量）
-User_config               CubeMX 工程配置
-```
+- 2 台 **达妙 DM4310**，均挂 **FDCAN3**，与板间通信共用同一条物理总线。
+- `APP_DM_TOR_MIN/MAX = ±10`。
 
-- 依赖规则：上层只能调用下层；同层模块不互相调用；`0_Common` 可被任意层引用。
-- 禁止：task 直接读写 device/module 的内部状态、module 直接调 HAL、device 反向调用上层、跨层硬编码常量（集中放 `app_config.h` 或 `chassis_config.c`）。
+⚠⚠ **这一对还没有跟电机 TMAX 寄存器实际核对过。** 底盘那边同样的问题藏了很久
+（固件 ±15/±25 而寄存器是 40，命令被放大 2.67 倍），**而且往返相消、常规对比查不出来**。
+排查方法和判据见根 `../CLAUDE.md` 的 "DM MIT torque scale" 一节——
+核心是：**不能靠比对命令和反馈，必须用绝对力参照**。
 
-## 代码风格硬性要求
+### 主机单测配方
 
-1. **全局变量与 Watch**：关键状态直接用全局变量暴露（如 `extern Chassis_t Chassis;`），字段带单位注释，方便添加到 Watch 窗口；不复制第二套 debug 结构体。模块内部跨周期的中间量允许 `static`/全局，但同一份事实只保留一个所有者。
-2. **数据消费与调用规范**：全局变量只是调试入口；业务数据消费仍走模块公开接口（如 `Motor_DM_GetState()`、`Motor_DM_SetCommand()`、`CAN_Task_GetTxErrorCount()`），跨层访问必须通过函数接口，禁止裸跨层访问内部 `static` 状态。
-3. **删除的防护（重构重点）**：
-   - 入口参数校验：NULL/范围检查、防御性 `isfinite`/溢出判断；
-   - 重复的 `Is`/`Get`/`Check` 查询函数、只消费一次的派生布尔状态（`bench_flag`、`output_flag` 之类）；
-   - 统一 status/错误码返回值体系——流程型函数默认 `void`；
-   - 一两行就能写完的简单表达式不包函数。
-4. **保留的红线（实机安全，绝对不删）**：上电默认零输出、电机限幅与离线保护、数组边界、除零保护、腿长范围与几何奇异判断、`safe_flag` 安全门、fault 检测与最终命令清零、`Chassis.dt` 越界回退、IMU 温度保护。
-5. **禁止**：新增任何封装层/接口层/工厂/回调注册；新增任何防御性代码；顺手重构未指定的模块；改变 task 层对外接口与通信协议（除非用户明确要求）。
-6. **算法代码只去封装，不改数学**：LQR、PID、Kalman、VMC、五连杆运动学只做结构性简化，公式、状态顺序、参数值一律不动。
-
-## 反面/正面写法对照（重构时照此执行）
-
-反面写法（禁止出现，看到就删）：
-
-```c
-if (ptr == NULL) return;                 /* 参数校验：固定调用链已保证有效 */
-if (!isfinite(v)) v = 0.0f;              /* 防御性判断：掩盖真实问题，还费分支 */
-uint8_t ret = Func(); if (ret != OK) {}  /* 返回值检查：流程型函数用 void */
-if (x > MAX) x = MAX;                    /* 冗余限幅：物理限位由电机驱动/机械保证 */
-Chassis_Init(&cfg, 0);                   /* 句柄+配置传参：直接初始化全局 Chassis */
+```bash
+INC="-IUser_File/1_Middleware/0_Common -IUser_File/1_Middleware/2_Algorithm \
+-IUser_File/2_Device/Communication/DR16 -IUser_File/2_Device/Communication/USB"
 ```
 
-正面写法（照此写）：
+| Test | Extra sources |
+|---|---|
+| `test_angle` | `2_Algorithm/Angle.c` |
+| `test_dr16` | `DR16/device_dr16.c` |
+| `test_usb_protocol` | `USB/device_usb_protocol.c` `2_Algorithm/CRC.c` |
+| `test_board_protocol` | see below — spans both projects |
 
-```c
-Chassis.lqr.target[CHASSIS_STATE_D_S] = goal.d_s;     /* 全局直访，Watch 可见 */
-Motor_DM_GetState(i, &s);                              /* 跨层数据消费走接口 */
-void Chassis_Control(void)                             /* 流程函数 void，无状态返回 */
-Limit_Symmetric(v, lim)                                /* 算法本身需要的限幅保留 */
-```
+`test_board_protocol` packs with the gimbal's `device_board.c` and unpacks with the chassis's,
+so it links **one file from each project**. Both projects have a `device_board.h` with the same
+name and different contents, so the two `.c` files must be compiled in **separate gcc
+invocations** with their own `-I`, then linked; a single invocation picks the wrong header.
+It also needs three stub headers on the include path (`stm32h7xx_hal.h` declaring `HAL_GetTick`,
+`fdcan.h` with a dummy `FDCAN_HandleTypeDef` + `hfdcan3`, `task_can.h` declaring
+`CAN_Task_UpdateTxFrame`); the test file itself defines those symbols. The exact command is in
+the comment block at the top of `Gimbal/Real/Tests/test_board_protocol.c`.
 
-注意区分：控制算法**本身需要**的限幅、奇异判断、积分限位属于功能代码，保留；单纯"防止调用方传错"的防御性判断属于防护，删除。
+## 板专属文档
 
-## 重构工作流
-
-1. 先重构 `User_File/3_Chariot/1_Module/Chassis` 试点，用户确认风格后再铺开到其他层。
-2. 每个模块重构完必须构建验证：`cmake --build build/Debug`（Ninja + arm-none-eabi-gcc），零错误零警告才提交。
-3. 涉及底盘逻辑时回归主机单测：`Tests/` 下 `test_chassis_*.c` 用系统 gcc 直接编译运行。
-   仓库里**没有测试脚本或 CMake target**，编译命令、每个测试要链接的源文件、以及
-   `test_motor_dm` 无法在主机编译、`test_chassis_recovery` 需要临时把三道输出门置 0
-   这两个坑，都记在工作区根目录 `../CLAUDE.md` 的 "Host tests" 一节。
-   （`build/host_tests/` 下只是历史产物，不是当前构建输出。）
-4. 汇报格式（中文）：改了哪些文件、删了哪些防护（标注 `文件:行号`）、保留了什么、如何验证的。删除清单先列给用户确认，不要一次性大批量删完。
+`Codex文档/` 目前为空，留给将来的云台专属文档。
+共享文档和交接流在仓库根 `../Codex文档/`。

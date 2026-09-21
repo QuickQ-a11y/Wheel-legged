@@ -1,6 +1,11 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+整车级文档：仓库布局、共享协作规范、两块板通用的构建与测试机制、板间契约。
+**板专属的内容在各自的 `Chassis/CLAUDE.md` 和 `Gimbal/CLAUDE.md`。**
+
+> Claude Code 会加载 cwd 及其所有祖先目录的 `CLAUDE.md`。所以开 `Chassis/` 时，
+> 本文件和 `Chassis/CLAUDE.md` 都会进上下文——**共享内容只在这里写一份，不要往板下复制**。
+> 三对逐字节相同的副本就是这么来的，已于 2026-09-21 清理。
 
 ## Repository layout
 
@@ -21,18 +26,97 @@ The two boards talk over a dedicated **FDCAN3** link (PD12/PD13): the DR16 recei
 
 ⚠ Each of the three CubeMX projects ships its own copy of `Drivers/` (~11 MB) and `Middlewares/` (~15 MB) — about **78 MB of duplicated ST HAL/CMSIS** in the repo. This is CubeMX's doing: it regenerates those paths per project. Deduplicating means fighting CubeMX's output layout for every regeneration. **Decided: leave it.** Don't propose sharing them again.
 
-## MATLAB ↔ firmware coupling
+---
 
-**`../Matlab/ABK_LQR.py` is the live script — `ABK_LQR.m` is stale (still small-wheel values, and a different `lqr_Q`/`lqr_R`). Do not use the `.m`.**
+# 协作规范（两块板共用）
 
-`ABK_LQR.py` derives the A/B matrices, solves LQR across a leg-length grid, and fits every `K(row,col)` to a `poly22` surface in (left leg length, right leg length). It prints **four** blocks that are pasted verbatim into `chassis_config.c`: `K` → `Chassis_Config.lqr.coefficients`, and `Ad`/`Bd`/`L` → `Chassis_Config.leso.{Ad,Bd,L}_coefficients`. `Algorithm_LQR_FitLqrKPoly22` reconstructs `K` at runtime from the live leg lengths.
+## 项目定位
 
-⚠ **The four blocks must come from the same run.** `leso.comp_scale` is non-zero, so a `K` and a LESO model built from different physical parameters actively fight each other. Element counts to verify after pasting: 240 / 600 / 240 / 840.
+RoboMaster 本科生竞赛实验工程（轮腿底盘 + 云台，STM32H723 + HAL + FreeRTOS），
+长期实验迭代，非产品、不上市。
+优先级：功能可跑、代码直白、易 Debug > 健壮性、可复用性。
+不要用"产品级"标准写这份代码：不加多余的防护、不做过度封装、不为"未来扩展"预留设计。
 
-- The array is a **flat `float[240]`** (40 rows × 6) specifically so the MATLAB text pastes in with no braces and no `f` suffixes. Row order is output-major: rows 1-10 left wheel, 11-20 right wheel, 21-30 left leg swing, 31-40 right leg swing; within each block the 10 states follow `CHASSIS_STATE_*` order. Coefficient order is `p00,p10,p01,p20,p11,p02` — must match `coeffvalues()`.
-- **Physical parameters must be kept identical on both sides** or `K` is not this robot's gain. The firmware mirrors them in `Chassis_Config.model` (mass split, `cg_to_hip`) and `Chassis_Config.wheel` (`R`, `half_track`), each commented with its `*_ac` MATLAB counterpart. Changing any of them means regenerating `K`.
-- `Chassis_Config.lqr.L0_min/L0_max` must match the script's sampling range (`LM = 0.00:0.01:0.25` offset by `L0_l = 0.10` → `0.10~0.35 m`; currently consistent). Leg lengths outside it are clamped and `Chassis.lqr.limit_flag` is set — extrapolation is deliberately refused.
-- `../Matlab/VMC.m` derives the five-bar kinematics implemented in `chassis_vmc.c`.
+## 修改代码前必读
+
+1. `Codex文档/代码风格要求.md` —— 详细代码风格规范（命名、注释、物理符号、坐标系、
+   USB/CAN 协议、安全红线），修改任何业务代码前必须阅读并遵守。**本文件是它的精简版**，
+   自动进上下文；完整版按需读。两者冲突时以完整版为准。
+2. 动哪块板就读哪块板的 `CLAUDE.md`：`Chassis/CLAUDE.md` / `Gimbal/CLAUDE.md`。
+3. 上实机或改底盘参数前，读 `Chassis/Codex文档/实机调试检查清单.md`。
+4. 参考 HERO_LEG 前先看 `Chassis/Codex文档/HERO_LEG参考要点.md`——那边源码是 GBK 编码，
+   `grep` 不加 `-a` 会静默跳过，看起来就像符号不存在。
+5. `Codex文档/handoff-*.md` 是一条按时间排的交接流，**每篇开头注明作用范围**
+   （底盘 / 云台 / 跨板）。2026-09-21 之前的均为底盘范围。最新一篇通常是最有用的入口。
+
+## 分层架构（严格单向依赖，上层只能调用下层）
+
+```
+5_Task                    chassis_task、task_can、task_imu、task_remote、task_usb、task_can_dispatch
+   │                      调度、分发、模块连接；每轮按 反馈 -> 状态选择 -> 控制 -> 命令发送 执行
+3_Chariot/1_Module        Chassis（config/control/observer/remote/vmc），功能模块
+   │
+2_Device                  BMI088、Motor_DM、Motor_DJI、DR16、USB 协议；解析并维护设备状态
+   │
+1_Middleware/2_Algorithm  PID、LQR、Kalman、QuaternionEKF、Angle、CRC（算法库）
+1_Middleware/1_Driver     FDCAN、SPI、UART、USB（只做硬件收发，不写业务解析）
+1_Middleware/0_Common     app_config.h、remote_input.h（公共配置与常量）
+User_config               CubeMX 工程配置
+```
+
+- 依赖规则：上层只能调用下层；同层模块不互相调用；`0_Common` 可被任意层引用。
+- 禁止：task 直接读写 device/module 的内部状态、module 直接调 HAL、device 反向调用上层、跨层硬编码常量（集中放 `app_config.h` 或 `chassis_config.c`）。
+
+## 代码风格硬性要求
+
+1. **全局变量与 Watch**：关键状态直接用全局变量暴露（如 `extern Chassis_t Chassis;`），字段带单位注释，方便添加到 Watch 窗口；不复制第二套 debug 结构体。模块内部跨周期的中间量允许 `static`/全局，但同一份事实只保留一个所有者。
+2. **数据消费与调用规范**：全局变量只是调试入口；业务数据消费仍走模块公开接口（如 `Motor_DM_GetState()`、`Motor_DM_SetCommand()`、`CAN_Task_GetTxErrorCount()`），跨层访问必须通过函数接口，禁止裸跨层访问内部 `static` 状态。
+3. **删除的防护（重构重点）**：
+   - 入口参数校验：NULL/范围检查、防御性 `isfinite`/溢出判断；
+   - 重复的 `Is`/`Get`/`Check` 查询函数、只消费一次的派生布尔状态（`bench_flag`、`output_flag` 之类）；
+   - 统一 status/错误码返回值体系——流程型函数默认 `void`；
+   - 一两行就能写完的简单表达式不包函数。
+4. **保留的红线（实机安全，绝对不删）**：上电默认零输出、电机限幅与离线保护、数组边界、除零保护、腿长范围与几何奇异判断、`safe_flag` 安全门、fault 检测与最终命令清零、`Chassis.dt` 越界回退、IMU 温度保护。
+5. **禁止**：新增任何封装层/接口层/工厂/回调注册；新增任何防御性代码；顺手重构未指定的模块；改变 task 层对外接口与通信协议（除非用户明确要求）。
+6. **算法代码只去封装，不改数学**：LQR、PID、Kalman、VMC、五连杆运动学只做结构性简化，公式、状态顺序、参数值一律不动。
+
+## 反面/正面写法对照（重构时照此执行）
+
+反面写法（禁止出现，看到就删）：
+
+```c
+if (ptr == NULL) return;                 /* 参数校验：固定调用链已保证有效 */
+if (!isfinite(v)) v = 0.0f;              /* 防御性判断：掩盖真实问题，还费分支 */
+uint8_t ret = Func(); if (ret != OK) {}  /* 返回值检查：流程型函数用 void */
+if (x > MAX) x = MAX;                    /* 冗余限幅：物理限位由电机驱动/机械保证 */
+Chassis_Init(&cfg, 0);                   /* 句柄+配置传参：直接初始化全局 Chassis */
+```
+
+正面写法（照此写）：
+
+```c
+Chassis.lqr.target[CHASSIS_STATE_D_S] = goal.d_s;     /* 全局直访，Watch 可见 */
+Motor_DM_GetState(i, &s);                              /* 跨层数据消费走接口 */
+void Chassis_Control(void)                             /* 流程函数 void，无状态返回 */
+Limit_Symmetric(v, lim)                                /* 算法本身需要的限幅保留 */
+```
+
+注意区分：控制算法**本身需要**的限幅、奇异判断、积分限位属于功能代码，保留；单纯"防止调用方传错"的防御性判断属于防护，删除。
+
+## 重构工作流
+
+1. 先重构 `User_File/3_Chariot/1_Module/Chassis` 试点，用户确认风格后再铺开到其他层。
+2. 每个模块重构完必须构建验证：`cmake --build build/Debug`（Ninja + arm-none-eabi-gcc），零错误零警告才提交。
+3. 涉及底盘逻辑时回归主机单测：`Tests/` 下 `test_chassis_*.c` 用系统 gcc 直接编译运行。
+   仓库里**没有测试脚本或 CMake target**，编译命令、每个测试要链接的源文件、以及
+   `test_motor_dm` 无法在主机编译、`test_chassis_recovery` 需要临时把三道输出门置 0
+   这两个坑，都记在工作区根目录 `../CLAUDE.md` 的 "Host tests" 一节。
+   （`build/host_tests/` 下只是历史产物，不是当前构建输出。）
+4. 汇报格式（中文）：改了哪些文件、删了哪些防护（标注 `文件:行号`）、保留了什么、如何验证的。删除清单先列给用户确认，不要一次性大批量删完。
+
+---
+
+# 两块板通用的机制
 
 ## Build (firmware)
 
@@ -62,186 +146,29 @@ host tests**: `Chassis/Tests/` and `Gimbal/Real/Tests/`. All `-I` paths below ar
 test is otherwise reported as a pass — this has caused a false PASS more than once. Redirecting
 gcc's stderr to `/dev/null` inside a loop is the usual way to hide the failure; don't.
 
-### Chassis
+各板的具体配方在各板的 `CLAUDE.md`。
+
+## 板间协议契约
+
+两板通过专用 **FDCAN3**（PD12/PD13）通信：DR16 接收机在云台板，遥控输入由云台向下转发给底盘。
+
+⚠ **协议常量在两侧的 `User_File/1_Middleware/0_Common/app_config.h` 里各存一份，
+必然漂移——改一侧必须同步另一侧。** 已经发生过：
+
+```
+APP_BOARD_SEND_DIV    Chassis = 5U    Gimbal/Real = 1U
+```
+
+底盘那份还是**死配置**（`Chassis/User_File/` 里引用次数为 0，底盘只收不发）。
+改协议时用这条命令对一遍：
 
 ```bash
-INC="-IUser_File/1_Middleware/0_Common -IUser_File/1_Middleware/2_Algorithm \
--IUser_File/2_Device/IMU/BMI088 -IUser_File/2_Device/Motor/Motor_DM \
--IUser_File/2_Device/Motor/Motor_DJI -IUser_File/2_Device/Communication/DR16 \
--IUser_File/2_Device/Communication/USB -IUser_File/2_Device/Communication/Board \
--IUser_File/3_Chariot/1_Module/Chassis \
--IMiddlewares/ST/ARM/DSP/Include -IDrivers/CMSIS/Include"
-FLAGS="-Wall -Wextra -DARM_MATH_CM7 -DDISABLEFLOAT16"
+diff <(grep APP_BOARD_ Chassis/User_File/1_Middleware/0_Common/app_config.h) \
+     <(grep APP_BOARD_ Gimbal/Real/User_File/1_Middleware/0_Common/app_config.h)
 ```
 
-| Test | Extra sources |
-|---|---|
-| `test_angle` | `2_Algorithm/Angle.c` |
-| `test_leso` | `2_Algorithm/LESO.c` |
-| `test_dr16` | `DR16/device_dr16.c` `0_Common/remote_input.c` |
-| `test_usb_protocol` | `USB/device_usb_protocol.c` `2_Algorithm/CRC.c` |
-| `test_chassis_vmc` | `chassis_vmc.c` `chassis_config.c` `Angle.c` |
-| `test_chassis_remote` | `chassis_remote.c` `chassis_config.c` `Angle.c` |
-| `test_chassis_spring` | `chassis_vmc.c` `chassis_config.c` `Angle.c` |
-| `test_chassis_observer` | `chassis_observer.c` `chassis_vmc.c` **`$TMP/cfg_obs.c`** `Angle.c` `LESO.c` `LQR.c` |
-| `test_chassis_recovery` | `chassis_control.c` + other three chassis `.c` + **`$TMP/cfg_rec.c`** + **`$TMP/mpc_stub.c`** + `Angle/PID/LQR/LESO/Kalman.c` + 6 × `Middlewares/ST/ARM/DSP/Source/MatrixFunctions/arm_mat_{init,add,sub,mult,trans,inverse}_f32.c` |
-
-Skipped:
-
-- **`test_motor_dm` does not build on host.** It includes CubeMX's `fdcan.h` and
-  `device_motor_dm.c` includes `task_can.h`; there are no stubs.
-- **`test_chassis_mpc` needs g++**, `-DEIGEN_NO_DEBUG -I<TinyMPC> -I<TinyMPC/Eigen>`, a
-  `stm32h7xx.h` DWT stub, and links `tiny_api.cpp admm.cpp rho_benchmark.cpp`
-  (`rho_benchmark.cpp` can't be omitted — `admm.cpp` references it). Recipe in
-  `Codex文档/handoff-2026-09-05-1524.md` §6.
-
-#### The config overrides — two tests need *opposite* flag values
-
-`test_chassis_recovery` asserts the gates are `0` (`test_output_disabled`) and aborts the whole
-suite on its first test, so both suites need overridden copies. **`off_ground_act_flag` must
-differ between the two**: `test_chassis_observer` asserts it is `0` (the shipped-safe default),
-while `test_chassis_recovery`'s `test_off_ground_actions` only reaches its code path when it is
-`1`. Using one shared `cfg_off.c` makes one of the two fail no matter which value you pick.
-
-**The seds must force the value they need, not assume the current one.** These flags are live
-tuning switches — whoever is on the robot flips them between sessions, and a recipe written
-against "whatever it is right now" silently rots. Each pair below matches the *other* value, so
-one sed is a no-op and the other flips it, whichever state the working tree is in.
-
-```bash
-sed 's/APP_CHASSIS_OUTPUT_ENABLE 1U/APP_CHASSIS_OUTPUT_ENABLE 0U/' \
-    User_File/1_Middleware/0_Common/app_config.h > $TMP/inc/app_config.h
-
-CFG=User_File/3_Chariot/1_Module/Chassis/chassis_config.c
-
-# recovery: gates off, off_ground_act_flag forced to 1
-sed -e 's/\.joint_flag = 1U,/.joint_flag = 0U,/' \
-    -e 's/\.wheel_flag = 1U,/.wheel_flag = 0U,/' \
-    -e 's/\.off_ground_act_flag = 0U,/.off_ground_act_flag = 1U,/' $CFG > $TMP/cfg_rec.c
-
-# observer: gates off, off_ground_act_flag forced to 0
-sed -e 's/\.joint_flag = 1U,/.joint_flag = 0U,/' \
-    -e 's/\.wheel_flag = 1U,/.wheel_flag = 0U,/' \
-    -e 's/\.off_ground_act_flag = 1U,/.off_ground_act_flag = 0U,/' $CFG > $TMP/cfg_obs.c
-```
-
-Both compile with `-I$TMP/inc` **first** so the patched `app_config.h` wins.
-
-`test_chassis_recovery` also needs an MPC shell, because `Chassis_Init()` calls into it.
-**Check the signatures in `chassis_mpc.h` before copying this** — the interface has already
-changed once (`Chassis_MPC_Solve` used to take the state and reference; it was split into
-`SetInput` + a no-arg `Solve`), and a stale stub fails at link time, not compile time:
-
-```c
-/* $TMP/mpc_stub.c */
-#include "chassis_mpc.h"
-Chassis_MPC_t Chassis_MPC;
-void Chassis_MPC_Init(void) { Chassis_MPC.ready_flag = 1U; }
-void Chassis_MPC_SetInput(const float x0[4], float H_ref) { (void)x0; (void)H_ref; }
-void Chassis_MPC_Solve(void) { }
-```
-
-### Gimbal/Real
-
-```bash
-INC="-IUser_File/1_Middleware/0_Common -IUser_File/1_Middleware/2_Algorithm \
--IUser_File/2_Device/Communication/DR16 -IUser_File/2_Device/Communication/USB"
-```
-
-| Test | Extra sources |
-|---|---|
-| `test_angle` | `2_Algorithm/Angle.c` |
-| `test_dr16` | `DR16/device_dr16.c` |
-| `test_usb_protocol` | `USB/device_usb_protocol.c` `2_Algorithm/CRC.c` |
-| `test_board_protocol` | see below — spans both projects |
-
-`test_board_protocol` packs with the gimbal's `device_board.c` and unpacks with the chassis's,
-so it links **one file from each project**. Both projects have a `device_board.h` with the same
-name and different contents, so the two `.c` files must be compiled in **separate gcc
-invocations** with their own `-I`, then linked; a single invocation picks the wrong header.
-It also needs three stub headers on the include path (`stm32h7xx_hal.h` declaring `HAL_GetTick`,
-`fdcan.h` with a dummy `FDCAN_HandleTypeDef` + `hfdcan3`, `task_can.h` declaring
-`CAN_Task_UpdateTxFrame`); the test file itself defines those symbols. The exact command is in
-the comment block at the top of `Gimbal/Real/Tests/test_board_protocol.c`.
-
-## Firmware architecture
-
-CubeMX HAL/FreeRTOS in `Core/`, `Drivers/`, `cmake/stm32cubemx/`; all hand-written code under `User_File/` in strict one-way layers (see `Chassis/CLAUDE.md` for the dependency rules). Tasks are created in `Core/Src/freertos.c`: `CAN_Task_Init`, `Chassis_Task_Init`, `IMU_Task_Init`, `Remote_Task_Init`, `USB_Task_Init`.
-
-There is **no unified status/error type** — process functions return `void`, and safety is carried by device online flags, the `Chassis.fault` bitfield and the final zero-output path.
-
-### Chassis module (`3_Chariot/1_Module/Chassis`)
-
-Five files, each a real algorithm or input boundary — no forwarding wrappers:
-
-- `chassis_config.*` — the single `const Chassis_Config_t Chassis_Config`. **Every** mechanical, model, threshold and gain constant lives here; nothing is hardcoded in task/device/control code. Force-type observer thresholds are expressed as *ratios* of single-leg static load so swapping `model`/`wheel` rescales them automatically (this project is meant to run on more than one machine).
-- `chassis_vmc.*` — five-bar forward/inverse kinematics and the virtual-force ↔ joint-torque Jacobian. **`F0 > 0` extends the leg / pushes into the ground** (verified by numerical virtual work; the reference HERO_LEG project uses the opposite convention — do not carry its signs over).
-- `chassis_control.*` — the one global `Chassis_t Chassis`, state machine, and the whole control chain.
-- `chassis_observer.*` — four independent **read-only** observers (`slip` / `ground` / `turn` / `stuck`), each with `Init` / `Update` / `Calc`. `Update` computes physical observables, `Calc` applies thresholds and hysteresis. They write only their own struct and never touch control quantities.
-- `chassis_remote.*` — maps the protocol-agnostic `Remote_t` into `Chassis.goal` and the outer mode.
-
-`Chassis_t Chassis` is the sole runtime state and the long-term Watch entry point; there is no second debug struct.
-
-### Gas spring (气弹簧)
-
-Each leg carries one gas strut spanning the knee, mounted between `l1` (near the hip) and
-`l2` (near the knee). It applies a real support force that **never appears in the motor
-torques**, so it has to be modelled explicitly in three places, all fed by the single
-`Chassis.leg[].F0_spring` computed in `Chassis_Leg_Update`:
-
-- `chassis_control.c` LQR path — **subtracted** from `F0` after the MPC/PID branch (both
-  branches produce the *total* axial force; the motors only owe the remainder).
-- `chassis_control.c` `Joint_Control` — fed forward as joint torque, because the position
-  cascade used by recovery/bench/step has no feedforward channel of its own.
-- `chassis_observer.c` — **added back** into `Fn`. This is the one term that must be added
-  rather than subtracted: it is a real force the ground feels but `VMC_Force_Calc` cannot
-  reconstruct from motor torque. Skip it and `Fn_ratio` drifts off 1.0 at standing, silently
-  moving every force threshold defined as a ratio of static load.
-
-Because `l5 = 0`, the knee angle is a function of `L0` alone, so the strut has **no `Tp`
-component** — the whole effect is one scalar on `F0`. That proof dies if `l5` ever becomes
-non-zero. `model.body_mass` does **not** change when the strut is fitted: it is the total
-equivalent support mass, and the strut merely takes over part of it.
-
-The strut is **well sized**, and it is the main reason `joint_T_limit` has headroom. The
-single-leg `F0` requirement is 97.5 N (`0.5 · body_mass 16.43 · g · F0_gravity_scale 1.21`);
-the strut supplies 87–111 N of it, i.e. 90–114%. The motors cover only the ±14 N residual, so
-standing joint torque drops from 10–14 N·m to **0.3–1.9 N·m**.
-
-⚠ An earlier version of this section claimed the strut was "over-strong by 3.3×" and that the
-robot had to *pull its legs in* to stand. That was wrong: it compared against `body_mass = 6.7`,
-a figure back-derived from command values that the DM torque-scale mismatch had inflated 2.67×
-(see the MIT torque scale section). Weighing the robot at 20.8 kg fixed `body_mass` to 16.43 and
-reversed the conclusion. **Before judging a spring too stiff or too soft, verify the force
-requirement side first.**
-
-The compensation is **pure feedforward with no feedback to correct a scale error**, so
-`spring.enable_flag` stays `0` until three preconditions hold: `APP_DM_TOR_MIN/MAX` matches
-the motor's TMAX register, `model.body_mass` has been re-derived from a whole-robot weighing
-rather than from torque, and the observer's force-ratio thresholds have been re-calibrated at
-the correct scale. See `Codex文档/实机调试检查清单.md` §2.5 and §6.
-
-Host tests that inject synthetic DM feedback torque must subtract `F0_spring` from the *total*
-axial force they intend to represent — the strut's share never passes through the motors.
-`test_chassis_recovery` does this in both off-ground fixtures; getting it wrong makes off-ground
-detection silently unreachable.
-
-### Control chain (`Chassis_Control`, per 1 ms tick)
-
-```
-device feedback -> five-bar state -> wheel/leg speed fusion (2-state Kalman)
-  -> 10-state vector -> leg-length PID + roll PID + gravity feedforward -> F0
-  -> poly22 K fit from live L0 -> per-state error clamp -> K·error -> 4 outputs
-  -> VMC maps (F0, Tp) to joint torques -> torque/current limit -> safety gates
-```
-
-State order is fixed and must never be reordered: `s, d_s, fai, d_fai, theta_l, d_theta_l, theta_r, d_theta_r, theta_b, d_theta_b`. Output order: left wheel, right wheel, left leg swing, right leg swing.
-
-`Chassis.lqr.error[]` holds the **clamped** error actually fed to `K` (`Chassis_Config.lqr.error_limit[]`, `0` = unclamped) — the first thing to read when one channel dominates the output.
-
-Remote scheme in STANDING: sticks command **velocities only**. Position and heading targets are integrated from them; releasing a stick zeroes the rate target and latches the hold reference (`body.s` restarts integrating from zero, `target[FAI]` snaps to the current heading). No target ramps.
-
-CAN mapping (`app_config.h:44-45`): **FDCAN1 = the two RIGHT DM hips (`0x001`/`0x002`) *plus* both DJI wheel ESCs (`0x201`/`0x202`)**; **FDCAN2 = the two LEFT DM hips (`0x003`/`0x004`)**. DM feedback ID = `0x010 + motor ID`. The `0x200` frame byte slot is derived from the feedback ID via `APP_DJI_TX_SLOT()` — never hardcode it.
+板间协议的唯一回归保障是 `Gimbal/Real/Tests/test_board_protocol.c`——它同时链两个工程的
+`device_board.c`，改协议后必须跑它。
 
 ### DM MIT torque scale — the trap that hid for weeks
 
@@ -267,16 +194,8 @@ Consequence for tuning: K's **wheel rows go through the DJI ESCs and were always
 while its **leg-swing rows go through DM and were scaled**, so historical tuning has a
 wheel/leg-swing gain mismatch baked in.
 
-### Safety gating — read before changing any motor output
-
-A computed command reaches a motor only if **all** of these pass, and each is a separate place to look:
-
-1. `APP_CHASSIS_OUTPUT_ENABLE` (`app_config.h`) — master compile-time gate.
-2. `Chassis_Config.output.joint_flag` / `wheel_flag` — per-channel gates.
-3. `Chassis.fault == CHASSIS_FAULT_NONE` — any bit blocks both channels. Bits: `0x01` disabled, `0x02` IMU, `0x04` DM offline, `0x08` DJI offline, `0x10` CAN, `0x20` posture/config, `0x40` kinematics, `0x100` remote offline/e-stop.
-4. `Chassis.output.safe_flag` — cleared only by a successful gate above; `Chassis_Command_Send` zeroes the final arrays whenever it is set.
-
-Faults never block the *computation* — `T_joint_req` / `I_wheel_req` keep the live request for Watch while the final `T_joint` / `I_wheel` go to zero. Each output channel has exactly **one** clamp point (`output.joint_T_limit`, `wheel.T_limit`); do not add a second one.
+**两块板都用 DM 电机、都走 MIT 编码，所以这个陷阱对两块板都成立。**
+各板的实际量程和核对状态见各板的 `CLAUDE.md`。
 
 ## Conventions beyond the style doc
 
