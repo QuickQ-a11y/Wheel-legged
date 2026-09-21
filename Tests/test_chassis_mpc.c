@@ -31,11 +31,18 @@ static void solve_until_settled(float a, float da, float H, float dH, float Href
     }
 }
 
-/* 静止站立、高度已到位时，两腿应各承担一半整车重量。 */
+/*
+ * 静止站立、高度已到位时，两腿应各出一份平衡支撑力。
+ *
+ * ⚠ 口径必须和 chassis_mpc.cpp 的 F_eq 完全一致，包括 F0_gravity_scale：
+ * 那个系数补的是未建模恒定力（髋部分担的腿自重 + 五连杆静摩擦），MPC 的
+ * 代价 Uref 和模型常量项都按它走。少乘它这条断言就会把正确实现判成错。
+ */
 static void test_mpc_steady_state(void)
 {
     const float F_eq = 0.5f * Chassis_Config.model.body_mass *
-                       Chassis_Config.model.gravity;
+                       Chassis_Config.model.gravity *
+                       Chassis_Config.F0_gravity_scale;
 
     solve_until_settled(0.0f, 0.0f, 0.20f, 0.0f, 0.20f);
     assert(fabsf(Chassis_MPC.F[0] - F_eq) < TOL);

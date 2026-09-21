@@ -9,6 +9,7 @@
     // 与本机 bundles 目录下的文件夹名不一致时，改下面四处 14.3.1+st.2。
     "version": "0.2.0",
     "configurations": [
+
         {
             // 探针和芯片配置都在仓库根目录 openocd.cfg，
             // 和"烧录 (OpenOCD)"任务共用同一份，改调试器只改那个文件。
@@ -79,13 +80,20 @@
             "type": "cortex-debug",
             "request": "launch",
             "cwd": "${workspaceFolder}",
+            /*生成的烧录文件路径*/
             "executable": "${workspaceFolder}/build/Debug/Wheel-legged.elf",
+            /*调试服务器：类型*/
             "servertype": "jlink",
+            /*JLink-GDB服务器*/
             "serverpath": "C:/Program Files/SEGGER/JLink/JLinkGDBServerCL.exe",
+            /*ARM 工具链路径，这里用arm-eabi-none-gcc，也就是2.3我们下载的那个*/
             "armToolchainPath": "${env:LOCALAPPDATA}/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin",
+            /*使用的芯片*/
             "device": "STM32H723VG",
             "interface": "swd",
+            /*调试开始运行到main函数*/
             "runToEntryPoint": "main",
+            /*这个是用来打开实时监控变量的，这个不打开只能在调试暂停的时候才能读到变量值*/
             "liveWatch": {
                 "enabled": true,
                 "samplesPerSecond": 2

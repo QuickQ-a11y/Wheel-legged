@@ -1160,6 +1160,18 @@ static void Recovery_Swing(float dt, float theta_b)
          * theta 是虚拟腿相对大地竖直方向的角，所以要把机体倾角加回去。
          * 这里用 theta_b 是安全的：摆腿只在 Body_Upward() 放行后进入、
          * 退出也再查一次 az，全程 |theta_b| 都在不折返的区间内。
+         *
+         * ⚠ 由此推出一条【看着像 bug 但不是】的行为，别去"修"它：
+         * 两条腿分居大地竖直两侧时（例如实测到的 phi0 = 0.9 与 3.14，
+         * 对应 theta = -0.67 与 +1.57），而本阶段要求两腿 theta 都落进
+         * 同号窗口 [theta_min, theta_max]，于是【必然有一条腿要穿过
+         * theta = 0】。穿过那一刻腿处在 extend_L0 最长态、轮子踩地，机体
+         * 被撬起来——就是实机看到的"窝着的腿蹬一下"。
+         * 它只随 theta_b 的符号在两条腿之间换，不会消失：
+         *   theta_b=0  -> theta_ref=+0.95：窝腿走 1.62 rad 穿竖直
+         *   theta_b=-0.5 -> theta_ref=-0.95：改成后腿走 2.02 rad 穿竖直
+         * 嫌动作猛是降 rotate_rate 的事，和卡滞屏障无关（屏障在 phi0=0.4，
+         * 而穿竖直发生在 phi0 = phi0_offset - theta_b，是两个不同的角）。
          */
         theta[side] = Algorithm_AngleNearestEquivalentRad(
             Chassis.leg[side].phi0_total -
@@ -1180,6 +1192,27 @@ static void Recovery_Swing(float dt, float theta_b)
          * 近路要穿过屏障、把腿怼进地里卡住；改成强制反转，从机体正上方绕过去。
          * 屏障上侧仍按就近：全周扫掠验证过，上侧的近路不会跨屏障。
          * 判据用主值 phi0，和收腿站起同一个口径。
+         *
+         * ⚠⚠ 已知缺陷（2026-09-12 实测确认，暂未修，先记在这里）：
+         * 本判据只看【机体系】的 phi0，完全不看 theta_b 和 theta_ref，而它想
+         * 防的事（近路穿过大地竖直/屏障）是【大地系】的。于是同一工况下两头都错：
+         *
+         *   theta_b = -0.5 时      判定        行程       仍穿大地竖直
+         *     phi0 = 0.20        强制反转    5.36 rad        是   <- 绕远还白绕
+         *     phi0 = 0.40        就近        0.72 rad        否
+         *
+         * 而 theta_b = 0 时同样的 phi0=0.20 走强制反转是 3.96 rad 且不穿——
+         * 所以它是 situational：有时净收益，有时净损失。
+         *
+         * 将来要修就【复用 State_Enter 里收腿站起那套构造】：把圆在屏障处剪开
+         * 展成 [0,2pi)，在展开坐标里比较起点和目标，行程的符号就是转向，屏障
+         * 天然绕开，而且近路不跨屏障时它自己会选近路——一个式子覆盖两种情况。
+         * 目标要和 recovery_theta_ref 同一拍锁存（theta_b 全程在变，屏障又是
+         * 不连续点，每拍重算会让腿在那儿掉头）。不要另发明一个判据。
+         *
+         * 为什么现在不修：气弹簧真开之后静止姿态会被挤到 phi0≈0 / ≈3.14 两极
+         * （见 chassis_config.h 的 phi0_barrier 注释），届时本判据从偶尔触发
+         * 变成常态触发，该保留/修正/删除要按那时的实测定。
          */
         if (Chassis.recovery_direction[side] == 0.0f)
         {

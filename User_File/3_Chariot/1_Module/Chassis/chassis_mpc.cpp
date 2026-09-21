@@ -55,7 +55,13 @@ void Chassis_MPC_Init(void)
     const tinytype g  = Chassis_Config.model.gravity;
     const tinytype Rh = Chassis_Config.wheel.half_track;
     const tinytype Ts = (tinytype)Chassis_Config.mpc.decimation * APP_CTRL_DT_S;
-    const tinytype F_eq = 0.5f * M * g;
+    /*
+     * 单腿平衡支撑力。乘 F0_gravity_scale 是为了把【未建模的恒定力】算进来：
+     * 静力学说髋部只需 0.5*M*g，但实测稳态命令比它高一截——髋部实际分担了一部分
+     * 腿自重（模型把腿轮自重全算在地面上），再加五连杆轴承和同步带的静摩擦。
+     * PID 路径本来就用同一个系数补这一份，MPC 以前不读它，两条路径口径不一致。
+     */
+    const tinytype F_eq = 0.5f * M * g * Chassis_Config.F0_gravity_scale;
 
     /*
      * 连续模型雅可比线性化后再前向欧拉离散。
@@ -78,7 +84,13 @@ void Chassis_MPC_Init(void)
           b_h,     b_h;
 
     tinyVector fdyn(nx);
-    fdyn << 0, 0, 0, -g * Ts;
+    /*
+     * ⚠ 常量项必须与 F_eq 同源，写成 -(2*F_eq/M)*Ts 而不是 -g*Ts。
+     * 否则代价函数的 Uref 停在 F_eq、而模型的平衡点停在 0.5*M*g，两者互相拉扯，
+     * 结果就是【又一个稳态误差】，只是方向相反。同源之后平衡点严格落在 F = F_eq，
+     * 标称无稳态误差。输入增益 Bd 仍用真实质量 M，那是动力学，不该跟着缩放。
+     */
+    fdyn << 0, 0, 0, -(2.0f * F_eq / M) * Ts;
 
     tinyVector Q(nx);
     tinyVector Rw(nu);
