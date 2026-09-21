@@ -101,8 +101,20 @@ static_assert((APP_DJI_TX_SLOT(APP_DJI_TRIGGER_RX_ID) !=
 #define APP_REMOTE_TIMEOUT_TICKS 100U
 #define APP_REMOTE_SYNC_FRAMES 2U
 
+/*
+ * 遥控后端选择。两种接收机挂同一路 UART5，但波特率和校验不同，所以
+ * task_remote 在启动接收前会按所选后端重新初始化 UART。
+ * 换遥控器只改这一个宏，然后重新编译烧录。
+ */
+#define APP_REMOTE_BACKEND_DR16 0
+#define APP_REMOTE_BACKEND_IA10B 1
+#define APP_REMOTE_BACKEND APP_REMOTE_BACKEND_IA10B
+
 /* DR16输入整形死区；轴值已经由DBUS解析为约-660..660。 */
 #define APP_DR16_DB 10
+
+/* FS-iA10B 输入整形死区；轴值由 i-BUS 解析为约 -500..500。 */
+#define APP_IA10B_DB 8
 
 /*
  * 控制器第一阶段只计算中间状态和安全输出。

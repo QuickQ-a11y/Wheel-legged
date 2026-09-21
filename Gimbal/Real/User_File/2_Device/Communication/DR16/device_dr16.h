@@ -10,6 +10,17 @@ extern "C" {
 #include <stdint.h>
 
 #define DR16_FRAME_LEN 18U
+
+/*
+ * 本后端要求的 UART 参数，与 IA10B 后端对称。这组值就是 CubeMX 当前给 UART5
+ * 配的，所以对 DR16 而言 task_remote 里那次重新初始化是空操作——写出来是为了
+ * 让"谁决定 UART 参数"这件事显式，换遥控后端时不必回头翻 CubeMX 配置。
+ * DBUS 是 100000 8E1、正常电平（9B + EVEN 即 8 数据位 + 1 校验位）。
+ */
+#define DR16_UART_BAUD 100000U
+#define DR16_UART_WORDLENGTH UART_WORDLENGTH_9B
+#define DR16_UART_PARITY UART_PARITY_EVEN
+#define DR16_UART_STOPBITS UART_STOPBITS_1
 #define DR16_CH_MIN 364U
 #define DR16_CH_MID 1024U
 #define DR16_CH_MAX 1684U

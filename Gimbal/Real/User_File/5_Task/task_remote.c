@@ -12,9 +12,34 @@
 #define REMOTE_TASK_FLAG_RX 0x00000001UL
 #define REMOTE_TASK_FLAG_ERROR 0x00000002UL
 
+/*
+ * 后端差异全部收在这一处别名，函数体保持单一形态。
+ * REMOTE_FRAME_LEN 在 task_remote.h 里已按后端定义。
+ * 这些是编译期别名、不是运行时接口层：零间接、零开销，换后端只改 app_config.h 一个宏。
+ */
+#if APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_IA10B
+#define Remote_Backend_ParseFrame IA10B_ParseFrame
+#define Remote_Backend_MakeRemote IA10B_MakeRemote
+#define REMOTE_DEADBAND APP_IA10B_DB
+#define REMOTE_UART_BAUD IA10B_UART_BAUD
+#define REMOTE_UART_WORDLENGTH IA10B_UART_WORDLENGTH
+#define REMOTE_UART_PARITY IA10B_UART_PARITY
+#define REMOTE_UART_STOPBITS IA10B_UART_STOPBITS
+typedef ia10b_data_t remote_backend_data_t;
+#else
+#define Remote_Backend_ParseFrame DR16_ParseFrame
+#define Remote_Backend_MakeRemote DR16_MakeRemote
+#define REMOTE_DEADBAND APP_DR16_DB
+#define REMOTE_UART_BAUD DR16_UART_BAUD
+#define REMOTE_UART_WORDLENGTH DR16_UART_WORDLENGTH
+#define REMOTE_UART_PARITY DR16_UART_PARITY
+#define REMOTE_UART_STOPBITS DR16_UART_STOPBITS
+typedef dr16_data_t remote_backend_data_t;
+#endif
+
 typedef struct
 {
-    uint8_t frame[DR16_FRAME_LEN];
+    uint8_t frame[REMOTE_FRAME_LEN];
     uint16_t size;
     uint32_t tick;
     volatile uint8_t ready;
@@ -32,7 +57,7 @@ static const osThreadAttr_t remoteTaskAttributes = {
     .priority = (osPriority_t)osPriorityAboveNormal,
 };
 
-static uint8_t dr16DmaBuffer[DR16_FRAME_LEN]
+static uint8_t remoteDmaBuffer[REMOTE_FRAME_LEN]
     __attribute__((section(".ram_d1_dma"), aligned(32)));
 static task_remote_pending_t remotePending;
 static volatile uint32_t remoteOverwriteCount;
@@ -47,9 +72,9 @@ static void Remote_Task_RxCallback(const uint8_t *data, uint16_t length)
 {
     uint16_t copyLength = length;
 
-    if (copyLength > DR16_FRAME_LEN)
+    if (copyLength > REMOTE_FRAME_LEN)
     {
-        copyLength = DR16_FRAME_LEN;
+        copyLength = REMOTE_FRAME_LEN;
     }
     if (remotePending.ready != 0U)
     {
@@ -114,12 +139,12 @@ static void Remote_Task_ProcessFrame(task_remote_state_t *state,
                                      const task_remote_pending_t *pending,
                                      uint16_t *previousKeys)
 {
-    dr16_data_t parsed;
+    remote_backend_data_t parsed;
     Remote_t converted;
 
     state->lastRxSize = pending->size;
     memcpy(state->rawFrame, pending->frame, sizeof(state->rawFrame));
-    if (pending->size != DR16_FRAME_LEN)
+    if (pending->size != REMOTE_FRAME_LEN)
     {
         state->invalidSizeCount++;
         if (state->online == 0U)
@@ -128,7 +153,7 @@ static void Remote_Task_ProcessFrame(task_remote_state_t *state,
         }
         return;
     }
-    if (DR16_ParseFrame(pending->frame, &parsed) == 0U)
+    if (Remote_Backend_ParseFrame(pending->frame, &parsed) == 0U)
     {
         state->invalidFrameCount++;
         if (state->online == 0U)
@@ -140,11 +165,19 @@ static void Remote_Task_ProcessFrame(task_remote_state_t *state,
 
     state->validFrameCount++;
     state->lastValidTick = pending->tick;
+#if APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_DR16
     if (parsed.dialValid == 0U)
     {
         state->invalidDialCount++;
     }
+#endif
 
+    /*
+     * ⚠ 键鼠沿是 DR16 独有的，但它必须排在同步计数【之前】：原来两者是 if/else
+     * 互斥的，拆开后若让同步块先跑，上线那一帧 online 刚置 1、previousKeys 还是
+     * 陈旧值，会凭空报一次按键按下。
+     */
+#if APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_DR16
     state->keyPressed = 0U;
     state->keyReleased = 0U;
     if (state->online != 0U)
@@ -152,7 +185,10 @@ static void Remote_Task_ProcessFrame(task_remote_state_t *state,
         state->keyPressed = parsed.keyBits & (uint16_t)(~(*previousKeys));
         state->keyReleased = *previousKeys & (uint16_t)(~parsed.keyBits);
     }
-    else
+#else
+    (void)previousKeys;   /* i-BUS 没有键鼠通道，这一路不消费它 */
+#endif
+    if (state->online == 0U)
     {
         if (state->syncFrameCount < APP_REMOTE_SYNC_FRAMES)
         {
@@ -164,10 +200,10 @@ static void Remote_Task_ProcessFrame(task_remote_state_t *state,
         }
     }
 
-    state->dr16Data = parsed;
-    DR16_MakeRemote(&parsed,
-                    APP_DR16_DB,
-                    &converted);
+    state->backendData = parsed;
+    Remote_Backend_MakeRemote(&parsed,
+                              REMOTE_DEADBAND,
+                              &converted);
     if (state->online != 0U)
     {
         converted.online = 1U;
@@ -177,10 +213,12 @@ static void Remote_Task_ProcessFrame(task_remote_state_t *state,
     {
         memset(remote, 0, sizeof(*remote));
     }
+#if APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_DR16
     *previousKeys = parsed.keyBits;
+#endif
 }
 
-/** @brief 接收、校验并发布 DR16 数据，且不阻塞底盘控制任务。 */
+/** @brief 接收、校验并发布遥控数据，且不阻塞底盘控制任务。 */
 static void Remote_Task_Entry(void *argument)
 {
     task_remote_state_t state = {0};
@@ -191,10 +229,24 @@ static void Remote_Task_Entry(void *argument)
     uint32_t rateFrameCount = 0U;
 
     (void)argument;
-    memset(dr16DmaBuffer, 0, sizeof(dr16DmaBuffer));
+    memset(remoteDmaBuffer, 0, sizeof(remoteDmaBuffer));
+    /*
+     * 按所选后端重新初始化 UART5。两种接收机挂同一路物理线，但 DBUS 是
+     * 100000 8E1、i-BUS 是 115200 8N1（两者都是正常电平，不需要 RX 反相）。
+     * 这里重配而不是改 Core/Src/usart.c，是因为那个文件由 CubeMX 生成，
+     * 重新生成会被冲掉；DR16 后端填的就是 CubeMX 现有的值，对它是空操作。
+     */
+    huart5.Init.BaudRate = REMOTE_UART_BAUD;
+    huart5.Init.WordLength = REMOTE_UART_WORDLENGTH;
+    huart5.Init.Parity = REMOTE_UART_PARITY;
+    huart5.Init.StopBits = REMOTE_UART_STOPBITS;
+    if (HAL_UART_Init(&huart5) != HAL_OK)
+    {
+        Error_Handler();
+    }
     Driver_UART_Init(&huart5,
-                     dr16DmaBuffer,
-                     sizeof(dr16DmaBuffer),
+                     remoteDmaBuffer,
+                     sizeof(remoteDmaBuffer),
                      Remote_Task_RxCallback,
                      Remote_Task_ErrorCallback);
     Driver_UART_StartRx(&huart5);
@@ -220,9 +272,12 @@ static void Remote_Task_Entry(void *argument)
         {
             state.online = 0U;
             state.syncFrameCount = 0U;
+#if APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_DR16
             state.keyPressed = 0U;
             state.keyReleased = 0U;
-            previousKeys = state.dr16Data.keyBits;
+            /* 掉线时把基准对齐到最后一帧，重新上线不会报出一次假的按键沿。 */
+            previousKeys = state.backendData.keyBits;
+#endif
             memset(&remote, 0, sizeof(remote));
         }
         if (driverUart5Object.receiving == 0U)

@@ -51,6 +51,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${SHARED}/2_Device/Motor/Motor_DJI/device_motor_dji.c
     ${SHARED}/2_Device/Communication/USB/device_usb_protocol.c
     ${SHARED}/2_Device/Communication/DR16/device_dr16.c
+    ${SHARED}/2_Device/Communication/IA10B/device_ia10b.c
     ${SHARED}/2_Device/Communication/Board/device_board.c
     ${SHARED}/3_Chariot/1_Module/Gimbal/gimbal_config.c
     ${SHARED}/3_Chariot/1_Module/Gimbal/gimbal_control.c
@@ -81,6 +82,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${SHARED}/2_Device/Motor/Motor_DJI
     ${SHARED}/2_Device/Communication/USB
     ${SHARED}/2_Device/Communication/DR16
+    ${SHARED}/2_Device/Communication/IA10B
     ${SHARED}/2_Device/Communication/Board
     ${SHARED}/5_Task
     ${SHARED}/3_Chariot/1_Module/Gimbal
