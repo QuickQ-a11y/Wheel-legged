@@ -1145,7 +1145,7 @@ const Chassis_Config_t Chassis_Config = {
     /* 小陀螺保留速度和姿态反馈，关闭位移与航向角位置反馈。 */
     .top = {
         .max_d_s = 0.6f,
-        .spin_d_fai = 3.14f,
+        .spin_d_fai = 9.42f,
         /* 缺这一项时斜坡步长为0，小陀螺角速度目标会永远停在0转不起来。 */
         .d_fai_rate = 12.0f,
         /*

@@ -82,13 +82,18 @@ float IA10B_NormalizeAxis(int16_t axis, int16_t deadband)
 
 Remote_Switch_t IA10B_ConvertSwitch(uint16_t channel)
 {
+    /*
+     * ⚠ i6X 的拨杆是【上小下大】：实测 UP=1000、MID=1500、DOWN=2000，
+     * 和"值大 = 位置高"的直觉相反，所以这里低值判 UP、高值判 DOWN。
+     * REMOTE_SWITCH_UP 的语义必须和 DR16 一致 —— 表示拨杆物理朝上。
+     */
     if (channel <= IA10B_SW_LOW_MAX)
     {
-        return REMOTE_SWITCH_DOWN;
+        return REMOTE_SWITCH_UP;
     }
     if (channel >= IA10B_SW_HIGH_MIN)
     {
-        return REMOTE_SWITCH_UP;
+        return REMOTE_SWITCH_DOWN;
     }
 
     return REMOTE_SWITCH_MID;

@@ -21,6 +21,11 @@ extern "C" {
 #define DR16_UART_WORDLENGTH UART_WORDLENGTH_9B
 #define DR16_UART_PARITY UART_PARITY_EVEN
 #define DR16_UART_STOPBITS UART_STOPBITS_1
+/*
+ * DBUS 本身就是反相电平，而座子上的硬件反相器已经把它翻回正常，
+ * 所以 MCU 这边【不能】再反一次。i-BUS 那个后端相反，见 device_ia10b.h。
+ */
+#define DR16_UART_RXINVERT UART_ADVFEATURE_RXINV_DISABLE
 #define DR16_CH_MIN 364U
 #define DR16_CH_MID 1024U
 #define DR16_CH_MAX 1684U

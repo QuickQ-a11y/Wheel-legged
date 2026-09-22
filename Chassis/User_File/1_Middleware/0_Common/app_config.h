@@ -117,7 +117,7 @@ static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) !=
  * 站立模式下摇杆给的都是速度量：前进速度和偏航角速度；位移和航向目标
  * 由控制层积分得到，松杆后锁位置、锁航向，因此不需要目标斜坡。
  */
-#define APP_RC_MAX_VEL 1.0f   /* 满杆前进速度，m/s。重整定期的保守值。 */
+#define APP_RC_MAX_VEL 2.0f   /* 满杆前进速度，m/s。重整定期的保守值。 */
 #define APP_RC_MAX_YAW 2.0f   /* 满杆偏航角速度，rad/s。 */
 #define APP_RC_VEL_RATE 1.0f  /* 爬台阶接近段的速度目标斜率，m/s^2。 */
 #define APP_RC_LEG_S 0.28f

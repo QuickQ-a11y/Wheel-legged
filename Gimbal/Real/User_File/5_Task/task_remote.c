@@ -25,6 +25,7 @@
 #define REMOTE_UART_WORDLENGTH IA10B_UART_WORDLENGTH
 #define REMOTE_UART_PARITY IA10B_UART_PARITY
 #define REMOTE_UART_STOPBITS IA10B_UART_STOPBITS
+#define REMOTE_UART_RXINVERT IA10B_UART_RXINVERT
 typedef ia10b_data_t remote_backend_data_t;
 #else
 #define Remote_Backend_ParseFrame DR16_ParseFrame
@@ -34,6 +35,7 @@ typedef ia10b_data_t remote_backend_data_t;
 #define REMOTE_UART_WORDLENGTH DR16_UART_WORDLENGTH
 #define REMOTE_UART_PARITY DR16_UART_PARITY
 #define REMOTE_UART_STOPBITS DR16_UART_STOPBITS
+#define REMOTE_UART_RXINVERT DR16_UART_RXINVERT
 typedef dr16_data_t remote_backend_data_t;
 #endif
 
@@ -240,6 +242,12 @@ static void Remote_Task_Entry(void *argument)
     huart5.Init.WordLength = REMOTE_UART_WORDLENGTH;
     huart5.Init.Parity = REMOTE_UART_PARITY;
     huart5.Init.StopBits = REMOTE_UART_STOPBITS;
+    /*
+     * RX 反相由后端决定：座子上带硬件反相器，DBUS 这类本身反相的信号正好被它翻正、
+     * 这边不能再翻；i-BUS 是正常 TTL、被它翻反了，必须在这边翻回来。
+     */
+    huart5.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_RXINVERT_INIT;
+    huart5.AdvancedInit.RxPinLevelInvert = REMOTE_UART_RXINVERT;
     if (HAL_UART_Init(&huart5) != HAL_OK)
     {
         Error_Handler();

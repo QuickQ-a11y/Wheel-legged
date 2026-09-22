@@ -175,21 +175,26 @@ static void testAxisNormalization(void)
 
 static void testSwitchThresholds(void)
 {
-    /* 三档拨杆：低端 DOWN、中间 MID、高端 UP，阈值边界必须确定 */
-    assert(IA10B_ConvertSwitch(IA10B_CH_MIN) == REMOTE_SWITCH_DOWN);
+    /*
+     * ⚠ i6X 拨杆【上小下大】：实测 UP=1000、MID=1500、DOWN=2000。
+     * 这几条断言就是用来钉死这个方向的 —— 如果有人"顺手"把它改成
+     * 值大=UP，这里必须红。方向错了会让急停位置变成运行位置。
+     */
+    assert(IA10B_ConvertSwitch(IA10B_CH_MIN) == REMOTE_SWITCH_UP);
     assert(IA10B_ConvertSwitch(IA10B_CH_MID) == REMOTE_SWITCH_MID);
-    assert(IA10B_ConvertSwitch(IA10B_CH_MAX) == REMOTE_SWITCH_UP);
+    assert(IA10B_ConvertSwitch(IA10B_CH_MAX) == REMOTE_SWITCH_DOWN);
 
     /* 两档拨杆只会给出两端，不能被误判成 MID */
-    assert(IA10B_ConvertSwitch(IA10B_SW_LOW_MAX) == REMOTE_SWITCH_DOWN);
+    assert(IA10B_ConvertSwitch(IA10B_SW_LOW_MAX) == REMOTE_SWITCH_UP);
     assert(IA10B_ConvertSwitch((uint16_t)(IA10B_SW_LOW_MAX + 1U)) ==
            REMOTE_SWITCH_MID);
-    assert(IA10B_ConvertSwitch(IA10B_SW_HIGH_MIN) == REMOTE_SWITCH_UP);
+    assert(IA10B_ConvertSwitch(IA10B_SW_HIGH_MIN) == REMOTE_SWITCH_DOWN);
     assert(IA10B_ConvertSwitch((uint16_t)(IA10B_SW_HIGH_MIN - 1U)) ==
            REMOTE_SWITCH_MID);
 
-    /* 通道值异常（接收机失联残留 0）不能冒充某个确定档位 */
-    assert(IA10B_ConvertSwitch(0U) == REMOTE_SWITCH_DOWN);
+    /* 通道值残留 0 时落到 UP 一侧。UP 是拨杆能开机的位置，也将映射为卸力，
+       所以这个方向的退化是安全的；换成 DOWN 就不安全了。 */
+    assert(IA10B_ConvertSwitch(0U) == REMOTE_SWITCH_UP);
 }
 
 /*
@@ -229,8 +234,9 @@ static void testRemoteMapping(void)
     assert(remote.dialValid == 1U);
     assert(fabsf(remote.dial - 0.6f) < 1.0e-3f);           /* 300/500 */
 
-    assert(remote.rightSwitch == REMOTE_SWITCH_UP);
-    assert(remote.leftSwitch == REMOTE_SWITCH_DOWN);
+    /* CH_MAX=2000 是物理 DOWN，CH_MIN=1000 是物理 UP，见 testSwitchThresholds */
+    assert(remote.rightSwitch == REMOTE_SWITCH_DOWN);
+    assert(remote.leftSwitch == REMOTE_SWITCH_UP);
 
     /* MakeRemote 不负责在线判定，那是任务层的事 */
     assert(remote.online == 0U);
