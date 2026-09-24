@@ -162,14 +162,14 @@ gcc's stderr to `/dev/null` inside a loop is the usual way to hide the failure; 
 8 个字节里挤。状态帧目前用了 7 个（4 个拨杆压在一个字节里），剩 1 个预留。
 
 ⚠ **协议常量在两侧的 `User_File/1_Middleware/0_Common/app_config.h` 里各存一份，
-必然漂移——改一侧必须同步另一侧。** 已知的有意差异：
-
-```
-APP_BOARD_SEND_DIV    Chassis = 5U    Gimbal/Real = 1U
-```
-
+必然漂移——改一侧必须同步另一侧。** 目前两侧 `APP_BOARD_SEND_DIV` 都是 `5U`（200 Hz）。
 底盘那份是**死配置**（`Chassis/User_File/` 里引用次数为 0，底盘只收不发），
-实际发送频率由云台那份决定（DIV=1 即 1 kHz，2000 帧/s）。这是用户有意设的，别改回去。
+实际发送频率由云台那份决定。
+
+⚠⚠ **云台侧的 `APP_BOARD_SEND_DIV` 不能再设成 1。** 它曾经是 1，但 FDCAN3 上
+后来挂了拨盘电机（M2006，装在底盘上却由云台控制），板间占 2000 帧/s 会让
+FDCAN3 合计 8000 帧/s、最坏负载 108%，直接超容量。算式见 `Gimbal/CLAUDE.md`
+§总线分配。200 Hz 不丢信息：接收机帧率本来只有 71~143 Hz。
 
 （`remote_input.h` 曾经也是漂移源，现已收敛成纯输入类型，两板逐字节相同——
 派生语义移进了各板的业务层。`Chassis/User_File/1_Middleware/0_Common/remote_input.c`

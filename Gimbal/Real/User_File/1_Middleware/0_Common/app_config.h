@@ -14,7 +14,8 @@ extern "C" {
 #define APP_CAN_RX_QUEUE_LEN 32U
 
 #define APP_DM_COUNT 2U
-#define APP_DJI_COUNT 3U
+#define APP_DJI_FRIC_COUNT 3U
+#define APP_DJI_COUNT 4U
 #define APP_IMU_AXIS_COUNT 3U
 
 #define APP_DM_FRAME_LEN 8U
@@ -22,13 +23,28 @@ extern "C" {
 #define APP_DJI_TX_LEN 8U
 
 /*
- * 发射机构三台 DJI 电调，全部挂 FDCAN2，共用 0x200 控制帧。
- * 电调 ID 在电调上标定，反馈 ID = 0x200 + 电调 ID。
+ * 发射机构四台 M2006 + C610，【分在两条总线上】，各自有一个 0x200 控制帧：
+ *
+ *   FDCAN2  三个摩擦轮，电调 ID 1/2/3  —— 云台本地
+ *   FDCAN3  拨盘，电调 ID 4           —— 拨盘物理装在底盘上，只能走两板之间那条线
+ *
+ * 电调 ID 用电调上的 SET 按键标定，反馈 ID = 0x200 + 电调 ID。
+ *
+ * ⚠ 拨盘那一帧只用到 [6..7]，[0..5] 寻址的 ID 1~3 在 FDCAN3 上不存在，填零无副作用。
+ * 反过来摩擦轮那一帧的 [6..7] 也是零。
  */
 #define APP_DJI_TX_ID 0x200U
-#define APP_DJI_TRIGGER_RX_ID 0x201U /* M2006 拨弹盘，电调 ID 1。 */
-#define APP_DJI_FRIC_L_RX_ID 0x202U  /* M3508 左摩擦轮，电调 ID 2。 */
-#define APP_DJI_FRIC_R_RX_ID 0x203U  /* M3508 右摩擦轮，电调 ID 3。 */
+#define APP_DJI_FRIC_1_RX_ID 0x201U  /* 摩擦轮 1，电调 ID 1，FDCAN2。 */
+#define APP_DJI_FRIC_2_RX_ID 0x202U  /* 摩擦轮 2，电调 ID 2，FDCAN2。 */
+#define APP_DJI_FRIC_3_RX_ID 0x203U  /* 摩擦轮 3，电调 ID 3，FDCAN2。 */
+#define APP_DJI_TRIGGER_RX_ID 0x204U /* 拨弹盘，电调 ID 4，FDCAN3。 */
+
+/*
+ * C610 控制电流量程：±10000 对应转矩电流 ±10 A（手册 §CAN 通信协议）。
+ * ⚠ C620（M3508）是 ±16384 对应 ±20 A，两者不能混用——底盘的轮电机走 C620，
+ * 那边是另一份独立的 device_motor_dji.c，别把这个值抄过去。
+ */
+#define APP_DJI_CURRENT_MAX 10000
 
 /*
  * C620/C610 的 0x200 控制帧按电调 ID 分配字节：ID=n 占 data[2(n-1)] 和 data[2(n-1)+1]。
@@ -37,19 +53,21 @@ extern "C" {
  */
 #define APP_DJI_TX_SLOT(rx_id) ((uint8_t)(((rx_id) - APP_DJI_TX_ID - 1U) * 2U))
 
-static_assert(APP_DJI_TX_SLOT(APP_DJI_TRIGGER_RX_ID) + 1U < APP_DJI_TX_LEN,
-               "trigger ESC id out of 0x200 frame range");
-static_assert(APP_DJI_TX_SLOT(APP_DJI_FRIC_L_RX_ID) + 1U < APP_DJI_TX_LEN,
-               "left friction ESC id out of 0x200 frame range");
-static_assert(APP_DJI_TX_SLOT(APP_DJI_FRIC_R_RX_ID) + 1U < APP_DJI_TX_LEN,
-               "right friction ESC id out of 0x200 frame range");
-static_assert((APP_DJI_TX_SLOT(APP_DJI_TRIGGER_RX_ID) !=
-                   APP_DJI_TX_SLOT(APP_DJI_FRIC_L_RX_ID)) &&
-                   (APP_DJI_TX_SLOT(APP_DJI_FRIC_L_RX_ID) !=
-                        APP_DJI_TX_SLOT(APP_DJI_FRIC_R_RX_ID)) &&
-                   (APP_DJI_TX_SLOT(APP_DJI_TRIGGER_RX_ID) !=
-                        APP_DJI_TX_SLOT(APP_DJI_FRIC_R_RX_ID)),
-               "shooter ESC ids must differ");
+static_assert((APP_DJI_TX_SLOT(APP_DJI_FRIC_1_RX_ID) + 1U < APP_DJI_TX_LEN) &&
+                  (APP_DJI_TX_SLOT(APP_DJI_FRIC_2_RX_ID) + 1U < APP_DJI_TX_LEN) &&
+                  (APP_DJI_TX_SLOT(APP_DJI_FRIC_3_RX_ID) + 1U < APP_DJI_TX_LEN) &&
+                  (APP_DJI_TX_SLOT(APP_DJI_TRIGGER_RX_ID) + 1U < APP_DJI_TX_LEN),
+              "shooter ESC id out of 0x200 frame range");
+/*
+ * 只要求三个摩擦轮互不相同：它们共用 FDCAN2 的同一帧，撞 ID 会互相覆盖字节。
+ * 拨盘在另一条总线上，ID 与摩擦轮重复在协议上是合法的（现取 4 只是为了看总线
+ * trace 时不歧义），所以【故意】不把它纳入这条判据。
+ * 槽位由 ID 线性推出，ID 互不相同即等价于槽位互不相同。
+ */
+static_assert((APP_DJI_FRIC_1_RX_ID != APP_DJI_FRIC_2_RX_ID) &&
+                  (APP_DJI_FRIC_2_RX_ID != APP_DJI_FRIC_3_RX_ID) &&
+                  (APP_DJI_FRIC_1_RX_ID != APP_DJI_FRIC_3_RX_ID),
+              "friction ESC ids must differ");
 
 /*
  * 云台两台 DM4310，均挂 FDCAN3，与板间通信共用一条物理总线。
@@ -60,8 +78,19 @@ static_assert((APP_DJI_TX_SLOT(APP_DJI_TRIGGER_RX_ID) !=
  * 匹配不上 FDCAN3 的帧。同理 Board_UpdateFeedback() 只认板间两个 ID，其余在打
  * 时间戳之前就返回。这两条是共用总线的前提，改分发逻辑时不要破坏。
  *
- * 总线负载：2 台 DM x (发+收) x 1 kHz = 4000 帧/s，加板间 400 帧/s，
- * 1 Mbps 下约 57%。若实机发现云台控制环抖，先把 APP_BOARD_SEND_DIV 调大降频。
+ * ⚠⚠ FDCAN3 上还挂着【拨盘 M2006】（电调 ID 4）。拨盘物理装在底盘上却由云台控制，
+ * 只能走这条两板之间的线。三方共用一条 1 Mbps 总线，负载已经不宽裕：
+ *
+ *   2 台 DM x (发+收) x 1 kHz      4000 帧/s
+ *   拨盘 (控制帧 + 反馈) x 1 kHz    2000 帧/s
+ *   板间两帧 x 200 Hz (DIV=5)        400 帧/s
+ *   -------------------------------------------
+ *   合计                           6400 帧/s   →  71% ~ 86%
+ *
+ * 标准帧 8 字节无位填充 111 位、最坏填充 135 位，1 Mbps 下上限只有 7400~9000 帧/s。
+ * ⚠ 所以 APP_BOARD_SEND_DIV 【不能】再设成 1：那样是 8000 帧/s、最坏 108%，直接超容量。
+ * 要再加节点先重算这张表。实机判据是 CAN_Task_GetTxErrorCount() 和底盘的
+ * can_error_count——两块板都会收下 FDCAN3 的全部帧（滤波器是全收），只是各自丢弃。
  */
 #define APP_DM_YAW_ID 0x001U
 #define APP_DM_PITCH_ID 0x002U
@@ -154,8 +183,10 @@ static_assert((APP_DJI_TX_SLOT(APP_DJI_TRIGGER_RX_ID) !=
  * APP_SHOOT_BURST_DELAY_MS 后转连发，按 APP_SHOOT_BURST_HZ 连续发射；
  * 退出使能区间时计时复位。
  *
- * ⚠ 只是把名字和数值占下来，发射控制逻辑本轮【没有实现】——
- * Gimbal.I_dji_req[] 至今只被 memset。见 Codex文档/遥控键位与模式分配.md。
+ * ⚠ 只是把名字和数值占下来，**拨弹逻辑尚未实现**：拨盘目前只有
+ * Shooter.trigger_I_manual 这一个手动电流入口，没有控制环，VrB 也还没接进控制
+ * （只派生出 Shooter.trigger_request 供 Watch 核对）。
+ * 见 Codex文档/遥控键位与模式分配.md §5.3。
  */
 #define APP_SHOOT_BURST_DELAY_MS 500U
 #define APP_SHOOT_BURST_HZ 8U
@@ -244,11 +275,16 @@ static_assert((APP_DJI_TX_SLOT(APP_DJI_TRIGGER_RX_ID) !=
 #define APP_BOARD_TIMEOUT_TICKS 50U
 
 /*
- * 云台主循环 1 kHz，不分频。上面那段总线负载估算里的"板间 400 帧/s"
- * 对应的是 DIV=5，这里取 1 就是 2000 帧/s，负载相应上去。
- * 云台控制环抖的话先调大这个值。
+ * 云台主循环 1 kHz，分频到 200 Hz 发送。
+ *
+ * ⚠ 这个值曾被改成 1（即 1 kHz、2000 帧/s）。拨盘挂上 FDCAN3 之后**不能再那样**：
+ * 加起来是 8000 帧/s、最坏负载 108%，超容量。算式见上面 DM4310 那段注释。
+ *
+ * 200 Hz 不丢信息：接收机帧率本来只有 DR16 71 Hz / i-BUS 129 Hz / S.BUS 143 Hz，
+ * 再快也只是重复发同一份快照。底盘侧 APP_BOARD_TIMEOUT_TICKS = 50，
+ * 200 Hz 下等于连丢 10 帧才判离线，余量够。
  */
-#define APP_BOARD_SEND_DIV 1U
+#define APP_BOARD_SEND_DIV 5U
 
 typedef enum
 {

@@ -96,7 +96,6 @@ const Gimbal_Config_t Gimbal_Config = {
     /* 上电默认全部封锁；实机确认方向和限幅之前不允许打开。 */
     .output = {
         .dm_flag = 1U,
-        .dji_flag = 0U,
         /* 板间下发不通电机，默认开；底盘侧 follow.enable_flag 才是动力相关的那道门。 */
         .board_flag = 1U,
     },

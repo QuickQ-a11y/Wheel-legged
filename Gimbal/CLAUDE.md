@@ -14,15 +14,87 @@
 两者都自带 `.clangd` 和 `.vscode/`，用 `${workspaceFolder}` 相对寻址，
 所以**编辑器要么开 `Real/` 要么开 `Debug/`**，别开 `Gimbal/` 这一级。
 
+## 总线分配
+
+| 总线 | 挂了什么 | 帧/s | 负载（1 Mbps） |
+|---|---|---|---|
+| FDCAN1 | 空 | 0 | — |
+| FDCAN2 | 3 × 摩擦轮 M2006/C610，电调 ID 1/2/3 | 4000 | 44% ~ 54% |
+| FDCAN3 | 2 × DM4310（MIT）+ 板间报文 + **拨盘 M2006，电调 ID 4** | 6400 | 71% ~ 86% |
+
+**拨盘物理装在底盘上，却由云台代码控制**，所以它只能挂 FDCAN3——那是两板之间
+唯一的那条线。标准帧 8 字节无位填充 111 位、最坏 135 位，1 Mbps 上限只有
+7400~9000 帧/s，所以 FDCAN3 已经不宽裕。
+
+⚠ **`APP_BOARD_SEND_DIV` 必须保持 5（200 Hz）。** 设成 1 时板间占 2000 帧/s，
+FDCAN3 合计 8000 帧/s、最坏负载 108%，直接超容量。200 Hz 不丢信息：
+接收机帧率本来只有 71~143 Hz。
+
+⚠ 两块板都会收到 FDCAN3 上的**全部**帧（`Driver_FDCAN_ConfigStdFilter` 掩码为 0，
+全收），各自在分发层丢弃。底盘的分发已按总线过滤，拨盘的 0x200/0x204 不会被误解析，
+但它要多收多丢 2000 帧/s。实机判据：两块板的 CAN 错误计数。
+
+⚠ 再往任何一条总线上加节点之前，先重算上面这张表。
+
 ## 电机与力矩标度
 
-- 2 台 **达妙 DM4310**，均挂 **FDCAN3**，与板间通信共用同一条物理总线。
+- 2 台 **达妙 DM4310**，均挂 **FDCAN3**，与板间通信和拨盘共用同一条物理总线。
 - `APP_DM_TOR_MIN/MAX = ±10`。
 
-⚠⚠ **这一对还没有跟电机 TMAX 寄存器实际核对过。** 底盘那边同样的问题藏了很久
-（固件 ±15/±25 而寄存器是 40，命令被放大 2.67 倍），**而且往返相消、常规对比查不出来**。
-排查方法和判据见根 `../CLAUDE.md` 的 "DM MIT torque scale" 一节——
-核心是：**不能靠比对命令和反馈，必须用绝对力参照**。
+⚠⚠ **`APP_DM_TOR_MIN/MAX` 这一对还没有跟电机 TMAX 寄存器实际核对过。** 底盘那边
+同样的问题藏了很久（固件 ±15/±25 而寄存器是 40，命令被放大 2.67 倍），
+**而且往返相消、常规对比查不出来**。排查方法和判据见根 `../CLAUDE.md` 的
+"DM MIT torque scale" 一节——核心是：**不能靠比对命令和反馈，必须用绝对力参照**。
+
+### ⚠⚠ 发射机构是 C610，不是 C620——两处不兼容
+
+四台电机全是 **M2006 + C610**（三摩擦轮 + 一拨盘）。**底盘的轮电机是 M3508 + C620，
+那是另一份独立的 `device_motor_dji.c`，两边的口径不能互抄：**
+
+| | C620（底盘轮） | **C610（发射机构）** |
+|---|---|---|
+| 反馈 `data[6]` | **温度** | **空** |
+| 反馈 `data[7]` | 空 | **电机错误码** |
+| 控制电流量程 | ±16384 = ±20 A | **±10000 = ±10 A** |
+
+错误码：0 无异常 / 2 电压过高 / 3 三相未接 / 4 位置传感器丢失 / 6 **堵转** / 7 校准失败。
+**拨盘卡弹就是堵转码**，这是白送的诊断，已接进 `SHOOTER_FAULT_ESC`。
+
+照抄 C620 的解法会让错误码永远读成 0，而且看不出来——`test_motor_dji.c` 的
+`testFeedbackParse` 专门把 `data[6]` 留空来拦这个。
+
+### ⚠ 未装机的总线一帧都不能发
+
+某条总线上一个节点都没有时，发出去的帧没有任何节点应答 ACK，发送错误计数会一路
+爬到 BusOff，驱动随即 Stop/Start 恢复、再 BusOff，**空转在错误恢复里**。
+摩擦轮未装机时 FDCAN2 就是这种情况。
+
+所以 `Motor_DJI_UpdateTxFrames(fricBusEnable, triggerBusEnable)` 带两个参数，
+由 `Shooter_Config.output.fric_flag` / `trigger_flag` 驱动，**两个都从 0 出厂**。
+FDCAN3 上有 DM 电机和底盘板会 ACK，没有这个风险，但仍留开关以便分别调试。
+
+## 发射机构模块（`3_Chariot/1_Module/Shooter`）
+
+与 Gimbal 模块**平级**，由 `gimbal_task` 并列调用，共用同一个 1 kHz tick 和 dt。
+
+⚠ **两者互不封锁**：各有自己的 `fault` 和 `safe_flag`。原先发射机构寄在 Gimbal 里，
+`GIMBAL_FAULT_DJI` 会置 `Gimbal.safe_flag`——**一台摩擦轮掉线连瞄准都做不了**。
+拆开之后卡弹不影响云台，云台故障也不会停下已经转起来的摩擦轮。
+
+- `shooter_config.*` —— `const Shooter_Config_t`，两个按总线分的输出门、摩擦轮速度环参数
+- `shooter_control.*` —— 唯一的全局 `Shooter_t Shooter`，是长期 Watch 入口
+
+**摩擦轮速度环**用 `Algorithm_PID_UpdateByFeedbackRate()`，但 **`kd = 0` 且
+`feedbackRate` 传 `0.0f`，整体退化成 PI**。那个函数的 derivative 项是 `-feedbackRate`，
+本意给"反馈速度可信"的位置环用；速度环的导数是加速度，没有可信来源，所以不给。
+**这不是漏传参数**，改之前先想清楚拿什么当加速度。
+
+⚠ 反馈的 `speedRpm` 是**转子**转速，M2006 减速比 36:1，输出轴转速要除 36。
+目标转速统一用转子口径（与反馈同源），不引入第二个单位。
+
+当前进度：通信 + 摩擦轮速度环。**拨盘只有手动电流 `Shooter.trigger_I_manual`，
+没有控制环**；VrB 旋钮只派生出 `fric_request` / `trigger_request` 供 Watch 核对，
+**尚未接进控制**。
 
 ## 遥控后端（DBUS / i-BUS / S.BUS 三选一）
 
@@ -88,8 +160,19 @@ Futaba 惯例 `172 / 992 / 1811`。富斯的 us → 11bit 换算系数和 Futaba
 `SBUS_SW_LOW_MAX/HIGH_MIN`（中位 ±392，即半幅的一半）、`APP_SBUS_DB`（13 ≈ 1.6%）。
 
 **通道分配与 i-BUS 完全一致**（那是发射机 Aux. channels 菜单决定的，与协议无关）。
-S.BUS 下已实机确认 **VrA=4、VrB=5、SwA~SwD=6/7/8/9**；下标 0~3 的四个摇杆轴是
-仅剩的四个槽，没有逐项复测。**VrB 拧到底确认能读到 1807**，所以拨盘的 2% 触发带够得着。
+S.BUS 下**下标和方向已全部实机确认**（2026-09-24）：
+
+| 下标 | 控件 | 方向 |
+|---|---|---|
+| 0~3 | 四个摇杆轴 | 往上推为正、往右为正 |
+| 4 / 5 | VrA / VrB | 顺时针扭动数值增大 |
+| 6~9 | SwA~SwD | **下拨数值增大**（上小下大） |
+
+**VrB 拧到底确认能读到 1807**，所以拨盘那 2% 的触发带够得着。
+
+⚠ 所以 `SBUS_Axis` 和 `IBUS_Axis` 一样**直接减中位、不加负号**，与 `Remote_t` 的
+"x 向右为正、y 向上为正" 同向。**别"顺手"给哪个轴补负号**——反了会让底盘
+推前进往后跑、云台抬头变低头，而这两个现象在架空调试时都不明显。
 
 ⚠ **`test_sbus.c` 的 `testRangeConstants` 只能查自洽性，查不出这组数对不对**——
 主机没有接收机的真值。它能抓的是"改了中位忘了改端点"这类部分修改（靠对称性），
@@ -223,6 +306,7 @@ INC="-IUser_File/1_Middleware/0_Common -IUser_File/1_Middleware/2_Algorithm \
 | `test_dr16` | `DR16/device_dr16.c` |
 | `test_ibus` | `FlySky/device_ibus.c` |
 | `test_sbus` | `FlySky/device_sbus.c` |
+| `test_motor_dji` | `Motor_DJI/device_motor_dji.c` —— 需要三个桩头文件，见下 |
 | `test_usb_protocol` | `USB/device_usb_protocol.c` `2_Algorithm/CRC.c` |
 | `test_board_protocol` | see below — spans both projects |
 
@@ -233,6 +317,12 @@ INC="-IUser_File/1_Middleware/0_Common -IUser_File/1_Middleware/2_Algorithm \
 `device_sbus.c` 里那个窗口移位公式**——打包解包共用同一条公式时，公式本身错了
 也能往返自洽，等于没测。`testBitPackingIsolation` 同理：一次只设一路，
 "所有通道设成同一个值再往返"照样能过错位的代码，逐路隔离才抓得到。
+
+`test_motor_dji` 和 `test_board_protocol` 一样需要三个桩头文件
+（`stm32h7xx_hal.h` / `fdcan.h` / `task_can.h`，见下段），符号由测试文件自己定义；
+但它只链一个工程的文件，不用分两次 gcc。`fdcan.h` 那个桩要同时声明
+`hfdcan1/2/3` 三个句柄——发射机构跨两条总线，测试要靠句柄区分帧发到哪条上。
+⚠ `Limit.h` 是纯 inline 头文件，**没有 `Limit.c` 可链**，别往命令里加。
 
 `test_board_protocol` packs with the gimbal's `device_board.c` and unpacks with the chassis's,
 so it links **one file from each project**. Both projects have a `device_board.h` with the same

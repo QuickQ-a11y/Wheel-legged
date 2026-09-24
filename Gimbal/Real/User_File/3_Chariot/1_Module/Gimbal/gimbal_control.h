@@ -5,7 +5,6 @@
 extern "C" {
 #endif
 
-#include "device_motor_dji.h"
 #include "device_motor_dm.h"
 #include "gimbal_config.h"
 #include "remote_input.h"
@@ -18,7 +17,7 @@ extern "C" {
 #define GIMBAL_FAULT_DISABLED 0x01U /* 输出开关关闭。 */
 #define GIMBAL_FAULT_IMU 0x02U      /* IMU 未初始化或姿态未就绪。 */
 #define GIMBAL_FAULT_DM 0x04U       /* 云台 DM 电机离线。 */
-#define GIMBAL_FAULT_DJI 0x08U      /* 发射机构 DJI 电机离线。 */
+/* 0x08 曾是 GIMBAL_FAULT_DJI，发射机构拆成独立模块后移到 SHOOTER_FAULT_MOTOR。 */
 #define GIMBAL_FAULT_CAN 0x10U      /* CAN 发送错误累计超限。 */
 #define GIMBAL_FAULT_REMOTE 0x100U  /* 遥控离线。 */
 
@@ -55,16 +54,12 @@ typedef struct
     Gimbal_Axis_t yaw;
     Gimbal_Axis_t pitch;
     task_imu_state_t imu;        /* IMU 快照，经 IMU_Task_GetState 获取。 */
-    int16_t I_dji_req[APP_DJI_COUNT]; /* 发射机构请求电流；本轮恒零。 */
-    int16_t I_dji[APP_DJI_COUNT];     /* 安全门后实际下发电流。 */
     uint8_t pitch_home_flag;     /* 使能后 PITCH 正在回水平，期间不吃摇杆。 */
     /*
-     * 下面三个由遥控派生，本轮【只产出、不消费】——自瞄和发射控制都还没写。
-     * 放出来是为了 Watch 上能直接看到拨杆和旋钮解出来对不对。
+     * 由遥控派生，本轮【只产出、不消费】——自瞄还没写。
+     * 放出来是为了 Watch 上能直接看到拨杆解出来对不对，同时它要下发给底盘。
      */
     uint8_t autoaim_flag;        /* SwD 在 DOWN，操作者请求自瞄。 */
-    uint8_t fric_flag;           /* VrB 过中位，摩擦轮应当开启。 */
-    uint8_t trigger_flag;        /* VrB 进使能区间，拨盘应当转动。 */
     uint8_t safe_flag;           /* 置位表示本周期必须输出零。 */
 } Gimbal_t;
 

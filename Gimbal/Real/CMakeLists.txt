@@ -56,6 +56,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${SHARED}/2_Device/Communication/Board/device_board.c
     ${SHARED}/3_Chariot/1_Module/Gimbal/gimbal_config.c
     ${SHARED}/3_Chariot/1_Module/Gimbal/gimbal_control.c
+    ${SHARED}/3_Chariot/1_Module/Shooter/shooter_config.c
+    ${SHARED}/3_Chariot/1_Module/Shooter/shooter_control.c
     ${SHARED}/5_Task/task_can.c
     ${SHARED}/5_Task/task_can_dispatch.c
     ${SHARED}/5_Task/task_imu.c
@@ -87,6 +89,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${SHARED}/2_Device/Communication/Board
     ${SHARED}/5_Task
     ${SHARED}/3_Chariot/1_Module/Gimbal
+    ${SHARED}/3_Chariot/1_Module/Shooter
     # CMSIS-DSP：Kalman 和 QuaternionEKF 依赖 arm_matrix_instance_f32。
     # 源码随工程自带，不走 X-CUBE-ALGOBUILD pack。
     Middlewares/ST/ARM/DSP/Include

@@ -19,7 +19,6 @@ typedef struct
 } task_can_rx_message_t;
 
 void CAN_Task_Init(void);
-void CAN_Task_SetDjiCurrent(const int16_t current[APP_DJI_COUNT]);
 void CAN_Task_UpdateTxFrame(FDCAN_HandleTypeDef *handle,
                             uint32_t identifier,
                             const uint8_t *data,

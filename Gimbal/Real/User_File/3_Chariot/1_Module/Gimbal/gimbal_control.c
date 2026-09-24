@@ -167,7 +167,6 @@ void Gimbal_Init(void)
 void Gimbal_Feedback_Update(void)
 {
     uint32_t nowTick = HAL_GetTick();
-    uint32_t index;
 
     /* 把遥控任务的发布快照取到全局 Remote，之后本周期的消费都读它。 */
     Remote_Task_Update();
@@ -203,21 +202,6 @@ void Gimbal_Feedback_Update(void)
     if ((Gimbal.yaw.online == 0U) || (Gimbal.pitch.online == 0U))
     {
         Gimbal.fault |= GIMBAL_FAULT_DM;
-    }
-    /*
-     * 只有真要驱动发射机构时才把它的在线状态计入故障。发射机构尚未装机时
-     * 这三台恒离线，若无条件计入，fault 永远非零、safe_flag 永远为 1，
-     * 云台自己也别想输出——一个未装的部件不该拦住已装部件。
-     */
-    if (Gimbal_Config.output.dji_flag != 0U)
-    {
-        for (index = 0U; index < APP_DJI_COUNT; index++)
-        {
-            if (Motor_DJI_IsOnline((motor_dji_index_t)index, nowTick) == 0U)
-            {
-                Gimbal.fault |= GIMBAL_FAULT_DJI;
-            }
-        }
     }
     if (CAN_Task_GetTxErrorCount() > APP_CAN_TX_ERROR_MAX)
     {
@@ -259,8 +243,6 @@ void Gimbal_State_Update(void)
      */
     Gimbal.autoaim_flag =
         (Remote.sw[REMOTE_SW_D] == REMOTE_SWITCH_DOWN) ? 1U : 0U;
-    Gimbal.fric_flag = (Remote.knobB > APP_RC_FRIC_ON) ? 1U : 0U;
-    Gimbal.trigger_flag = (Remote.knobB >= APP_RC_TRIGGER_ON) ? 1U : 0U;
 
     /*
      * 进入控制态时清积分。目标不需要在这里初始化：卸力期间 Axis_Follow 每周期
@@ -286,7 +268,6 @@ void Gimbal_Control(void)
         Axis_Follow(&Gimbal.yaw);
         Axis_Follow(&Gimbal.pitch);
         Gimbal.pitch_home_flag = 0U;
-        memset(Gimbal.I_dji_req, 0, sizeof(Gimbal.I_dji_req));
         return;
     }
 
@@ -324,7 +305,6 @@ void Gimbal_Control(void)
     Axis_Control(&Gimbal.yaw, &Gimbal_Config.yaw, Gimbal.dt);
     Axis_Control(&Gimbal.pitch, &Gimbal_Config.pitch, Gimbal.dt);
 
-    memset(Gimbal.I_dji_req, 0, sizeof(Gimbal.I_dji_req));
 }
 
 void Gimbal_Command_Send(void)
@@ -352,15 +332,6 @@ void Gimbal_Command_Send(void)
         Gimbal.pitch.T = 0.0f;
     }
 
-    if ((Gimbal.safe_flag == 0U) && (Gimbal_Config.output.dji_flag != 0U))
-    {
-        memcpy(Gimbal.I_dji, Gimbal.I_dji_req, sizeof(Gimbal.I_dji));
-    }
-    else
-    {
-        memset(Gimbal.I_dji, 0, sizeof(Gimbal.I_dji));
-    }
-
     /*
      * 力矩按本轴正方向折回电机正方向，口径与 Joint_Update 的位置速度完全同源，
      * 和底盘 chassis_control.c 的 joint_scale 是同一条规则。
@@ -380,16 +351,6 @@ void Gimbal_Command_Send(void)
 
     Motor_DM_SetSafe(Gimbal.safe_flag);
     Motor_DM_UpdateTxFrames();
-
-    /*
-     * 发射机构未装机时不要往 FDCAN2 发帧：总线上没有任何节点应答 ACK，
-     * 发送错误计数器会一路爬到 BusOff，驱动随即 Stop/Start 恢复再 BusOff，
-     * 空转在错误恢复里。装机后把 output.dji_flag 打开即可。
-     */
-    if (Gimbal_Config.output.dji_flag != 0U)
-    {
-        CAN_Task_SetDjiCurrent(Gimbal.I_dji);
-    }
 
     /*
      * 板间下发按 APP_BOARD_SEND_DIV 分频。接收机帧率本来就只有 DR16 71 Hz /

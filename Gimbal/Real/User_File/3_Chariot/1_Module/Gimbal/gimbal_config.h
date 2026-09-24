@@ -55,7 +55,6 @@ typedef struct
 typedef struct
 {
     uint8_t dm_flag;   /* 云台 DM 力矩输出使能。 */
-    uint8_t dji_flag;  /* 发射机构 DJI 电流输出使能。 */
     /*
      * 板间下发使能。与上面两个不同：它不通任何电机，只往 FDCAN3 发遥控快照和
      * 云台朝向。关掉用于单独调试云台，或者排查总线负载时把它摘掉。

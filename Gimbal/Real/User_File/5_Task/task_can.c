@@ -1,7 +1,6 @@
 #include "task_can.h"
 
 #include "driver_fdcan.h"
-#include "device_motor_dji.h"
 
 #include "cmsis_os2.h"
 
@@ -212,28 +211,6 @@ void CAN_Task_Init(void)
                                    NULL);
 
     canTaskHandle = osThreadNew(CAN_Task_Entry, NULL, &canTaskAttributes);
-}
-
-void CAN_Task_SetDjiCurrent(const int16_t current[APP_DJI_COUNT])
-{
-    uint8_t data[APP_DJI_TX_LEN] = {0};
-    /* 字节位置由电调反馈ID推出，保证收发始终指向同一台电调。 */
-    uint8_t triggerSlot = APP_DJI_TX_SLOT(APP_DJI_TRIGGER_RX_ID);
-    uint8_t fricLeftSlot = APP_DJI_TX_SLOT(APP_DJI_FRIC_L_RX_ID);
-    uint8_t fricRightSlot = APP_DJI_TX_SLOT(APP_DJI_FRIC_R_RX_ID);
-
-    data[triggerSlot] = (uint8_t)((uint16_t)current[MOTOR_DJI_TRIGGER] >> 8U);
-    data[triggerSlot + 1U] = (uint8_t)((uint16_t)current[MOTOR_DJI_TRIGGER]);
-    data[fricLeftSlot] = (uint8_t)((uint16_t)current[MOTOR_DJI_FRIC_L] >> 8U);
-    data[fricLeftSlot + 1U] = (uint8_t)((uint16_t)current[MOTOR_DJI_FRIC_L]);
-    data[fricRightSlot] = (uint8_t)((uint16_t)current[MOTOR_DJI_FRIC_R] >> 8U);
-    data[fricRightSlot + 1U] = (uint8_t)((uint16_t)current[MOTOR_DJI_FRIC_R]);
-
-    /* 发射机构挂 FDCAN2，云台 DM 独占 FDCAN1。 */
-    CAN_Task_UpdateTxFrame(&hfdcan2,
-                           APP_DJI_TX_ID,
-                           data,
-                           APP_DJI_TX_LEN);
 }
 
 void CAN_Task_UpdateTxFrame(FDCAN_HandleTypeDef *handle,
