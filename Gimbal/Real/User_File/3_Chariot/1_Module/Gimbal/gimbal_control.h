@@ -58,6 +58,13 @@ typedef struct
     int16_t I_dji_req[APP_DJI_COUNT]; /* 发射机构请求电流；本轮恒零。 */
     int16_t I_dji[APP_DJI_COUNT];     /* 安全门后实际下发电流。 */
     uint8_t pitch_home_flag;     /* 使能后 PITCH 正在回水平，期间不吃摇杆。 */
+    /*
+     * 下面三个由遥控派生，本轮【只产出、不消费】——自瞄和发射控制都还没写。
+     * 放出来是为了 Watch 上能直接看到拨杆和旋钮解出来对不对。
+     */
+    uint8_t autoaim_flag;        /* SwD 在 DOWN，操作者请求自瞄。 */
+    uint8_t fric_flag;           /* VrB 过中位，摩擦轮应当开启。 */
+    uint8_t trigger_flag;        /* VrB 进使能区间，拨盘应当转动。 */
     uint8_t safe_flag;           /* 置位表示本周期必须输出零。 */
 } Gimbal_t;
 

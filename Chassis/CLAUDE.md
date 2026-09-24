@@ -52,7 +52,7 @@ FLAGS="-Wall -Wextra -DARM_MATH_CM7 -DDISABLEFLOAT16"
 |---|---|
 | `test_angle` | `2_Algorithm/Angle.c` |
 | `test_leso` | `2_Algorithm/LESO.c` |
-| `test_dr16` | `DR16/device_dr16.c` `0_Common/remote_input.c` |
+| `test_dr16` | `DR16/device_dr16.c` |
 | `test_usb_protocol` | `USB/device_usb_protocol.c` `2_Algorithm/CRC.c` |
 | `test_chassis_vmc` | `chassis_vmc.c` `chassis_config.c` `Angle.c` |
 | `test_chassis_remote` | `chassis_remote.c` `chassis_config.c` `Angle.c` |
@@ -130,6 +130,10 @@ Five files, each a real algorithm or input boundary — no forwarding wrappers:
 - `chassis_control.*` — the one global `Chassis_t Chassis`, state machine, and the whole control chain.
 - `chassis_observer.*` — four independent **read-only** observers (`slip` / `ground` / `turn` / `stuck`), each with `Init` / `Update` / `Calc`. `Update` computes physical observables, `Calc` applies thresholds and hysteresis. They write only their own struct and never touch control quantities.
 - `chassis_remote.*` — maps the protocol-agnostic `Remote_t` into `Chassis.goal` and the outer mode.
+  The switch→mode table lives in `chassis_remote.h` as the `CHASSIS_MAP_*` macros; it also owns the
+  two cross-tick bits the mapping needs (`Chassis.knob_group` hysteresis). `0_Common/remote_input.c`
+  used to hold this and **no longer exists** — `remote_input.h` is now pure input types and is
+  byte-identical on both boards. Full key map: `../Codex文档/遥控键位与模式分配.md`.
 
 `Chassis_t Chassis` is the sole runtime state and the long-term Watch entry point; there is no second debug struct.
 

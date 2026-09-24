@@ -13,8 +13,9 @@ extern "C" {
 /** @brief 板间链路状态，同时是 Watch 观察入口。 */
 typedef struct
 {
-    Remote_t remote;              /* 从板间帧解出的归一化遥控快照。 */
+    Remote_t remote;              /* 从板间帧解出的归一化遥控快照。knobB 不下发，恒为 0。 */
     float yaw_rel;                /* 云台 YAW 相对底盘的关节角，单位 rad。 */
+    uint8_t autoaim_flag;         /* 云台判定的自瞄实际激活，不是 SwD 原始位置。 */
     uint8_t sequence;             /* 最近一帧状态帧的序号。 */
     uint32_t stickFrameCount;     /* 累计收到的摇杆帧数。 */
     uint32_t stateFrameCount;     /* 累计收到的状态帧数。 */
@@ -50,6 +51,13 @@ void Board_GetRemote(Remote_t *remote);
  * 调用前应先用 Board_IsOnline() 确认链路在线，否则拿到的是陈旧值。
  */
 float Board_GetYawRel(void);
+
+/**
+ * @brief 读取云台判定的自瞄激活结论。
+ *
+ * 云台已经把"拨杆在位"和"上位机在线"两件事合过了，底盘只读结论、不重复判定。
+ */
+uint8_t Board_GetAutoaim(void);
 
 #ifdef __cplusplus
 }

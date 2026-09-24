@@ -217,14 +217,23 @@ static void Remote_Task_Entry(void *argument)
 
         /*
          * 两个数据源：板间 CAN 优先，超时才回退到本地 DT7/DR16。
-         * 板间在线判定在 device_board 里做，这里只选源。两源都离线时
-         * remote 保持 DR16 路径给出的全零快照，online 为 0，底盘据此急停。
+         * 板间在线判定在 device_board 里做，这里只选源。
+         *
+         * ⚠ 两源都离线时必须在这里显式清零，不能指望下面那个超时块。
+         * remote 是本函数的跨循环局部变量，而超时块挂在 state.online 上，
+         * state.online 只由本地 UART5 帧驱动——接收机装在云台板上，底盘
+         * UART5 永远收不到帧，于是 state.online 恒为 0、超时块永不执行。
+         * 少这个 else if，板间一断 remote 就停在最后一帧（连 online 都还是 1），
+         * 底盘会拿断链瞬间的摇杆值一直算力矩发出去。
          */
         if (Board_IsOnline(nowTick) != 0U)
         {
             Board_GetRemote(&remote);
         }
-        Remote_ApplyMapping(&remote);
+        else if (state.online == 0U)
+        {
+            memset(&remote, 0, sizeof(remote));
+        }
 
         if ((state.online != 0U) &&
             ((nowTick - state.lastValidTick) > APP_REMOTE_TIMEOUT_TICKS))

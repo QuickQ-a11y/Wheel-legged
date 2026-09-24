@@ -106,11 +106,11 @@ static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) !=
 #define APP_DR16_DB 10
 
 /*
- * 滚轮选腿长的阈值，比较的是归一化后的值。
- * 归一化把死区外重映射到满量程，原来的原始阈值 400 对应 (400-10)/650 = 0.6。
- * 放在这里而不是 DR16 设备层，是因为板间 CAN 数据源也要用同一个阈值。
+ * VrA 选模式组的阈值，比较的是归一化后的值（中位对应 0，两端 ±1）。
+ * 双阈值滞回：超过 +HYST 进高组、低于 -HYST 进低组，中间带保持当前组。
+ * 不加滞回的话旋钮停在中值附近时噪声会让模式反复横跳。
  */
-#define APP_RC_DIAL_THRESHOLD 0.6f
+#define APP_RC_KNOB_HYST 0.15f
 
 /*
  * 与具体遥控协议无关的底盘运动目标。
@@ -120,11 +120,22 @@ static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) !=
 #define APP_RC_MAX_VEL 2.0f   /* 满杆前进速度，m/s。重整定期的保守值。 */
 #define APP_RC_MAX_YAW 2.0f   /* 满杆偏航角速度，rad/s。 */
 #define APP_RC_VEL_RATE 1.0f  /* 爬台阶接近段的速度目标斜率，m/s^2。 */
-#define APP_RC_LEG_S 0.28f
+/*
+ * 腿长目标。原先拨轮选三档（0.28/0.18/0.38），FS-i6X 把 VrA 征用成模式组选择器后
+ * 三档取消：正常行驶恒为 APP_RC_LEG_M，只有高组 SwA 打下去（压缩腿）才换成
+ * APP_RC_LEG_CROUCH。APP_RC_LEG_M 就是原来拨轮中位的值，也是上电默认值。
+ *
+ * ⚠ 名字里的 M 指的是【原拨轮中位档】不是"中等腿长"，它其实是三档里最短的。
+ * 留着这个名字是为了不动历史整定数据的口径。
+ */
 #define APP_RC_LEG_M 0.18f
-/* ⚠ 0.38 超出 lqr.L0_max = 0.35：拨到长档时 K 拟合输入会被夹紧、
- * Chassis.lqr.limit_flag 置位，K/LESO 都停在 0.35 的值上外推。重整定期别用长档。 */
-#define APP_RC_LEG_L 0.38f
+/*
+ * 压缩腿的腿长。现在先等于行驶腿长，即"压缩腿"实际不压——真实压缩量要等
+ * 跳跃蓄力那套实现时按实机定，提前填一个猜的值只会让人以为它调过。
+ * 取值必须落在 lqr.L0_min = 0.10 和 lqr.L0_max = 0.35 之间，否则 K 拟合会被夹紧
+ * 并置 Chassis.lqr.limit_flag。
+ */
+#define APP_RC_LEG_CROUCH 0.18f
 
 /*
  * 控制器第一阶段只计算中间状态和安全输出。
@@ -167,15 +178,25 @@ static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) !=
 #define APP_IMU_Z_BIAS_GYRO_MAX_RADPS 0.3f
 
 /*
- * 板间通信：云台板 -> 底盘板，走 FDCAN3 专用总线，两帧各 200 Hz。
- * 16 位字段低字节在前，与本工程 USB 协议一致。
- * ID 选在 0x0A0 段，避开 DM 的 0x001~0x014 和 DJI 的 0x1FF/0x200~0x208，
- * 将来真要并到电机总线上救急也不会撞。
+ * 板间通信：云台板 -> 底盘板，走 FDCAN3 专用总线，两帧同频发送，
+ * 频率由 APP_BOARD_SEND_DIV 分频得到。16 位字段低字节在前，与本工程 USB 协议一致。
  *
- * 0x0A0 摇杆帧：leftX/leftY/rightX/rightY 各 int16 = 归一化值 * 10000。
- * 0x0A1 状态帧：[0]leftSwitch [1]rightSwitch [2..3]dial*10000
- *               [4]flags(bit0=dialValid, bit1=遥控在线) [5]seq
- *               [6..7]云台 YAW 关节角(归一化到 ±pi) * 10000。
+ * ⚠ FDCAN3 配的是 FDCAN_FRAME_CLASSIC（Core/Src/fdcan.c），帧长封顶 8 字节。
+ * 加字段只能在这 8 个字节里挤，不能指望 FD 的 64 字节——换 FD 要重新过 CubeMX
+ * 并重算两条总线的位定时。
+ *
+ * 0x3 摇杆帧：[0..1]leftX [2..3]leftY [4..5]rightX [6..7]rightY
+ *             各 int16 = 归一化值 * APP_BOARD_SCALE。
+ * 0x4 状态帧：[0]    拨杆位域，每个拨杆 2 bit，下标即 REMOTE_SW_*：
+ *                    SwA bit0-1 / SwB bit2-3 / SwC bit4-5 / SwD bit6-7。
+ *                    编码直接就是 Remote_Switch_t 的 0..3，见 remote_input.h。
+ *             [1]    flags，见下面的 APP_BOARD_FLAG_*。
+ *             [2..3] VrA 旋钮 * APP_BOARD_SCALE，int16。
+ *             [4]    seq，底盘据此判丢帧。
+ *             [5]    预留，填 0。
+ *             [6..7] 云台 YAW 关节角（归一化到 ±pi）* APP_BOARD_SCALE，int16。
+ *
+ * VrB 不下发：摩擦轮和拨盘纯属云台事务，底盘用不上。
  */
 #define APP_BOARD_STICK_ID 0x3U
 #define APP_BOARD_STATE_ID 0x4U
@@ -184,11 +205,19 @@ static_assert(APP_DJI_TX_SLOT(APP_DJI_LEFT_RX_ID) !=
 /* 归一化量和角度统一的定点比例；-1..1 正好用满 int16，pi*10000=31416 也不溢出。 */
 #define APP_BOARD_SCALE 10000.0f
 
-/* 状态帧 flags 位。 */
-#define APP_BOARD_FLAG_DIAL_VALID 0x01U
-#define APP_BOARD_FLAG_REMOTE_ONLINE 0x02U
+/* 状态帧拨杆位域：每个拨杆 2 bit。 */
+#define APP_BOARD_SW_BITS 2U
+#define APP_BOARD_SW_MASK 0x03U
 
-/* 板间帧超时，单位 HAL tick；200 Hz 发送下等于连丢 10 帧。 */
+/* 状态帧 flags 位。 */
+#define APP_BOARD_FLAG_REMOTE_ONLINE 0x01U
+/*
+ * 自瞄【实际激活】，不是 SwD 的原始位置——上位机掉线时 SwD 打下去不该让底盘锁航向。
+ * 判定在云台侧做，底盘只读结论。
+ */
+#define APP_BOARD_FLAG_AUTOAIM 0x02U
+
+/* 板间帧超时，单位 HAL tick。 */
 #define APP_BOARD_TIMEOUT_TICKS 50U
 
 /* 云台主循环 1 kHz，分频到 200 Hz 发送。 */

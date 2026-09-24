@@ -9,12 +9,15 @@ extern "C" {
 #include "remote_input.h"
 
 /*
- * 遥控后端由 app_config.h 的 APP_REMOTE_BACKEND 选定。两种接收机挂同一路 UART5，
+ * 遥控后端由 app_config.h 的 APP_REMOTE_BACKEND 选定。三种协议挂同一路 UART5，
  * 但帧长、波特率和校验都不同，所以后端头文件、帧长常量和调试快照的形状都要跟着切。
  */
-#if APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_IA10B
-#include "device_ia10b.h"
-#define REMOTE_FRAME_LEN IA10B_FRAME_LEN
+#if APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_SBUS
+#include "device_sbus.h"
+#define REMOTE_FRAME_LEN SBUS_FRAME_LEN
+#elif APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_IBUS
+#include "device_ibus.h"
+#define REMOTE_FRAME_LEN IBUS_FRAME_LEN
 #else
 #include "device_dr16.h"
 #define REMOTE_FRAME_LEN DR16_FRAME_LEN
@@ -24,8 +27,10 @@ extern "C" {
 
 typedef struct
 {
-#if APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_IA10B
-    ia10b_data_t backendData;          /* 当前 i-BUS 原始通道值，单位 us。 */
+#if APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_SBUS
+    sbus_data_t backendData;           /* 当前 S.BUS 原始通道值与链路标志。 */
+#elif APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_IBUS
+    ibus_data_t backendData;           /* 当前 i-BUS 原始通道值，单位 us。 */
 #else
     dr16_data_t backendData;           /* 当前 DBUS 原始解析结果。 */
 #endif
@@ -43,6 +48,14 @@ typedef struct
     uint32_t validFrameCount;
     uint32_t invalidSizeCount;
     uint32_t invalidFrameCount;
+#if APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_SBUS
+    /*
+     * S.BUS 独有的链路质量指标。i-BUS 有校验和，坏帧会进 invalidFrameCount；
+     * S.BUS 没有校验和，这两个计数就是判断链路好坏的主要依据。
+     */
+    uint32_t frameLostCount;   /* 接收机报告上一帧丢了的累计帧数。 */
+    uint32_t failsafeCount;    /* 接收机处于 failsafe 的累计帧数。 */
+#endif
 #if APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_DR16
     /* DBUS 的滚轮字段可能标记为无效；i-BUS 的旋钮一直在发，没有这个状态。 */
     uint32_t invalidDialCount;

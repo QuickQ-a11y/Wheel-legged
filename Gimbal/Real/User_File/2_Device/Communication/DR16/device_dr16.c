@@ -144,14 +144,22 @@ void DR16_MakeRemote(const dr16_data_t *data,
     converted.leftStick.y = DR16_NormalizeAxis(data->leftY, deadband);
     converted.rightStick.x = DR16_NormalizeAxis(data->rightX, deadband);
     converted.rightStick.y = DR16_NormalizeAxis(data->rightY, deadband);
-    converted.leftSwitch = DR16_ConvertSwitch(data->leftSwitch);
-    converted.rightSwitch = DR16_ConvertSwitch(data->rightSwitch);
-    converted.dialValid = data->dialValid;
+    /*
+     * ⚠ 降级映射：整套模式语义是按 FS-i6X 的四拨杆两旋钮排的，DT7 只有两个
+     * 拨杆一个滚轮，凑不齐。对应关系按"功能相同"来配：
+     *   DT7 右拨杆（三档）-> SwC，使能级，语义完全一致
+     *   DT7 左拨杆（三档）-> SwA，模式位；映射只判 DOWN，落到 MID 等同于 UP
+     *   DT7 滚轮          -> VrA，模式组选择
+     * SwB / SwD 无对应物理控件，保持 UNKNOWN；映射把非 DOWN 一律当 UP，
+     * 所以退化方向是安全的（台阶、跳跃、自瞄都进不去）。
+     * 结论：DR16 后端只能到达 卸力 / 只动云台 / STANDING / 小陀螺。
+     */
+    converted.sw[REMOTE_SW_C] = DR16_ConvertSwitch(data->rightSwitch);
+    converted.sw[REMOTE_SW_A] = DR16_ConvertSwitch(data->leftSwitch);
     if (data->dialValid != 0U)
     {
-        converted.dial = DR16_NormalizeAxis(data->dial, deadband);
+        converted.knobA = DR16_NormalizeAxis(data->dial, deadband);
     }
-
 
     *remote = converted;
 }

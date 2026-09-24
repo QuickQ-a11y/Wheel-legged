@@ -29,14 +29,20 @@ void Board_UpdateFeedback(uint32_t identifier,
     }
     else if (identifier == APP_BOARD_STATE_ID)
     {
-        boardDebugState.remote.leftSwitch = (Remote_Switch_t)data[0];
-        boardDebugState.remote.rightSwitch = (Remote_Switch_t)data[1];
-        boardDebugState.remote.dial = Board_Decode(&data[2]);
-        boardDebugState.remote.dialValid =
-            ((data[4] & APP_BOARD_FLAG_DIAL_VALID) != 0U) ? 1U : 0U;
+        uint32_t index;
+
+        /* 四个拨杆挤在 data[0] 里，每个 2 bit，下标即 REMOTE_SW_*。 */
+        for (index = 0U; index < (uint32_t)REMOTE_SW_COUNT; index++)
+        {
+            boardDebugState.remote.sw[index] = (Remote_Switch_t)
+                ((data[0] >> (index * APP_BOARD_SW_BITS)) & APP_BOARD_SW_MASK);
+        }
         boardDebugState.remote.online =
-            ((data[4] & APP_BOARD_FLAG_REMOTE_ONLINE) != 0U) ? 1U : 0U;
-        boardDebugState.sequence = data[5];
+            ((data[1] & APP_BOARD_FLAG_REMOTE_ONLINE) != 0U) ? 1U : 0U;
+        boardDebugState.autoaim_flag =
+            ((data[1] & APP_BOARD_FLAG_AUTOAIM) != 0U) ? 1U : 0U;
+        boardDebugState.remote.knobA = Board_Decode(&data[2]);
+        boardDebugState.sequence = data[4];
         boardDebugState.yaw_rel = Board_Decode(&data[6]);
         boardDebugState.stateFrameCount++;
     }
@@ -68,4 +74,9 @@ void Board_GetRemote(Remote_t *remote)
 float Board_GetYawRel(void)
 {
     return boardDebugState.yaw_rel;
+}
+
+uint8_t Board_GetAutoaim(void)
+{
+    return boardDebugState.autoaim_flag;
 }

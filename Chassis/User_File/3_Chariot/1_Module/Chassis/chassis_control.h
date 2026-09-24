@@ -34,8 +34,24 @@ typedef enum
     CHASSIS_MODE_SELF_SAVE,      /* 触发重新站立动作链。 */
     CHASSIS_MODE_BENCH,          /* 保持独立小板凳姿态。 */
     CHASSIS_MODE_STEP,           /* 正向辅助爬台阶。 */
+    CHASSIS_MODE_JUMP,           /* 压腿蓄力起跳。⚠ 状态机未实现，映射层暂时回落到 FOLLOW。 */
     CHASSIS_MODE_COUNT,
 } Chassis_Mode_t;
+
+/*
+ * 跳跃五阶段。⚠ 本轮【只占名字】，没有任何状态机代码引用它。
+ * 设计思路：压腿蓄力 -> 伸腿起跳 -> 空中收腿并保持机体姿态 ->
+ * 主动伸腿准备落地 -> 落地重回正常平衡，完成后由映射层锁存回 FOLLOW。
+ * 详见 ../../../../../Codex文档/遥控键位与模式分配.md。
+ */
+typedef enum
+{
+    CHASSIS_JUMP_CHARGE = 0,  /* 压腿蓄力。 */
+    CHASSIS_JUMP_EXTEND,      /* 伸腿起跳。 */
+    CHASSIS_JUMP_RETRACT,     /* 空中收腿并保持机体姿态。 */
+    CHASSIS_JUMP_LAND_PREP,   /* 主动伸腿准备落地。 */
+    CHASSIS_JUMP_RECOVER,     /* 落地重回正常平衡。 */
+} Chassis_Jump_Phase_t;
 
 /* 内部执行状态：表示本周期任务应调用哪一条控制流程。 */
 typedef enum
@@ -174,6 +190,8 @@ struct Chassis
     uint8_t board_online_flag;      /* 板间链路在线，由任务层按超时判定后写入。 */
     float gimbal_yaw_rel;           /* 云台YAW相对底盘的关节角，rad，由云台下发。 */
     uint8_t remote_stop_flag;       /* 急停请求，只封锁最终电机输出。 */
+    uint8_t autoaim_flag;           /* 云台判定的自瞄已激活，由板间帧下发。 */
+    uint8_t knob_group;             /* VrA 选出的模式组，0=低组 1=高组，带滞回。 */
     uint8_t yaw_stick_flag;         /* 航向摇杆已离开中位，供松杆边沿锁存航向。 */
     uint32_t can_error_count;
     /*

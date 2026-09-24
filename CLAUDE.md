@@ -18,7 +18,7 @@ Outside the repo, under the workspace root `../`:
 - `Matlab/` — offline model derivation (`ABK_LQR.py` is the live one, `ABK_LQR.m` is stale; `VMC.m`). Not built.
 - `Others/` — reference open-source projects (HERO_LEG, SPR, ZJU docs …). Read-only.
 
-The two boards talk over a dedicated **FDCAN3** link (PD12/PD13): the DR16 receiver is on the gimbal board, which forwards remote input down to the chassis. Protocol is defined in each project's `User_File/1_Middleware/0_Common/app_config.h`.
+The two boards talk over a dedicated **FDCAN3** link (PD12/PD13): the receiver (**FS-iA10B**, currently on **S.BUS**; i-BUS and DR16/DBUS also selectable at compile time via `APP_REMOTE_BACKEND`) is on the gimbal board, which forwards remote input down to the chassis. Protocol is defined in each project's `User_File/1_Middleware/0_Common/app_config.h`.
 
 `Chassis/CLAUDE.md` holds the **binding style/collaboration rules** (Chinese) — read it before touching any business code; `Gimbal/CLAUDE.md` is the same document. This file covers build/test mechanics and architecture. When the two conflict, `Chassis/CLAUDE.md` wins.
 
@@ -150,16 +150,31 @@ gcc's stderr to `/dev/null` inside a loop is the usual way to hide the failure; 
 
 ## 板间协议契约
 
-两板通过专用 **FDCAN3**（PD12/PD13）通信：DR16 接收机在云台板，遥控输入由云台向下转发给底盘。
+两板通过专用 **FDCAN3**（PD12/PD13）通信：接收机在云台板，遥控输入由云台向下转发给底盘。
+两帧的字节布局见任一侧 `app_config.h` 的板间通信注释块；键位语义见
+`Codex文档/遥控键位与模式分配.md`。
+
+**架构：每块板只解释自己关心的拨杆，板间只传归一化后的原始快照。**
+不要把 `Chassis_Mode_t` 解析到云台再下发——那是反向依赖，还会多出一份必须
+两侧同步的协议常量。
+
+⚠ FDCAN3 配的是 `FDCAN_FRAME_CLASSIC`，**帧长封顶 8 字节**，加字段只能在现有
+8 个字节里挤。状态帧目前用了 7 个（4 个拨杆压在一个字节里），剩 1 个预留。
 
 ⚠ **协议常量在两侧的 `User_File/1_Middleware/0_Common/app_config.h` 里各存一份，
-必然漂移——改一侧必须同步另一侧。** 已经发生过：
+必然漂移——改一侧必须同步另一侧。** 已知的有意差异：
 
 ```
 APP_BOARD_SEND_DIV    Chassis = 5U    Gimbal/Real = 1U
 ```
 
-底盘那份还是**死配置**（`Chassis/User_File/` 里引用次数为 0，底盘只收不发）。
+底盘那份是**死配置**（`Chassis/User_File/` 里引用次数为 0，底盘只收不发），
+实际发送频率由云台那份决定（DIV=1 即 1 kHz，2000 帧/s）。这是用户有意设的，别改回去。
+
+（`remote_input.h` 曾经也是漂移源，现已收敛成纯输入类型，两板逐字节相同——
+派生语义移进了各板的业务层。`Chassis/User_File/1_Middleware/0_Common/remote_input.c`
+已删除。）
+
 改协议时用这条命令对一遍：
 
 ```bash

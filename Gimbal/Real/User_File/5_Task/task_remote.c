@@ -17,16 +17,26 @@
  * REMOTE_FRAME_LEN 在 task_remote.h 里已按后端定义。
  * 这些是编译期别名、不是运行时接口层：零间接、零开销，换后端只改 app_config.h 一个宏。
  */
-#if APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_IA10B
-#define Remote_Backend_ParseFrame IA10B_ParseFrame
-#define Remote_Backend_MakeRemote IA10B_MakeRemote
-#define REMOTE_DEADBAND APP_IA10B_DB
-#define REMOTE_UART_BAUD IA10B_UART_BAUD
-#define REMOTE_UART_WORDLENGTH IA10B_UART_WORDLENGTH
-#define REMOTE_UART_PARITY IA10B_UART_PARITY
-#define REMOTE_UART_STOPBITS IA10B_UART_STOPBITS
-#define REMOTE_UART_RXINVERT IA10B_UART_RXINVERT
-typedef ia10b_data_t remote_backend_data_t;
+#if APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_SBUS
+#define Remote_Backend_ParseFrame SBUS_ParseFrame
+#define Remote_Backend_MakeRemote SBUS_MakeRemote
+#define REMOTE_DEADBAND APP_SBUS_DB
+#define REMOTE_UART_BAUD SBUS_UART_BAUD
+#define REMOTE_UART_WORDLENGTH SBUS_UART_WORDLENGTH
+#define REMOTE_UART_PARITY SBUS_UART_PARITY
+#define REMOTE_UART_STOPBITS SBUS_UART_STOPBITS
+#define REMOTE_UART_RXINVERT SBUS_UART_RXINVERT
+typedef sbus_data_t remote_backend_data_t;
+#elif APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_IBUS
+#define Remote_Backend_ParseFrame IBUS_ParseFrame
+#define Remote_Backend_MakeRemote IBUS_MakeRemote
+#define REMOTE_DEADBAND APP_IBUS_DB
+#define REMOTE_UART_BAUD IBUS_UART_BAUD
+#define REMOTE_UART_WORDLENGTH IBUS_UART_WORDLENGTH
+#define REMOTE_UART_PARITY IBUS_UART_PARITY
+#define REMOTE_UART_STOPBITS IBUS_UART_STOPBITS
+#define REMOTE_UART_RXINVERT IBUS_UART_RXINVERT
+typedef ibus_data_t remote_backend_data_t;
 #else
 #define Remote_Backend_ParseFrame DR16_ParseFrame
 #define Remote_Backend_MakeRemote DR16_MakeRemote
@@ -167,6 +177,30 @@ static void Remote_Task_ProcessFrame(task_remote_state_t *state,
 
     state->validFrameCount++;
     state->lastValidTick = pending->tick;
+#if APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_SBUS
+    if (parsed.frameLost != 0U)
+    {
+        state->frameLostCount++;
+    }
+    /*
+     * ⚠ failsafe 置位就【立刻】判离线，不等 APP_REMOTE_TIMEOUT_TICKS。
+     * 接收机丢失发射机之后仍然按帧率持续发帧，只是通道值换成了 failsafe
+     * 预设值（通常全部回中），所以光看帧来没来是分辨不出来的——等超时那 100 ms
+     * 里，底盘会拿着"回中"当成操作者真的松了杆。
+     *
+     * 这是 S.BUS 唯一强过 i-BUS 的地方，正好补上它没有校验和的缺口。
+     * failsafe 解除后走下面的正常路径重新累计同步帧，自动恢复在线。
+     */
+    if (parsed.failsafe != 0U)
+    {
+        state->failsafeCount++;
+        state->online = 0U;
+        state->syncFrameCount = 0U;
+        state->backendData = parsed;
+        memset(remote, 0, sizeof(*remote));
+        return;
+    }
+#endif
 #if APP_REMOTE_BACKEND == APP_REMOTE_BACKEND_DR16
     if (parsed.dialValid == 0U)
     {

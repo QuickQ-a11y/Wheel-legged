@@ -230,23 +230,37 @@ void Gimbal_Feedback_Update(void)
 }
 
 /**
- * @brief 右拨杆直接决定外层状态：下=卸力，中和上都是遥控控制。
+ * @brief SwC 直接决定外层状态：上=卸力，中和下都是遥控控制。
  *
- * 左拨杆云台侧只接收不消费，后续由板间通信原样下发给底盘。
+ * ⚠ 方向与旧的 DR16 右拨杆【相反】。FS-i6X 要求所有拨杆位于 UP 才允许开遥控电源，
+ * 所以 UP 是唯一保证的上电初始位置，必须对应最安全的状态。UNKNOWN 一并退化到卸力。
+ *
+ * SwA/SwB 和 VrA 云台侧不消费，由板间通信原样下发给底盘自己解释。
+ * SwD 和 VrB 只在这里派生出标志供 Watch 观察，控制逻辑尚未实现。
  */
 void Gimbal_State_Update(void)
 {
     Gimbal_State_t next = Gimbal.state;
 
-    if (Remote.rightSwitch == REMOTE_SWITCH_DOWN)
-    {
-        next = GIMBAL_ZERO_FORCE;
-    }
-    else if ((Remote.rightSwitch == REMOTE_SWITCH_MID) ||
-             (Remote.rightSwitch == REMOTE_SWITCH_UP))
+    if ((Remote.sw[REMOTE_SW_C] == REMOTE_SWITCH_MID) ||
+        (Remote.sw[REMOTE_SW_C] == REMOTE_SWITCH_DOWN))
     {
         next = GIMBAL_CONTROL;
     }
+    else
+    {
+        next = GIMBAL_ZERO_FORCE;
+    }
+
+    /*
+     * ⚠ autoaim_flag 现在【只反映拨杆位置】。完整语义还要加上"上位机在线"
+     * 这一半——task_usb 目前只有累计计数器，没有最近一帧的时间戳，
+     * 补在线判定属于自瞄那一摊活，本轮没做。底盘拿这个位去锁航向。
+     */
+    Gimbal.autoaim_flag =
+        (Remote.sw[REMOTE_SW_D] == REMOTE_SWITCH_DOWN) ? 1U : 0U;
+    Gimbal.fric_flag = (Remote.knobB > APP_RC_FRIC_ON) ? 1U : 0U;
+    Gimbal.trigger_flag = (Remote.knobB >= APP_RC_TRIGGER_ON) ? 1U : 0U;
 
     /*
      * 进入控制态时清积分。目标不需要在这里初始化：卸力期间 Axis_Follow 每周期
@@ -378,7 +392,8 @@ void Gimbal_Command_Send(void)
     }
 
     /*
-     * 板间下发分频到 200 Hz：DR16 本身只有约 72 Hz 更新率，1 kHz 转发纯属浪费总线。
+     * 板间下发按 APP_BOARD_SEND_DIV 分频。接收机帧率本来就只有 DR16 71 Hz /
+     * i-BUS 129 Hz，分频到接收机帧率附近就够，再高只是重复发同一份快照。
      * yaw_rel 用编码器口径的机体系关节角，底盘要的是"云台相对车体转了多少"，
      * 不是 IMU 的世界系朝向。
      */
@@ -389,7 +404,8 @@ void Gimbal_Command_Send(void)
         {
             boardSendCount = 0U;
             Board_UpdateTxFrames(&Remote,
-                                 Algorithm_AngleNormalizeRad(Gimbal.yaw.angle_joint));
+                                 Algorithm_AngleNormalizeRad(Gimbal.yaw.angle_joint),
+                                 Gimbal.autoaim_flag);
         }
     }
 

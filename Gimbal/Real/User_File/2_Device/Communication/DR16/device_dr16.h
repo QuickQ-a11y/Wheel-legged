@@ -12,7 +12,7 @@ extern "C" {
 #define DR16_FRAME_LEN 18U
 
 /*
- * 本后端要求的 UART 参数，与 IA10B 后端对称。这组值就是 CubeMX 当前给 UART5
+ * 本后端要求的 UART 参数，与 i-BUS 后端对称。这组值就是 CubeMX 当前给 UART5
  * 配的，所以对 DR16 而言 task_remote 里那次重新初始化是空操作——写出来是为了
  * 让"谁决定 UART 参数"这件事显式，换遥控后端时不必回头翻 CubeMX 配置。
  * DBUS 是 100000 8E1、正常电平（9B + EVEN 即 8 数据位 + 1 校验位）。
@@ -23,7 +23,7 @@ extern "C" {
 #define DR16_UART_STOPBITS UART_STOPBITS_1
 /*
  * DBUS 本身就是反相电平，而座子上的硬件反相器已经把它翻回正常，
- * 所以 MCU 这边【不能】再反一次。i-BUS 那个后端相反，见 device_ia10b.h。
+ * 所以 MCU 这边【不能】再反一次。i-BUS 那个后端相反，见 device_ibus.h。
  */
 #define DR16_UART_RXINVERT UART_ADVFEATURE_RXINV_DISABLE
 #define DR16_CH_MIN 364U

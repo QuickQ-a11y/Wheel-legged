@@ -828,7 +828,7 @@ static void test_remote_goal(void)
                  APP_RC_MAX_VEL) < TEST_TOLERANCE);
     /*
      * 腿长目标按L0_rate斜坡逼近goal.L0：进STANDING时已锁在当时的实际
-     * 腿长0.25，第一拍只朝APP_RC_LEG_S走一个步长，不再一拍到位。
+     * 腿长0.25，第一拍只朝APP_RC_LEG_M走一个步长，不再一拍到位。
      */
     assert(Chassis.leg[CHASSIS_LEFT].target_L0 < 0.25f);
     assert(fabsf(Chassis.leg[CHASSIS_LEFT].target_L0 - 0.25f) <=

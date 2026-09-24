@@ -124,6 +124,18 @@ static void Motion_Update(void)
         Chassis.lqr.target[CHASSIS_STATE_D_S] = Chassis.goal.d_s;
 
         if ((Chassis.mode == CHASSIS_MODE_FOLLOW) &&
+            (Chassis.autoaim_flag != 0U))
+        {
+            /*
+             * 自瞄期间底盘不跟云台：航向目标停在进自瞄那一拍的值不再更新，
+             * 右摇杆也不吃。云台由上位机接管，底盘保持车身朝向稳定便于命中。
+             * 不需要显式记录"那一拍"——本分支只是停止写 target[FAI]，
+             * 它自然保留了上一拍由跟随或摇杆分支算出的值。
+             */
+            Chassis.lqr.target[CHASSIS_STATE_D_FAI] = 0.0f;
+            Chassis.yaw_stick_flag = 0U;
+        }
+        else if ((Chassis.mode == CHASSIS_MODE_FOLLOW) &&
             (Chassis_Config.follow.enable_flag != 0U) &&
             (Chassis.board_online_flag != 0U))
         {

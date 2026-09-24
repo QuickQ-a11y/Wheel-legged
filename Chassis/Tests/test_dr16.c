@@ -221,66 +221,47 @@ static void testGenericInputMapping(void)
     Remote_t remote = {0};
 
     DR16_MakeRemote(&data, 10, &remote);
-    Remote_ApplyMapping(&remote);
     assert(remote.leftStick.x == 0.5f);
     assert(remote.leftStick.y == 1.0f);
     assert(remote.rightStick.x == -1.0f);
     assert(remote.rightStick.y == -0.5f);
-    assert(fabsf(remote.dial - (490.0f / 650.0f)) < TEST_TOLERANCE);
-    assert(remote.dialValid == 1U);
-    assert(remote.leftSwitch == REMOTE_SWITCH_UP);
-    assert(remote.rightSwitch == REMOTE_SWITCH_DOWN);
+    assert(fabsf(remote.knobA - (490.0f / 650.0f)) < TEST_TOLERANCE);
     assert(remote.online == 0U);
-    /* 右下是急停档，不产生模式请求，左拨杆此时不参与。 */
-    assert(remote.modeRequest == REMOTE_MODE_NONE);
-    assert(remote.legRequest == REMOTE_LEG_SHORT);
 
-    /* 右中恒为零力矩，与左拨杆无关。 */
+    /*
+     * 降级映射：整套模式语义按 FS-i6X 的四拨杆两旋钮排，DT7 凑不齐，
+     * 对应关系是 右拨杆 -> SwC（使能级）、左拨杆 -> SwA、滚轮 -> VrA。
+     *
+     * ⚠ SwB / SwD / VrB 没有对应物理控件，必须停在"不激活"的一侧，
+     * 否则 DR16 后端会凭空进入台阶、跳跃或自瞄。这条是降级安全性的判据。
+     */
+    assert(remote.sw[REMOTE_SW_C] == REMOTE_SWITCH_DOWN);
+    assert(remote.sw[REMOTE_SW_A] == REMOTE_SWITCH_UP);
+    assert(remote.sw[REMOTE_SW_B] == REMOTE_SWITCH_UNKNOWN);
+    assert(remote.sw[REMOTE_SW_D] == REMOTE_SWITCH_UNKNOWN);
+    assert(remote.knobB == 0.0f);
+
     data.rightSwitch = DR16_SWITCH_MID;
     data.dial = 400;
     DR16_MakeRemote(&data, 10, &remote);
-    Remote_ApplyMapping(&remote);
-    assert(remote.modeRequest == REMOTE_MAP_RIGHT_MID);
+    assert(remote.sw[REMOTE_SW_C] == REMOTE_SWITCH_MID);
+    assert(fabsf(remote.knobA - 0.6f) < TEST_TOLERANCE);
+
     data.leftSwitch = DR16_SWITCH_DOWN;
     DR16_MakeRemote(&data, 10, &remote);
-    Remote_ApplyMapping(&remote);
-    assert(remote.modeRequest == REMOTE_MAP_RIGHT_MID);
+    assert(remote.sw[REMOTE_SW_C] == REMOTE_SWITCH_MID);
+    assert(remote.sw[REMOTE_SW_A] == REMOTE_SWITCH_DOWN);
 
-    /* 右上时才由左拨杆选模式。 */
     data.rightSwitch = DR16_SWITCH_UP;
     data.leftSwitch = DR16_SWITCH_MID;
     DR16_MakeRemote(&data, 10, &remote);
-    Remote_ApplyMapping(&remote);
-    assert(remote.rightSwitch == REMOTE_SWITCH_UP);
-    assert(remote.leftSwitch == REMOTE_SWITCH_MID);
-    assert(fabsf(remote.dial - 0.6f) < TEST_TOLERANCE);
-    assert(remote.modeRequest == REMOTE_MAP_LEFT_MID);
-    assert(remote.legRequest == REMOTE_LEG_MIDDLE);
+    assert(remote.sw[REMOTE_SW_C] == REMOTE_SWITCH_UP);
+    assert(remote.sw[REMOTE_SW_A] == REMOTE_SWITCH_MID);
 
-    data.leftSwitch = DR16_SWITCH_UP;
-    DR16_MakeRemote(&data, 10, &remote);
-    Remote_ApplyMapping(&remote);
-    assert(remote.modeRequest == REMOTE_MAP_LEFT_UP);
-
-    data.leftSwitch = DR16_SWITCH_DOWN;
-    data.dial = -400;
-    DR16_MakeRemote(&data, 10, &remote);
-    Remote_ApplyMapping(&remote);
-    assert(remote.leftSwitch == REMOTE_SWITCH_DOWN);
-    assert(remote.modeRequest == REMOTE_MAP_LEFT_DOWN);
-    assert(remote.legRequest == REMOTE_LEG_MIDDLE);
-
-    data.dial = -401;
-    DR16_MakeRemote(&data, 10, &remote);
-    Remote_ApplyMapping(&remote);
-    assert(remote.legRequest == REMOTE_LEG_LONG);
-
+    /* 滚轮字段无效时 VrA 归零，不能留上一帧的值。 */
     data.dialValid = 0U;
     DR16_MakeRemote(&data, 10, &remote);
-    Remote_ApplyMapping(&remote);
-    assert(remote.dial == 0.0f);
-    assert(remote.dialValid == 0U);
-    assert(remote.legRequest == REMOTE_LEG_KEEP);
+    assert(remote.knobA == 0.0f);
 }
 
 int main(void)
