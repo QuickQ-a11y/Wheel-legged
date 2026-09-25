@@ -64,6 +64,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${SHARED}/5_Task/task_remote.c
     ${SHARED}/5_Task/task_usb.c
     ${SHARED}/5_Task/gimbal_task.c
+    ${SHARED}/5_Task/shooter_task.c
     # Kalman 和 QuaternionEKF 只用到这 6 个矩阵函数，不整包编 CMSIS-DSP。
     Middlewares/ST/ARM/DSP/Source/MatrixFunctions/arm_mat_init_f32.c
     Middlewares/ST/ARM/DSP/Source/MatrixFunctions/arm_mat_add_f32.c

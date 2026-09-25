@@ -2,7 +2,6 @@
 
 #include "app_config.h"
 #include "gimbal_control.h"
-#include "shooter_control.h"
 
 #include "cmsis_os2.h"
 
@@ -20,9 +19,9 @@ static const osThreadAttr_t gimbalTaskAttributes = {
  * 每轮按 反馈更新 -> 状态选择 -> 控制 -> 命令发送 执行；
  * 设备故障只在命令发送阶段覆盖零力矩和零电流，不阻断前面的计算。
  *
- * 云台和发射机构是两个【并列】的模块，共用这一个 tick 和同一份 dt，
- * 但各有自己的 fault 和 safe_flag，互不封锁：一台摩擦轮掉线不该让操作者
- * 连瞄准都做不了。任务层只负责按顺序调用，不在两者之间传状态。
+ * 发射机构是【同优先级的另一个任务】（shooter_task.c），两者互不封锁：
+ * 一台摩擦轮掉线不该让操作者连瞄准都做不了，云台故障也不该停下已经转起来的
+ * 摩擦轮。设备层也是分开的——云台只碰 Motor_DM，发射机构只碰 Motor_DJI。
  */
 static void Gimbal_Task_Entry(void *argument)
 {
@@ -32,7 +31,6 @@ static void Gimbal_Task_Entry(void *argument)
     (void)argument;
 
     Gimbal_Init();
-    Shooter_Init();
 
     for (;;)
     {
@@ -44,17 +42,12 @@ static void Gimbal_Task_Entry(void *argument)
 
         /* tick 差越界说明被长时间抢占或计数回绕，退回标称周期。 */
         Gimbal.dt = ((dt > 0.0f) && (dt < 0.05f)) ? dt : Gimbal_Config.default_dt;
-        Shooter.dt = Gimbal.dt;
         lastTick = nowTick;
 
         Gimbal_Feedback_Update();
         Gimbal_State_Update();
         Gimbal_Control();
         Gimbal_Command_Send();
-
-        Shooter_Feedback_Update();
-        Shooter_Control();
-        Shooter_Command_Send();
     }
 }
 

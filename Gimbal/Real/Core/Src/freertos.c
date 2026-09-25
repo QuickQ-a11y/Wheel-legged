@@ -31,6 +31,7 @@
 #include "task_imu.h"
 #include "task_remote.h"
 #include "task_usb.h"
+#include "shooter_task.h"
 
 /* USER CODE END Includes */
 
@@ -107,6 +108,7 @@ void MX_FREERTOS_Init(void) {
   CAN_Task_Init();
   Remote_Task_Init();
   Gimbal_Task_Init();
+  Shooter_Task_Init();
   IMU_Task_Init();
   USB_Task_Init();
   /* USER CODE END RTOS_THREADS */
