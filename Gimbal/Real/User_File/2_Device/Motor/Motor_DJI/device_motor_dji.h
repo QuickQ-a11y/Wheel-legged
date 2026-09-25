@@ -38,7 +38,10 @@ typedef enum
 typedef struct
 {
     uint16_t encoderRaw;         /* 转子机械角，范围 0..8191 对应 0..360°。 */
-    uint16_t lastEncoderRaw;     /* 上一次编码器值，用于后续扩展回绕处理。 */
+    uint16_t lastEncoderRaw;     /* 上一次编码器值，用于判断本帧是否跨过回绕点。 */
+    int32_t totalRound;          /* 转子累计整圈数，带符号。 */
+    int32_t totalEncoder;        /* 转子累计计数 = totalRound × 8192 + encoderRaw。 */
+    float angle;                 /* 【输出轴】累计角，rad。已除减速比，上电清零。 */
     int16_t speedRpm;            /* 转子转速，rpm。⚠ M2006 减速比 36:1，输出轴转速要除 36。 */
     int16_t currentRaw;          /* 实际转矩电流原始值，口径同 APP_DJI_CURRENT_MAX。 */
     uint8_t errorCode;           /* 电机错误码，见上面的 MOTOR_DJI_ERR_*。 */

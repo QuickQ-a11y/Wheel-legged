@@ -10,12 +10,14 @@
  *       -IUser_File/1_Middleware/2_Algorithm \
  *       -IUser_File/2_Device/Motor/Motor_DJI \
  *       -o t Tests/test_motor_dji.c \
- *       User_File/2_Device/Motor/Motor_DJI/device_motor_dji.c \
- *       User_File/1_Middleware/2_Algorithm/Limit.c -lm
+ *       User_File/2_Device/Motor/Motor_DJI/device_motor_dji.c -lm
+ *
+ * ⚠ Limit.h 是纯 inline 头文件，【没有 Limit.c】，别往命令里加。
  */
 #include "device_motor_dji.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -324,8 +326,103 @@ static void testOnlineTimeout(void)
                               0xFFFFFFF0U + APP_DJI_TIMEOUT_TICKS + 1U) == 0U);
 }
 
+
+/**
+ * @brief 编码器回绕累加：跨过 0/8191 边界时圈数要增减，不能把回绕当成大跳变。
+ *
+ * ⚠ 这条是拨盘位置环的地基。没有累加的话 encoderRaw 一到边界就跳 8191 个计数，
+ * 位置环会当成一个巨大误差猛冲一下。
+ *
+ * ⚠ 本用例必须在 main() 里【第一个】跑：它要验证"首帧不产生假 delta"，
+ * 而设备层的状态是静态的，一旦别的用例先把这台电机带上线就验不了了。
+ */
+static void testEncoderWrap(void)
+{
+    uint8_t data[APP_DJI_RX_LEN];
+    motor_dji_state_t s;
+
+    stubTick = 100U;
+
+    /* 首帧：lastEncoderRaw 还是 0，不能拿它算 delta，否则凭空多出一整段。 */
+    buildFeedback(data, 8000U, 0, 0, MOTOR_DJI_ERR_NONE);
+    assert(Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN3,
+                                    APP_DJI_TRIGGER_RX_ID, data) == 1U);
+    Motor_DJI_GetState(MOTOR_DJI_TRIGGER, &s);
+    assert(s.totalRound == 0);
+    assert(s.totalEncoder == 8000);
+
+    /* 正向跨过回绕点：8000 -> 100，delta 为大负数，应记 +1 圈。 */
+    buildFeedback(data, 100U, 0, 0, MOTOR_DJI_ERR_NONE);
+    assert(Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN3,
+                                    APP_DJI_TRIGGER_RX_ID, data) == 1U);
+    Motor_DJI_GetState(MOTOR_DJI_TRIGGER, &s);
+    assert(s.totalRound == 1);
+    assert(s.totalEncoder == APP_DJI_ENCODER_PER_ROUND + 100);
+
+    /* 反向跨回来：100 -> 8000，delta 为大正数，应记 -1 圈。 */
+    buildFeedback(data, 8000U, 0, 0, MOTOR_DJI_ERR_NONE);
+    assert(Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN3,
+                                    APP_DJI_TRIGGER_RX_ID, data) == 1U);
+    Motor_DJI_GetState(MOTOR_DJI_TRIGGER, &s);
+    assert(s.totalRound == 0);
+    assert(s.totalEncoder == 8000);
+
+    /* 普通小步进不能误判成回绕。 */
+    buildFeedback(data, 8100U, 0, 0, MOTOR_DJI_ERR_NONE);
+    assert(Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN3,
+                                    APP_DJI_TRIGGER_RX_ID, data) == 1U);
+    Motor_DJI_GetState(MOTOR_DJI_TRIGGER, &s);
+    assert(s.totalRound == 0);
+    assert(s.totalEncoder == 8100);
+}
+
+/**
+ * @brief angle 是【输出轴】弧度：转子转满一圈只等于输出轴 2π/36。
+ *
+ * ⚠ 漏掉减速比的话这个断言会差 36 倍。断言的是【增量】，不依赖此前的历史。
+ */
+static void testAngleIsOutputShaft(void)
+{
+    uint8_t data[APP_DJI_RX_LEN];
+    motor_dji_state_t before;
+    motor_dji_state_t after;
+    float expect;
+
+    stubTick = 200U;
+
+    buildFeedback(data, 0U, 0, 0, MOTOR_DJI_ERR_NONE);
+    (void)Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN3,
+                                   APP_DJI_TRIGGER_RX_ID, data);
+    Motor_DJI_GetState(MOTOR_DJI_TRIGGER, &before);
+
+    /*
+     * 转子正向走满一整圈回到 0。中间必须踩够点：单帧跨度超过半圈会被判成
+     * 反向回绕，而 0 -> 4000 -> 0 只是出去又回来、根本没绕圈。
+     */
+    buildFeedback(data, 3000U, 0, 0, MOTOR_DJI_ERR_NONE);
+    (void)Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN3,
+                                   APP_DJI_TRIGGER_RX_ID, data);
+    buildFeedback(data, 6000U, 0, 0, MOTOR_DJI_ERR_NONE);
+    (void)Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN3,
+                                   APP_DJI_TRIGGER_RX_ID, data);
+    buildFeedback(data, 0U, 0, 0, MOTOR_DJI_ERR_NONE);
+    (void)Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN3,
+                                   APP_DJI_TRIGGER_RX_ID, data);
+    Motor_DJI_GetState(MOTOR_DJI_TRIGGER, &after);
+
+    assert(after.totalRound - before.totalRound == 1);
+    assert(after.totalEncoder - before.totalEncoder == APP_DJI_ENCODER_PER_ROUND);
+
+    expect = 2.0f * APP_PI_F / APP_DJI_GEAR_RATIO;
+    assert(fabsf((after.angle - before.angle) - expect) < 1e-4f);
+}
+
 int main(void)
 {
+    /* ⚠ 回绕用例要验"首帧"，必须排在所有会带电机上线的用例之前。 */
+    testEncoderWrap();
+    testAngleIsOutputShaft();
+
     testBusMapping();
     testTxSlots();
     testFeedbackParse();
@@ -335,6 +432,6 @@ int main(void)
     testSafeGate();
     testCurrentLimit();
     testOnlineTimeout();
-    printf("test_motor_dji: 9 组用例全过\n");
+    printf("test_motor_dji: 11 组用例全过\n");
     return 0;
 }

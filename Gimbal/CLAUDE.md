@@ -75,11 +75,24 @@ FDCAN3 上有 DM 电机和底盘板会 ACK，没有这个风险，但仍留开�
 
 ## 发射机构模块（`3_Chariot/1_Module/Shooter`）
 
-与 Gimbal 模块**平级**，由 `gimbal_task` 并列调用，共用同一个 1 kHz tick 和 dt。
+与 Gimbal 模块**平级**，由**独立的 `shooter_task`** 驱动，1 kHz，与 `gimbal_task`
+**同为 `osPriorityHigh`**，各自 `osDelayUntil` 独立相位、各自测自己的 `dt`。
 
 ⚠ **两者互不封锁**：各有自己的 `fault` 和 `safe_flag`。原先发射机构寄在 Gimbal 里，
 `GIMBAL_FAULT_DJI` 会置 `Gimbal.safe_flag`——**一台摩擦轮掉线连瞄准都做不了**。
 拆开之后卡弹不影响云台，云台故障也不会停下已经转起来的摩擦轮。
+
+⚠ **拆成两个任务没有引入新的共享状态**，这是拆得动的前提：云台只碰 `Motor_DM`、
+发射机构只碰 `Motor_DJI`（两边互相引用次数为 0），而 CAN 发送缓存由 `task_can`
+的 `canTxMutex` 保护。**再往任一模块里引入对方的设备层之前，先想清楚这条还成不成立。**
+
+⚠ 优先级给同级而不是比云台低一级，是因为两者都是 1 kHz 硬周期：低一级会被
+`osPriorityAboveNormal` 的遥控/USB 任务抢占，而拨盘位置环对周期抖动比速度环敏感。
+
+⚠ 两个任务各自读全局 `Remote`（`task_remote.c` 只在写侧加 `remoteStateMutex`），
+所以**云台和发射机构可能看到相邻两帧的遥控值**。现在不构成问题——云台用
+SwC/右摇杆/SwD，发射机构用 VrB，互相独立。将来若出现两者必须看同一帧的语义，
+这里要先加同步。
 
 - `shooter_config.*` —— `const Shooter_Config_t`，两个按总线分的输出门、摩擦轮速度环参数
 - `shooter_control.*` —— 唯一的全局 `Shooter_t Shooter`，是长期 Watch 入口
@@ -92,9 +105,49 @@ FDCAN3 上有 DM 电机和底盘板会 ACK，没有这个风险，但仍留开�
 ⚠ 反馈的 `speedRpm` 是**转子**转速，M2006 减速比 36:1，输出轴转速要除 36。
 目标转速统一用转子口径（与反馈同源），不引入第二个单位。
 
-当前进度：通信 + 摩擦轮速度环。**拨盘只有手动电流 `Shooter.trigger_I_manual`，
-没有控制环**；VrB 旋钮只派生出 `fric_request` / `trigger_request` 供 Watch 核对，
-**尚未接进控制**。
+### 拨盘：两层正交状态机 + 串级环
+
+VrB 已接进控制：过中位开摩擦轮，进末端 2% 使能区拨弹。语义见
+`app_config.h` 的 `APP_SHOOT_BURST_*` 注释块，**别重新设计**。
+
+- **拨弹 FSM**：`IDLE -> HOLD -> BURST`。"那一发"发生在 `IDLE -> HOLD` 的**转移**上，
+  所以"一次进使能区 = 一发"天然成立，不需要在遥控层做边沿检测。
+- **防卡弹 FSM**：`NORMAL -> SUSPECT -> BACKING -> (NORMAL | GIVEUP)`。
+  判据是**电调堵转码 `MOTOR_DJI_ERR_STALL` 或 电流饱和**，取或。
+
+⚠ **两层是正交的，靠 `Shooter_Control` 里那一个 `if`**：只有 `NORMAL`/`SUSPECT`
+才跑拨弹逻辑，`BACKING`/`GIVEUP` 期间整个旁路——否则退弹的目标角会被下一轮加发覆盖。
+这是从 RoboWalker `crt_booster.cpp:155` 抄来的，删掉它单测会红。
+
+⚠ **`GIVEUP` 故意不置 fault 位。** fault 会经 `safe_flag` 把四台电机全部清零，
+而拨盘卡死时摩擦轮应该继续转——脱困后要能立刻接着打。放弃这件事由
+`Shooter.jam_state` 本身表示，不另存一份。
+
+⚠ **目标角从"上一次目标"累加，不是从当前反馈角累加。** 参考实现
+（RoboWalker `crt_booster.cpp:217` 的 `Get_Now_Angle() + 2π/7`）是后者，
+上一发没转到位时新目标基于半途角，这一发就短一截。`test_shooter` 专门钉死了这条。
+
+⚠⚠ **模块内有两套口径，这是有意的：**
+
+| | 摩擦轮 | 拨盘 |
+|---|---|---|
+| 速度 | **转子 rpm**（与 `speedRpm` 同源） | **输出轴 rad/s** |
+| 位置 | — | **输出轴 rad** |
+
+拨盘换到输出轴是因为**一发 = 2π/N 这个关系只在输出轴上成立**。
+`motor_dji_state_t.angle` 就是设备层算好的输出轴弧度（已除 36:1），
+角速度是 `speedRpm` 的纯换算、无状态，所以在 `shooter_control.c` 用的地方直接算。
+
+⚠ 位置环的 `outputLimit` 是**目标角速度**的上限，直接决定连发跟不跟得上
+`APP_SHOOT_BURST_HZ`。连发跟不上时先查它，不是先查速度环。
+
+⚠ 待发（`IDLE`）时两个环的积分**每拍都清**。只在进入那一拍清是不够的：
+误差为 0 时积分不会自己衰减，陈旧积分会让拨盘在待发状态一直带着小电流。
+
+**当前进度：** 收发、摩擦轮 PI 速度环、拨盘串级环、单发/连发/卡弹/退弹全部落地，
+主机单测覆盖。⚠ **一次都没上实机**，而且这三个数是占位值、没有实机核对：
+`APP_SHOOT_AMMO_PER_ROUND`（拨叉槽位数）、`APP_SHOOT_TRIGGER_DIR`（送弹方向）、
+`Shooter_Config` 里的两组 PID 和四个卡弹阈值。
 
 ## 遥控后端（DBUS / i-BUS / S.BUS 三选一）
 
@@ -307,6 +360,7 @@ INC="-IUser_File/1_Middleware/0_Common -IUser_File/1_Middleware/2_Algorithm \
 | `test_ibus` | `FlySky/device_ibus.c` |
 | `test_sbus` | `FlySky/device_sbus.c` |
 | `test_motor_dji` | `Motor_DJI/device_motor_dji.c` —— 需要三个桩头文件，见下 |
+| `test_shooter` | `Shooter/shooter_control.c` `Shooter/shooter_config.c` `Motor_DJI/device_motor_dji.c` `2_Algorithm/PID.c` —— 同样要那三个桩 |
 | `test_usb_protocol` | `USB/device_usb_protocol.c` `2_Algorithm/CRC.c` |
 | `test_board_protocol` | see below — spans both projects |
 
@@ -318,7 +372,12 @@ INC="-IUser_File/1_Middleware/0_Common -IUser_File/1_Middleware/2_Algorithm \
 也能往返自洽，等于没测。`testBitPackingIsolation` 同理：一次只设一路，
 "所有通道设成同一个值再往返"照样能过错位的代码，逐路隔离才抓得到。
 
-`test_motor_dji` 和 `test_board_protocol` 一样需要三个桩头文件
+⚠⚠ **`test_shooter` 要跑两遍**，第二遍加 `-DAPP_SHOOT_TRIGGER_DIR=(-1.0f)` 把送弹方向翻过来。
+默认 `DIR` 是 `+1`，此时"代码乘了这个常量"和"压根没乘"在数学上完全一样，
+单跑默认那遍查不出漏乘；而实机上把宏翻成 -1 却毫无反应会非常难查。
+`app_config.h` 里那个 `#ifndef` 就是为这件事留的，别顺手删掉。
+
+`test_motor_dji`、`test_shooter` 和 `test_board_protocol` 一样需要三个桩头文件
 （`stm32h7xx_hal.h` / `fdcan.h` / `task_can.h`，见下段），符号由测试文件自己定义；
 但它只链一个工程的文件，不用分两次 gcc。`fdcan.h` 那个桩要同时声明
 `hfdcan1/2/3` 三个句柄——发射机构跨两条总线，测试要靠句柄区分帧发到哪条上。

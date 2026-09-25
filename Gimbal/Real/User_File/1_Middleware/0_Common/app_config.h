@@ -47,6 +47,16 @@ extern "C" {
 #define APP_DJI_CURRENT_MAX 10000
 
 /*
+ * M2006 转子一圈的编码器计数，以及 M2006 P36 的减速比。
+ * 反馈里的 encoderRaw 和 speedRpm 都是【转子】口径，除以减速比才是输出轴。
+ */
+#define APP_DJI_ENCODER_PER_ROUND 8192
+#define APP_DJI_GEAR_RATIO 36.0f
+
+/* 算法文件里各自有一份 file-local 的 PI，这份是跨层共用的。 */
+#define APP_PI_F 3.14159265358979323846f
+
+/*
  * C620/C610 的 0x200 控制帧按电调 ID 分配字节：ID=n 占 data[2(n-1)] 和 data[2(n-1)+1]。
  * 发送字节位置必须由上面的反馈 ID 推出，不能写死，否则改电调 ID 时只有接收
  * 侧跟着变，会出现读一台电机、控另一台的交叉。
@@ -183,13 +193,36 @@ static_assert((APP_DJI_FRIC_1_RX_ID != APP_DJI_FRIC_2_RX_ID) &&
  * APP_SHOOT_BURST_DELAY_MS 后转连发，按 APP_SHOOT_BURST_HZ 连续发射；
  * 退出使能区间时计时复位。
  *
- * ⚠ 只是把名字和数值占下来，**拨弹逻辑尚未实现**：拨盘目前只有
- * Shooter.trigger_I_manual 这一个手动电流入口，没有控制环，VrB 也还没接进控制
- * （只派生出 Shooter.trigger_request 供 Watch 核对）。
- * 见 Codex文档/遥控键位与模式分配.md §5.3。
+ * 实现见 shooter_control.c 的拨弹状态机；两个数值【未经实机整定】。
  */
 #define APP_SHOOT_BURST_DELAY_MS 500U
 #define APP_SHOOT_BURST_HZ 8U
+
+/*
+ * 拨盘一圈的弹丸数，由【拨叉构型】决定——换拨叉就改这里，别的地方都从它推。
+ *
+ * ⚠⚠ 当前值是占位，【没有实机核对过】。上机时数一遍拨叉槽位再填。
+ * 填错的现象是单发转不到位或转过头，而摩擦轮一切正常，很容易往速度环上想。
+ */
+#define APP_SHOOT_AMMO_PER_ROUND 8
+
+/* 一发对应的拨盘【输出轴】转角，rad。不写死，永远由上面那个数推出。 */
+#define APP_SHOOT_RAD_PER_AMMO (2.0f * APP_PI_F / (float)APP_SHOOT_AMMO_PER_ROUND)
+
+/*
+ * 拨盘送弹方向：+1 表示"命令电流为正 = 送弹"，-1 表示反过来。
+ *
+ * ⚠⚠ 当前值是占位，【没有实机核对过】。实机第一步：拨盘【不装弹】空转，
+ * VrB 进使能区打单发，看转向对不对，反了就把这里改成 -1.0f。
+ * 装弹之后再测的话，方向反了会把弹往回拨。
+ *
+ * ⚠ 这里留 #ifndef 是为了让 test_shooter 能用 -D 把它翻成 -1 再跑一遍：
+ * 不翻过来的话"代码到底有没有乘这个常量"测不出来——DIR 为 +1 时
+ * 漏乘和乘了完全一样，而实机上翻这个宏却毫无反应会非常难查。
+ */
+#ifndef APP_SHOOT_TRIGGER_DIR
+#define APP_SHOOT_TRIGGER_DIR (+1.0f)
+#endif
 
 /*
  * 控制器第一阶段只计算中间状态和安全输出。

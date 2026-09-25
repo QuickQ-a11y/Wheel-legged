@@ -41,6 +41,38 @@ typedef struct
      * 才算转稳。仅供 Watch 和将来的火控判断，不参与控制。
      */
     float fric_ready_rpm;
+    /*
+     * 摩擦轮运行目标初值（转子 rpm），写进 Shooter.fric_target_rpm。
+     * VrB 只决定摩擦轮开不开，转多快仍由那个 Watch 可改的字段说了算，
+     * 这样整定期和实战期共用一个入口，不用为改目标重新烧录。
+     */
+    float fric_default_rpm;
+
+    /*
+     * 拨盘串级环。外环位置、内环速度，两环都用【输出轴】口径
+     * （rad 和 rad/s），与摩擦轮那套【转子】rpm 不是同一个口径——
+     * 一发 = 2π/N 这个关系只在输出轴上成立。
+     *
+     * ⚠ 位置环是【纯 P】：ki/kd 为 0、调用处 feedbackRate 传 0.0f。
+     * 串级的阻尼由内环速度环提供，外环再加微分会和内环打架。
+     * ⚠ 位置环的 outputLimit 是【目标角速度】的上限，直接决定连发跟不跟得上
+     * APP_SHOOT_BURST_HZ：至少要 BURST_HZ × APP_SHOOT_RAD_PER_AMMO。
+     * 连发跟不上时先查这个数，不是先查速度环。
+     */
+    algorithm_pid_config_t trigger_angle_pid;
+    algorithm_pid_config_t trigger_speed_pid;
+
+    /*
+     * 防卡弹。判据是【电调堵转码 或 电流饱和】，取或——
+     * C610 在反馈 data[7] 直接报堵转，这是 C620 没有的白送诊断；
+     * 但手册没写它的响应延迟和灵敏度，所以不拿它当唯一判据。
+     */
+    float jam_current;      /* 电流饱和阈值，C610 原始口径（±APP_DJI_CURRENT_MAX）。 */
+    float jam_confirm_s;    /* 判据持续这么久才确认卡弹，s。 */
+    float jam_back_s;       /* 退弹持续时长，s。 */
+    float jam_back_rad;     /* 退弹角度，输出轴 rad。 */
+    uint32_t jam_retry_max; /* 连续退弹这么多次仍未脱困就放弃并封锁输出。 */
+
     float default_dt; /* 任务 tick 差越界时回退的周期，单位 s。 */
 } Shooter_Config_t;
 
