@@ -63,7 +63,7 @@ typedef struct
      * 也不希望旋钮误碰就起转。
      */
     uint8_t enable_flag;   /* 总开关，为 0 时请求电流恒零。 */
-    float fric_target_rpm; /* 摩擦轮目标【转子】转速，rpm。Watch 可改。 */
+    float fric_target_rpm; /* 摩擦轮目标转速，rpm。减速箱已拆，即轮速。Watch 可改。 */
 
     /* 由 VrB 派生的操作者意图。 */
     uint8_t fric_request;    /* VrB 过中位：摩擦轮开。 */
@@ -74,7 +74,8 @@ typedef struct
     uint8_t fric_ready_flag; /* 三个摩擦轮都进了 fric_ready_rpm 带内。 */
 
     /*
-     * 拨盘。⚠ 这一组全是【输出轴】口径，与上面摩擦轮的【转子】rpm 不同源。
+     * 拨盘。⚠ 这一组全是【输出轴】口径（减速箱还在，36:1），
+     * 与上面摩擦轮那套（减速箱已拆，转子即轮速）不同源。
      * 一发 = 2π/N 只在输出轴上成立，所以拨盘这边整体换到输出轴。
      */
     shooter_trigger_state_t trigger_state;

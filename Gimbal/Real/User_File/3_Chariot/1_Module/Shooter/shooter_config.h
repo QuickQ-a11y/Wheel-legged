@@ -27,7 +27,8 @@ typedef struct
 {
     Shooter_Output_Config_t output;
     /*
-     * 摩擦轮速度环，三路共用一组参数。目标与反馈都用【转子】转速 rpm，
+     * 摩擦轮速度环，三路共用一组参数。目标与反馈都用转子转速 rpm；
+     * ⚠ 摩擦轮的减速箱【已经物理拆掉】，所以转子转速就是轮子转速。
      * 输出是 C610 的控制电流原始值（±APP_DJI_CURRENT_MAX 对应 ±10 A）。
      *
      * ⚠ kd 必须为 0。仓库里唯一的 PID 更新函数是
@@ -37,12 +38,12 @@ typedef struct
      */
     algorithm_pid_config_t fric_speed_pid;
     /*
-     * 摩擦轮速度环的在线判据：目标非零时，转子转速与目标差在这个带内
+     * 摩擦轮速度环的在线判据：目标非零时，轮速与目标差在这个带内
      * 才算转稳。仅供 Watch 和将来的火控判断，不参与控制。
      */
     float fric_ready_rpm;
     /*
-     * 摩擦轮运行目标初值（转子 rpm），写进 Shooter.fric_target_rpm。
+     * 摩擦轮运行目标初值（rpm，减速箱已拆所以就是轮速），写进 Shooter.fric_target_rpm。
      * VrB 只决定摩擦轮开不开，转多快仍由那个 Watch 可改的字段说了算，
      * 这样整定期和实战期共用一个入口，不用为改目标重新烧录。
      */
@@ -50,7 +51,7 @@ typedef struct
 
     /*
      * 拨盘串级环。外环位置、内环速度，两环都用【输出轴】口径
-     * （rad 和 rad/s），与摩擦轮那套【转子】rpm 不是同一个口径——
+     * （rad 和 rad/s；拨盘减速箱还在，36:1），与摩擦轮那套不是同一个口径——
      * 一发 = 2π/N 这个关系只在输出轴上成立。
      *
      * ⚠ 位置环是【纯 P】：ki/kd 为 0、调用处 feedbackRate 传 0.0f。

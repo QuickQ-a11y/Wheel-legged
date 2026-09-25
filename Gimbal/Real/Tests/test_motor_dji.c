@@ -377,7 +377,45 @@ static void testEncoderWrap(void)
 }
 
 /**
- * @brief angle 是【输出轴】弧度：转子转满一圈只等于输出轴 2π/36。
+ * @brief 摩擦轮【没有减速箱】（已物理拆掉），angle 与转子 1:1。
+ *
+ * ⚠ 这条和下面那条拨盘的用例必须成对看：减速比是【每台电机各不相同】的，
+ * 拿一个全局常量去除，两条里必然有一条是错的。
+ */
+static void testFricAngleHasNoGearbox(void)
+{
+    uint8_t data[APP_DJI_RX_LEN];
+    motor_dji_state_t before;
+    motor_dji_state_t after;
+    float expect;
+
+    stubTick = 300U;
+
+    buildFeedback(data, 0U, 0, 0, MOTOR_DJI_ERR_NONE);
+    (void)Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN2,
+                                   APP_DJI_FRIC_1_RX_ID, data);
+    Motor_DJI_GetState(MOTOR_DJI_FRIC_1, &before);
+
+    buildFeedback(data, 3000U, 0, 0, MOTOR_DJI_ERR_NONE);
+    (void)Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN2,
+                                   APP_DJI_FRIC_1_RX_ID, data);
+    buildFeedback(data, 6000U, 0, 0, MOTOR_DJI_ERR_NONE);
+    (void)Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN2,
+                                   APP_DJI_FRIC_1_RX_ID, data);
+    buildFeedback(data, 0U, 0, 0, MOTOR_DJI_ERR_NONE);
+    (void)Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN2,
+                                   APP_DJI_FRIC_1_RX_ID, data);
+    Motor_DJI_GetState(MOTOR_DJI_FRIC_1, &after);
+
+    assert(after.totalEncoder - before.totalEncoder == APP_DJI_ENCODER_PER_ROUND);
+
+    /* 转子一圈 = 轮子一圈 = 2π，不是 2π/36。 */
+    expect = 2.0f * APP_PI_F / APP_DJI_FRIC_GEAR_RATIO;
+    assert(fabsf((after.angle - before.angle) - expect) < 1e-4f);
+}
+
+/**
+ * @brief 拨盘的减速箱【还在】：转子转满一圈只等于输出轴 2π/36。
  *
  * ⚠ 漏掉减速比的话这个断言会差 36 倍。断言的是【增量】，不依赖此前的历史。
  */
@@ -413,7 +451,7 @@ static void testAngleIsOutputShaft(void)
     assert(after.totalRound - before.totalRound == 1);
     assert(after.totalEncoder - before.totalEncoder == APP_DJI_ENCODER_PER_ROUND);
 
-    expect = 2.0f * APP_PI_F / APP_DJI_GEAR_RATIO;
+    expect = 2.0f * APP_PI_F / APP_DJI_TRIGGER_GEAR_RATIO;
     assert(fabsf((after.angle - before.angle) - expect) < 1e-4f);
 }
 
@@ -422,6 +460,7 @@ int main(void)
     /* ⚠ 回绕用例要验"首帧"，必须排在所有会带电机上线的用例之前。 */
     testEncoderWrap();
     testAngleIsOutputShaft();
+    testFricAngleHasNoGearbox();
 
     testBusMapping();
     testTxSlots();
@@ -432,6 +471,6 @@ int main(void)
     testSafeGate();
     testCurrentLimit();
     testOnlineTimeout();
-    printf("test_motor_dji: 11 组用例全过\n");
+    printf("test_motor_dji: 12 组用例全过\n");
     return 0;
 }

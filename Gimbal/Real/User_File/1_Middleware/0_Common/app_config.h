@@ -47,11 +47,23 @@ extern "C" {
 #define APP_DJI_CURRENT_MAX 10000
 
 /*
- * M2006 转子一圈的编码器计数，以及 M2006 P36 的减速比。
- * 反馈里的 encoderRaw 和 speedRpm 都是【转子】口径，除以减速比才是输出轴。
+ * 转子一圈的编码器计数。反馈里的 encoderRaw 和 speedRpm 都是【转子】口径，
+ * 除以各自的减速比才是输出轴。
  */
 #define APP_DJI_ENCODER_PER_ROUND 8192
-#define APP_DJI_GEAR_RATIO 36.0f
+
+/*
+ * ⚠⚠ 四台电机的减速比【不一样】，别再当成一个全局常量：
+ *
+ *   三个摩擦轮  —— P36 减速箱【已经物理拆掉】，直驱，1:1。
+ *                  所以它们的 speedRpm 就是轮子转速，【不要再除 36】。
+ *   拨盘        —— P36 减速箱【还在】，36:1。
+ *
+ * 拨盘算错这个数，"一发"就差 36 倍；摩擦轮算错则是速度环的量纲整体偏 36 倍。
+ * 减速比与电机下标的对应关系只在 device_motor_dji.c 的 djiGearRatio[] 里写一次。
+ */
+#define APP_DJI_FRIC_GEAR_RATIO 1.0f
+#define APP_DJI_TRIGGER_GEAR_RATIO 36.0f
 
 /* 算法文件里各自有一份 file-local 的 PI，这份是跨层共用的。 */
 #define APP_PI_F 3.14159265358979323846f

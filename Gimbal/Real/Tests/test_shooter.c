@@ -747,8 +747,9 @@ static void testTriggerFeedbackUnits(void)
     assert(fabsf(Shooter.trigger_angle -
                  Shooter.motor[MOTOR_DJI_TRIGGER].angle) < EPS);
 
-    /* 转子 3600 rpm -> 输出轴 3600/36 = 100 rpm = 10.47 rad/s。 */
-    expectOmega = (float)rotorRpm * (2.0f * APP_PI_F / 60.0f) / APP_DJI_GEAR_RATIO;
+    /* 拨盘减速箱还在：转子 3600 rpm -> 输出轴 3600/36 = 100 rpm = 10.47 rad/s。 */
+    expectOmega =
+        (float)rotorRpm * (2.0f * APP_PI_F / 60.0f) / APP_DJI_TRIGGER_GEAR_RATIO;
     assert(fabsf(Shooter.trigger_omega - expectOmega) < 1e-3f);
 }
 
@@ -761,7 +762,7 @@ static void testTriggerFeedbackUnits(void)
 static void testShotCompletesWhenTriggerTurns(void)
 {
     int32_t countsPerAmmo =
-        (int32_t)((float)APP_DJI_ENCODER_PER_ROUND * APP_DJI_GEAR_RATIO /
+        (int32_t)((float)APP_DJI_ENCODER_PER_ROUND * APP_DJI_TRIGGER_GEAR_RATIO /
                   (float)APP_SHOOT_AMMO_PER_ROUND);
     float target;
 

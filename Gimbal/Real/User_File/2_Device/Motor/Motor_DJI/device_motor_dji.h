@@ -42,7 +42,12 @@ typedef struct
     int32_t totalRound;          /* 转子累计整圈数，带符号。 */
     int32_t totalEncoder;        /* 转子累计计数 = totalRound × 8192 + encoderRaw。 */
     float angle;                 /* 【输出轴】累计角，rad。已除减速比，上电清零。 */
-    int16_t speedRpm;            /* 转子转速，rpm。⚠ M2006 减速比 36:1，输出轴转速要除 36。 */
+    /*
+     * 转子转速，rpm。
+     * ⚠ 换算到输出轴要除【该台电机自己的】减速比：摩擦轮的 P36 减速箱已经
+     * 物理拆掉（1:1，speedRpm 就是轮速），拨盘的还在（36:1）。见 djiGearRatio[]。
+     */
+    int16_t speedRpm;
     int16_t currentRaw;          /* 实际转矩电流原始值，口径同 APP_DJI_CURRENT_MAX。 */
     uint8_t errorCode;           /* 电机错误码，见上面的 MOTOR_DJI_ERR_*。 */
     uint32_t feedbackCount;      /* 有效反馈帧累计数量。 */

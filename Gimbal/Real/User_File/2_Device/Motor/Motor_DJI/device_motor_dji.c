@@ -13,6 +13,17 @@ static motor_dji_state_t djiMotors[APP_DJI_COUNT];
 static int16_t djiCommand[APP_DJI_COUNT];
 static uint8_t djiSafe = 1U;
 
+/*
+ * 下标 -> 减速比。⚠ 四台【不一样】：三个摩擦轮的 P36 减速箱已经物理拆掉、直驱，
+ * 拨盘的还在。减速比与下标的对应关系只在这里写一次，别在别处再判一次。
+ */
+static const float djiGearRatio[APP_DJI_COUNT] = {
+    APP_DJI_FRIC_GEAR_RATIO,
+    APP_DJI_FRIC_GEAR_RATIO,
+    APP_DJI_FRIC_GEAR_RATIO,
+    APP_DJI_TRIGGER_GEAR_RATIO,
+};
+
 /* 下标 -> 反馈 ID。发送槽位由 APP_DJI_TX_SLOT 从同一个 ID 推出，收发不会分家。 */
 static const uint32_t djiRxId[APP_DJI_COUNT] = {
     APP_DJI_FRIC_1_RX_ID,
@@ -71,9 +82,12 @@ uint8_t Motor_DJI_UpdateFeedback(app_can_bus_t bus,
         }
         motor->totalEncoder = (motor->totalRound * APP_DJI_ENCODER_PER_ROUND) +
                               (int32_t)motor->encoderRaw;
-        /* 转子计数 -> 输出轴弧度。⚠ 少除减速比会差 36 倍，数值上看不出来。 */
+        /*
+         * 转子计数 -> 输出轴弧度。⚠ 减速比按下标取，不是全局常量：
+         * 摩擦轮直驱（1:1）、拨盘 36:1，用错那台就差 36 倍，数值上看不出来。
+         */
         motor->angle = (float)motor->totalEncoder * (2.0f * APP_PI_F) /
-                       ((float)APP_DJI_ENCODER_PER_ROUND * APP_DJI_GEAR_RATIO);
+                       ((float)APP_DJI_ENCODER_PER_ROUND * djiGearRatio[index]);
 
         motor->speedRpm =
             (int16_t)(((uint16_t)data[2] << 8U) | (uint16_t)data[3]);

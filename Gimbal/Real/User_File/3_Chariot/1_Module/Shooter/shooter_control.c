@@ -70,13 +70,14 @@ void Shooter_Feedback_Update(void)
 
     /*
      * 拨盘换到【输出轴】口径：一发 = 2π/N 这个关系只在输出轴上成立。
-     * ⚠ 与上面摩擦轮用的【转子】rpm 不同源，别把两边的数混着比。
+     * ⚠ 与上面摩擦轮那套不同源：摩擦轮减速箱已拆，speedRpm 直接就是轮速；
+     * 拨盘减速箱还在，要除 36 才是输出轴。别把两边的数混着比。
      * 角速度是 speedRpm 的纯单位换算，没有状态，所以在用的地方直接算。
      */
     Shooter.trigger_angle = Shooter.motor[MOTOR_DJI_TRIGGER].angle;
     Shooter.trigger_omega =
         (float)Shooter.motor[MOTOR_DJI_TRIGGER].speedRpm *
-        (2.0f * APP_PI_F / 60.0f) / APP_DJI_GEAR_RATIO;
+        (2.0f * APP_PI_F / 60.0f) / APP_DJI_TRIGGER_GEAR_RATIO;
 
     /* VrB 派生的操作者意图。 */
     Shooter.fric_request = (Remote.knobB > APP_RC_FRIC_ON) ? 1U : 0U;
