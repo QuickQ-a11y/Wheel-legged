@@ -906,7 +906,14 @@ const Chassis_Config_t Chassis_Config = {
      */
     .spring = {
         .enable_flag = 0U,
-        .force = 350.0f,          /* 铭牌标称推力。偏硬约3.3倍，靠放宽限幅吃下 */
+        /*
+         * 铭牌标称推力。
+         * ⚠ 早先这里写的"偏硬约3.3倍，靠放宽限幅吃下"已撤回：那是拿 body_mass = 6.7
+         * 比出来的，而 6.7 是被 DM 力矩标度错配放大 2.67 倍反推的假数。整车称重 20.8 kg
+         * 定案 body_mass = 16.43 之后复核：选型合适，扛单腿静载的 90~114%。
+         * 见 Chassis/CLAUDE.md §Gas spring。
+         */
+        .force = 350.0f,
         .r1 = 0.23208f,
         .r2 = 0.05800f,
         .mount_offset = -0.27367f, /* 由三点实测反解，-15.68度 */
@@ -999,7 +1006,7 @@ const Chassis_Config_t Chassis_Config = {
     .leg_length_pid = {
         .kp = 2500.0f,
         .ki = 0.0f,
-        .kd = 300.0f,
+        .kd = 200.0f, /* 原 300 × 30/45，VMAX 修正折算，见 app_config.h 的 APP_DM_VEL 注释 */
         .integralLimit = 5.0f,
         .outputLimit = 100.0f,
     },
@@ -1068,6 +1075,8 @@ const Chassis_Config_t Chassis_Config = {
          *   取到扫掠速率的一半以上，正常跟随也会被判成卡死，方向会周期性
          *   翻转、腿原地乱甩。ZJU的0.61对应他们180度/s的扫掠，约20%。
          *   当前 turnover_rate=4.0，0.61是15%，比例合适；降速时务必同步下调。
+         *   ⚠ 这个 15% 是 2026-09-26 VMAX 修正之后才成立的：之前 d_phi0 读低 33%，
+         *   0.61 的读数对应真实 0.915，实际是 23%。数值没改，是修正让它回到了原意。
          * stuck_time <= 0 或大到超过 fallen_timeout 都等于禁用；
          * 当前是刻意禁用状态，方向确认无误后改回 0.60f。
          */
@@ -1128,14 +1137,14 @@ const Chassis_Config_t Chassis_Config = {
 
         /* 串级 PID 是输出封锁阶段的保守调试初值，后续按实机修改。 */
         .joint_angle_pid = {
-            .kp = 10.0f,
+            .kp = 15.0f, /* 原 10 × 45/30，VMAX 修正折算 */
             .ki = 0.0f,
             .kd = 0.0f,
             .integralLimit = 0.0f,
-            .outputLimit = 100.0f,
+            .outputLimit = 150.0f, /* 原 100 × 45/30：目标角速度上限，同一真实角速度 */
         },
         .joint_speed_pid = {
-            .kp = 4.0f,
+            .kp = 2.667f, /* 原 4 × 30/45，VMAX 修正折算；outputLimit 是力矩，不折算 */
             .ki = 0.0f,
             .kd = 0.0f,
             .integralLimit = 0.0f,
@@ -1248,7 +1257,14 @@ const Chassis_Config_t Chassis_Config = {
         /* 小陀螺放宽到ZJU的100ms，抵抗旋转载荷转移造成的支撑力周期性掉落。 */
         .off_hold_spin_s = 0.10f,
         .land_hold_s = 0.05f,
-        /* 触地第二路，阈值取ZJU式93原值。 */
+        /*
+         * 触地第二路，阈值取ZJU式93原值。
+         *
+         * ⚠ 这三个是 d_L0 量纲，但 2026-09-26 VMAX 修正时【故意没折算】：它们是从 ZJU
+         * 照抄的物理单位参考值，不是对着本车旧读数手调出来的。修正前 d_L0 读低 33%，
+         * 实际触发点比 ZJU 宽 1.5 倍；修正后才第一次按 ZJU 的原意生效，所以落地判据
+         * 会比以前【更灵敏】。重标观测器力类阈值时一起看这三个。
+         */
         .land_d_L0_reverse = -0.05f,
         .land_L0_margin = 0.03f,
         .land_d_L0_peak_min = 0.10f,

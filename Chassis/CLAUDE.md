@@ -15,6 +15,34 @@
 ⚠ 改这一对之前先读根文档的 "DM MIT torque scale" 一节——那个坑在本工程真实发生过，
 而且**往返相消所以常规对比查不出来**。
 
+### ⚠⚠ VMAX：同一个坑的另一半，症状相反（2026-09-26 修正）
+
+**`APP_DM_VEL_MIN/MAX = ±45`，与电机 VMAX 寄存器一致（J8009P，已核对）。**
+固件从 2.4 版（`e202dc9`）起整体换成了 **J4310** 的量程 ±30 / ±10；关节换成 J8009P
+之后力矩那一半在 4.14 修成了 ±40，**速度这一半一直留在 4310 的 30**。
+
+与力矩的关键区别：命令帧**只用力矩通道**（位置/速度/KP/KD 字节全置 0），速度量程
+**只在解码处用**。没有编码侧就**不会往返相消**——表现为 2.4 版至修正前**所有关节速度
+读低 33%**（真实 × 30/45），而不是力矩那样"看起来都对"。
+
+修正时把速度的消费者分三类，处理方式不同：
+
+| 类别 | 例子 | 处理 |
+|---|---|---|
+| 纯关节速度量，精确差 1.5 倍 | `d_L0`、`d_H`、`d_phi0`、关节 `speed_radps` | 对着旧读数**手调过**的参数已按比例折算，行为不变 |
+| 混合量，无单一系数 | `d_theta = d_phi0 + 陀螺`、`d_s`、`Fn` 惯性项 | **不能折算**，只能上机重测 |
+| 物理单位设计的 | LQR K、MPC、LESO、速度卡尔曼、**从 ZJU 抄的阈值** | **不动**——之前吃的是错输入，现在第一次按原意生效 |
+
+已折算的：`leg_length_pid.kd` 300→200（从 HEAD 验证过的值出发）、`recovery.joint_angle_pid.kp` 10→15（限幅 100→150）、
+`recovery.joint_speed_pid.kp` 4→2.667（力矩限幅不动）。`test_chassis_vmc` 的
+`test_vmax_rescale_is_behavior_neutral` 用真实 PID 函数证明这组折算逐点中性（含外环饱和）。
+
+⚠ **`observer.land_d_L0_*` 三个故意没折算**：它们是 ZJU 的物理单位原值，不是本车手调的。
+修正后落地判据会**比以前更灵敏**（之前实际触发点比 ZJU 宽 1.5 倍）。
+
+⚠ **模型推导的环在动态工况下会比修正前更有阻尼**（压腿、台阶、落地）——那是正确行为，
+但它是一个行为变化，上机要知道。站立时 `d_L0 ≈ 0`，差别很小。
+
 CAN 映射（`app_config.h`）：**FDCAN1 = 右侧两台 DM（`0x001`/`0x002`）+ 两个 DJI 电调
 （`0x201`/`0x202`）**；**FDCAN2 = 左侧两台 DM（`0x003`/`0x004`）**。DM 反馈 ID = `0x010 + ID`。
 `0x200` 帧的字节位置由 `APP_DJI_TX_SLOT()` 从反馈 ID 推出，**不要写死**。
@@ -54,7 +82,7 @@ FLAGS="-Wall -Wextra -DARM_MATH_CM7 -DDISABLEFLOAT16"
 | `test_leso` | `2_Algorithm/LESO.c` |
 | `test_dr16` | `DR16/device_dr16.c` |
 | `test_usb_protocol` | `USB/device_usb_protocol.c` `2_Algorithm/CRC.c` |
-| `test_chassis_vmc` | `chassis_vmc.c` `chassis_config.c` `Angle.c` |
+| `test_chassis_vmc` | `chassis_vmc.c` `chassis_config.c` `Angle.c` `PID.c` |
 | `test_chassis_remote` | `chassis_remote.c` `chassis_config.c` `Angle.c` |
 | `test_chassis_spring` | `chassis_vmc.c` `chassis_config.c` `Angle.c` |
 | `test_chassis_observer` | `chassis_observer.c` `chassis_vmc.c` **`$TMP/cfg_obs.c`** `Angle.c` `LESO.c` `LQR.c` |
@@ -175,6 +203,13 @@ The compensation is **pure feedforward with no feedback to correct a scale error
 the motor's TMAX register, `model.body_mass` has been re-derived from a whole-robot weighing
 rather than from torque, and the observer's force-ratio thresholds have been re-calibrated at
 the correct scale. See `Codex文档/实机调试检查清单.md` §2.5 and §6.
+
+⚠ **The threshold re-calibration must happen *after* the 2026-09-26 VMAX fix, never before.**
+`Fn`'s inertial term (`chassis_observer.c`, the `leg_accel` expansion) is built from `d_L0`,
+`dd_L0` and `d_theta`, all of which read 33% low under the old ±30 range. Standing still
+hides this completely — `d_L0 ≈ 0` so `Fn_ratio` looks perfect at rest — and the error only
+appears in motion. Thresholds calibrated on the old scale would be wrong in exactly the
+situations they exist for.
 
 Host tests that inject synthetic DM feedback torque must subtract `F0_spring` from the *total*
 axial force they intend to represent — the strut's share never passes through the motors.

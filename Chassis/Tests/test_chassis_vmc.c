@@ -1,5 +1,8 @@
 #include "chassis_vmc.h"
 
+#include "PID.h"
+#include "app_config.h"
+
 #include <assert.h>
 #include <math.h>
 
@@ -211,6 +214,133 @@ static void test_downward_phi0_branch(
     assert(fabsf(motor_power - virtual_power) < TEST_TOLERANCE);
 }
 
+
+/*
+ * 2026-09-26 VMAX 修正：J8009P 寄存器 VMAX = 45，而固件从 2.4 版起一直误用 J4310 的 ±30，
+ * 关节速度读数长期是"真实 × 30/45"。改回 ±45 后读数变成真实值，于是凡是对着旧读数
+ * 手调过的参数都要折算，否则同一个物理动作会给出不同的输出。
+ */
+#define VMAX_HISTORY 30.0f /* 2.4 版至 2026-09-26 固件里的错值 */
+
+/** @brief 关节位置串级：外环角度 -> 目标角速度，内环角速度 -> 力矩。与 Joint_Control 同构。 */
+static float joint_cascade(const algorithm_pid_config_t *angle_cfg,
+                           const algorithm_pid_config_t *speed_cfg,
+                           float angle_error,
+                           float speed_feedback)
+{
+    algorithm_pid_state_t angle_state;
+    algorithm_pid_state_t speed_state;
+    float target_speed = 0.0f;
+    float torque = 0.0f;
+
+    Algorithm_PID_Init(&angle_state);
+    Algorithm_PID_Init(&speed_state);
+    Algorithm_PID_UpdateByFeedbackRate(angle_cfg, &angle_state, angle_error, 0.0f,
+                                       speed_feedback, 0.001f, &target_speed);
+    Algorithm_PID_UpdateByFeedbackRate(speed_cfg, &speed_state, target_speed,
+                                       speed_feedback, 0.0f, 0.001f, &torque);
+    return torque;
+}
+
+/**
+ * @brief 折算所依赖的性质：纯 P 串级把 (kp_a×k, 外环限幅×k, kp_s/k) 配上反馈×k，
+ * 输出力矩逐点相同——【包括外环饱和的时候】。
+ *
+ * ⚠ 这条钉的是 PID 实现的线性性。将来要是给 PID 加了死区、或者对 feedbackRate
+ * 单独限幅，这个等式就不成立了，按比例折算也就不再是行为中性的。
+ */
+static void test_vmax_rescale_is_behavior_neutral(void)
+{
+    const float k = APP_DM_VEL_MAX / VMAX_HISTORY;
+    const algorithm_pid_config_t angle_old = {.kp = 10.0f, .outputLimit = 100.0f};
+    const algorithm_pid_config_t speed_old = {.kp = 4.0f, .outputLimit = 20.0f};
+    const algorithm_pid_config_t angle_new = {.kp = 10.0f * k, .outputLimit = 100.0f * k};
+    const algorithm_pid_config_t speed_new = {.kp = 4.0f / k, .outputLimit = 20.0f};
+    /*
+     * 最后一组角度误差大到让外环饱和。⚠ 光饱和外环还不够：内环力矩限幅 ±20 会把差别
+     * 一起盖掉，所以速度里要有一组【贴着外环饱和目标】的值（真实 ~150 rad/s），
+     * 让内环误差落在线性区——只有这时"只折 kp 不折限幅"才会露馅。
+     */
+    const float errors[] = {0.0f, 0.3f, -0.8f, 1.5f, 40.0f};
+    const float speeds[] = {0.0f, 2.0f, -6.0f, 12.0f, 145.0f, 150.0f, 155.0f};
+    unsigned i;
+    unsigned j;
+
+    for (i = 0U; i < sizeof(errors) / sizeof(errors[0]); i++)
+    {
+        for (j = 0U; j < sizeof(speeds) / sizeof(speeds[0]); j++)
+        {
+            float true_speed = speeds[j];
+            float torque_old = joint_cascade(&angle_old, &speed_old, errors[i],
+                                             true_speed / k);
+            float torque_new = joint_cascade(&angle_new, &speed_new, errors[i],
+                                             true_speed);
+
+            assert(fabsf(torque_new - torque_old) <= 1.0e-4f);
+        }
+    }
+
+    /* 高度环只有 kd 吃速度（feedbackRate = d_H），kd/k 配 d_H×k 输出不变。 */
+    {
+        const algorithm_pid_config_t height_old = {.kp = 1500.0f, .kd = 150.0f,
+                                                   .outputLimit = 100.0f};
+        const algorithm_pid_config_t height_new = {.kp = 1500.0f, .kd = 150.0f / k,
+                                                   .outputLimit = 100.0f};
+
+        for (j = 0U; j < sizeof(speeds) / sizeof(speeds[0]); j++)
+        {
+            algorithm_pid_state_t st_old;
+            algorithm_pid_state_t st_new;
+            float f_old = 0.0f;
+            float f_new = 0.0f;
+            /* 0~1.5 m/s，跨过常见死区宽度，PID 若加了死区会在这里露馅。 */
+            float true_d_H = speeds[j] * 0.01f;
+
+            Algorithm_PID_Init(&st_old);
+            Algorithm_PID_Init(&st_new);
+            Algorithm_PID_UpdateByFeedbackRate(&height_old, &st_old, 0.20f, 0.19f,
+                                               true_d_H / k, 0.001f, &f_old);
+            Algorithm_PID_UpdateByFeedbackRate(&height_new, &st_new, 0.20f, 0.19f,
+                                               true_d_H, 0.001f, &f_new);
+            assert(fabsf(f_new - f_old) <= 1.0e-4f);
+        }
+    }
+}
+
+/**
+ * @brief 本次修正的数值校核：自救串级的 3 个数折算，ZJU 抄来的 3 个落地阈值不折算。
+ *
+ * ⚠ 这是一条【检查点】，不是永久约束：以后在实机上有意重调这几个参数时，
+ * 这里跟着改或者整条删掉都是对的。它存在的意义是防止折算那一刻算错或漏改。
+ */
+static void test_vmax_rescaled_config_values(void)
+{
+    const float k = APP_DM_VEL_MAX / VMAX_HISTORY;
+    const float tol = 1.0e-3f;
+
+    assert(fabsf(APP_DM_VEL_MAX - 45.0f) < 1.0e-6f);
+    assert(fabsf(APP_DM_VEL_MIN + 45.0f) < 1.0e-6f);
+
+    /*
+     * leg_length_pid.kd 故意【不在这里校核】：修正提交里它按 HEAD 验证过的 300 折成 200，
+     * 但这一项正在实机上调（工作区里是没上过机的试验值），钉死它只会跟调参打架。
+     * 它依赖的折算性质由上面 test_vmax_rescale_is_behavior_neutral 的高度环那段保证。
+     */
+    assert(fabsf(Chassis_Config.recovery.joint_angle_pid.kp - 10.0f * k) < tol);
+    assert(fabsf(Chassis_Config.recovery.joint_angle_pid.outputLimit - 100.0f * k) < tol);
+    assert(fabsf(Chassis_Config.recovery.joint_speed_pid.kp - 4.0f / k) < tol);
+    /* 力矩限幅不折算：串级输出的力矩本身不变。 */
+    assert(fabsf(Chassis_Config.recovery.joint_speed_pid.outputLimit - 20.0f) < tol);
+
+    /*
+     * ⚠ 落地三阈值【故意不折算】：它们是 ZJU 的物理单位原值，不是对着本车旧读数调的。
+     * 修正让它们第一次按原意生效。折算了反而离 ZJU 更远——这三条就是拦那个手滑的。
+     */
+    assert(fabsf(Chassis_Config.observer.land_d_L0_reverse - (-0.05f)) < tol);
+    assert(fabsf(Chassis_Config.observer.land_d_L0_peak_min - 0.10f) < tol);
+    assert(fabsf(Chassis_Config.observer.land_d_L0_drop - 0.15f) < tol);
+}
+
 int main(void)
 {
     Chassis_Leg_Config_t config = {
@@ -392,6 +522,9 @@ int main(void)
     assert(fabsf(boundary_leg.phi4 - CHASSIS_HALF_PI) < TEST_TOLERANCE);
     assert(boundary_leg.phi2 == 0.0f);
     assert(boundary_leg.L0 == 0.0f);
+
+    test_vmax_rescale_is_behavior_neutral();
+    test_vmax_rescaled_config_values();
 
     return 0;
 }
