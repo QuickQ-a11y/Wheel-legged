@@ -361,7 +361,8 @@ static void State_Enter(Chassis_State_t state)
 
     if (state == CHASSIS_STANDING)
     {
-        Algorithm_PID_Init(&Chassis.leg_length_pid);
+        Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_LEFT]);
+        Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_RIGHT]);
         Algorithm_PID_Init(&Chassis.roll_pid);
         Chassis_Leso_Init(&Chassis.leso);
         for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
@@ -542,7 +543,8 @@ void Chassis_Init(void)
            Chassis_Config.target,
            sizeof(Chassis.lqr.target));
 
-    Algorithm_PID_Init(&Chassis.leg_length_pid);
+    Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_LEFT]);
+    Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_RIGHT]);
     Algorithm_PID_Init(&Chassis.roll_pid);
     Chassis_Leso_Init(&Chassis.leso);
     /* MPC求解器在这里一次性分配好工作矩阵，控制环里不再分配。 */
@@ -662,7 +664,8 @@ void Chassis_State_Update(void)
          * 输出重新放行前丢弃故障期间由陈旧反馈积累的动态状态，首个
          * 完整控制周期从当前姿态重新建立速度、积分和 yaw 平衡点。
          */
-        Algorithm_PID_Init(&Chassis.leg_length_pid);
+        Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_LEFT]);
+        Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_RIGHT]);
         Algorithm_PID_Init(&Chassis.roll_pid);
         Chassis_Leso_Init(&Chassis.leso);
         Joint_Control_Reset();
@@ -1805,7 +1808,8 @@ void Chassis_Control(void)
                 Chassis.leg[side].target_L0 =
                     Chassis.off_ground_L0_latch[side];
             }
-            Algorithm_PID_Init(&Chassis.leg_length_pid);
+            Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_LEFT]);
+            Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_RIGHT]);
             Algorithm_PID_Init(&Chassis.roll_pid);
             Chassis.body.s = 0.0f;
             Chassis.lqr.target[CHASSIS_STATE_S] = 0.0f;
@@ -1824,42 +1828,41 @@ void Chassis_Control(void)
     else
     {
         float gravity_force[CHASSIS_LEG_COUNT];
+        float length_force[CHASSIS_LEG_COUNT];
+        float roll_force = 0.0f;
+        /* roll/d_roll 同时给横滚环和 MPC；H/H_target/d_H 只是 MPC 的输入。 */
         float roll =
             Chassis.imu.roll * Chassis_Config.imu.roll_angle_scale;
         float d_roll =
             Chassis.imu.gyro[Chassis_Config.imu.roll_rate_axis] *
             Chassis_Config.imu.roll_rate_scale;
-        /* 共模：左右平均腿长，代表车身高度。 */
         float H = 0.5f * (Chassis.leg[CHASSIS_LEFT].L0 +
                           Chassis.leg[CHASSIS_RIGHT].L0);
         float H_target = 0.5f * (Chassis.leg[CHASSIS_LEFT].target_L0 +
                                  Chassis.leg[CHASSIS_RIGHT].target_L0);
         float d_H = 0.5f * (Chassis.leg[CHASSIS_LEFT].d_L0 +
                             Chassis.leg[CHASSIS_RIGHT].d_L0);
-        float height_force = 0.0f;
-        float roll_force = 0.0f;
 
         /*
-         * 支撑力按共模和差模两路生成，两路物理上正交，互不干扰。
+         * 每条腿各跑一个腿长PID，吃各自的 target_L0 / L0 / d_L0；横滚是单级，
+         * 直接出左右差动支撑力，在下面装配 F0 时左腿 +、右腿 -（与 HEAD 同号）。
          *
-         *   共模 = 车身高度：用左右平均腿长，输出等量加到两条腿；
-         *   差模 = 车身横滚：用IMU横滚角，输出反号加到两条腿。
+         * 两腿腿长环输出的平均 = kp*(H_target - H) - kd*d_H，与此前的共模高度环
+         * 完全相同，所以站高不用重调；多出来的是左右腿长差的刚度
+         * F0左 - F0右 = -kp_腿*(L0左 - L0右)。
          *
-         * 早先是每条腿各跑一个腿长PID再叠加横滚差动，两者在差模上直接对抗：
-         * 横滚控制靠制造左右腿长差来纠正车身，而两条腿共享同一个target_L0，
-         * 腿长PID一见到腿长差就反向拉回，横滚能力被按增益比例吃掉，且与增益
-         * 大小无关。改成共模后腿长PID不再看见腿长差，两个环各管一个自由度。
+         * 为什么改成逐腿：此前是"共模高度 + 差模横滚力"，左右腿长差只靠 IMU
+         * 横滚角间接约束。架空时车身被吊架固定、横滚角不变，差模等于没有闭环，
+         * 左右停在不同长度上、伸缩也不同步。架空测试时把 roll_pid 的限幅清零。
+         *
+         * ⚠ 逐腿之后横滚找平的能力受限，这是逐腿结构本身的性质：差模上多了
+         * 腿长环的刚度 kp_腿，横滚力 F 只能换来 F/kp_腿 的腿长差，稳态找平增益
+         * 是 kp_横滚/kp_腿（按提交的参数 800/2500 ≈ 0.32 m/rad），纯 P 在侧坡上会留残余
+         * 横滚。改成"横滚改目标腿长偏移"的串级也躲不开——对 P/D 项两者是
+         * 同一个线性系统（取串级增益 = kp_横滚/kp_腿 即逐拍相同），只在饱和位置
+         * 上不同。4.3 之前那条"每腿 PID + 横滚力会对抗"的记录，比较的是逐腿与
+         * 共模，不是单级与串级。
          */
-
-        /*共模：车身高度PID*/
-        Algorithm_PID_UpdateByFeedbackRate(&Chassis_Config.leg_length_pid,
-                                           &Chassis.leg_length_pid,
-                                           H_target,
-                                           H,
-                                           d_H,
-                                           dt,
-                                           &height_force);
-        /*差模：横滚PID*/
         Algorithm_PID_UpdateByFeedbackRate(&Chassis_Config.roll_pid,
                                            &Chassis.roll_pid,
                                            Chassis_Config.roll_target,
@@ -1867,6 +1870,16 @@ void Chassis_Control(void)
                                            d_roll,
                                            dt,
                                            &roll_force);
+        for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+        {
+            Algorithm_PID_UpdateByFeedbackRate(&Chassis_Config.leg_length_pid,
+                                               &Chassis.leg_length_pid[side],
+                                               Chassis.leg[side].target_L0,
+                                               Chassis.leg[side].L0,
+                                               Chassis.leg[side].d_L0,
+                                               dt,
+                                               &length_force[side]);
+        }
         /*
          * 重力前馈：整车重力在虚拟腿轴向的投影，单腿承担一半。
          * 腿摆得越靠前或靠后，轴向需要承担的分量越小，因此乘cos(theta)。
@@ -1909,7 +1922,7 @@ void Chassis_Control(void)
         {
             /*
              * MPC直接给绝对支撑力：重力已经作为仿射项在模型里，不再叠加
-             * 重力前馈，也不再走共模腿长PID和差模横滚PID那两路。
+             * 重力前馈，也不再走两条腿各自的腿长PID。
              */
             Chassis.leg[CHASSIS_LEFT].F0 = Chassis_MPC.F[0];
             Chassis.leg[CHASSIS_RIGHT].F0 = Chassis_MPC.F[1];
@@ -1917,11 +1930,11 @@ void Chassis_Control(void)
         else
         {
             Chassis.leg[CHASSIS_LEFT].F0 =
-                height_force + roll_force -
+                length_force[CHASSIS_LEFT] + roll_force -
                 gravity_force[CHASSIS_LEFT] +
                 Chassis_Config.F0_left;
             Chassis.leg[CHASSIS_RIGHT].F0 =
-                height_force - roll_force -
+                length_force[CHASSIS_RIGHT] - roll_force -
                 gravity_force[CHASSIS_RIGHT] -
                 Chassis_Config.F0_right;
         }

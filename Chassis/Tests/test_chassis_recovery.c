@@ -1,5 +1,6 @@
 #include "chassis_control.h"
 #include "Angle.h"
+#include "Limit.h"
 
 #include <assert.h>
 #include <math.h>
@@ -585,8 +586,9 @@ static void test_fault_calculation(void)
     assert_control_request();
     assert_zero_output();
 
-    Chassis.leg_length_pid.integral = 1.0f;
-    Chassis.roll_pid.integral = 2.0f;
+    Chassis.leg_length_pid[CHASSIS_LEFT].integral = 1.0f;
+    Chassis.leg_length_pid[CHASSIS_RIGHT].integral = 2.0f;
+    Chassis.roll_pid.integral = 3.0f;
     Chassis.joint_angle_pid[left_phi1_index].integral = 3.0f;
     Chassis.speed_kalman.state[0] = 4.0f;
     Chassis.body.s = 5.0f;
@@ -601,7 +603,8 @@ static void test_fault_calculation(void)
     Chassis_State_Update();
     assert(Chassis.state == CHASSIS_STANDING);
     assert(Chassis.fault == CHASSIS_FAULT_NONE);
-    assert(Chassis.leg_length_pid.integral == 0.0f);
+    assert(Chassis.leg_length_pid[CHASSIS_LEFT].integral == 0.0f);
+    assert(Chassis.leg_length_pid[CHASSIS_RIGHT].integral == 0.0f);
     assert(Chassis.roll_pid.integral == 0.0f);
     assert(Chassis.joint_angle_pid[left_phi1_index].integral == 0.0f);
     assert(Chassis.speed_kalman.state[0] == 0.0f);
@@ -653,6 +656,166 @@ static void test_lqr_realtime_leg_length(void)
                   Chassis_Config.lqr.L0_max) < TEST_TOLERANCE);
     assert(Chassis.lqr.limit_flag == 1U);
     assert_zero_output();
+}
+
+/** @brief 按当前状态现算两条腿腿长环的期望输出之差（左减右），带限幅。 */
+static float expected_leg_length_diff(void)
+{
+    const algorithm_pid_config_t *pid = &Chassis_Config.leg_length_pid;
+    float expect[CHASSIS_LEG_COUNT];
+    uint32_t side;
+
+    for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+    {
+        /* 与 Algorithm_PID_UpdateByFeedbackRate 同式：derivative = -d_L0。 */
+        expect[side] = Algorithm_LimitSymmetric(
+            (pid->kp * (Chassis.leg[side].target_L0 - Chassis.leg[side].L0)) -
+                (pid->kd * Chassis.leg[side].d_L0),
+            pid->outputLimit);
+    }
+    return expect[CHASSIS_LEFT] - expect[CHASSIS_RIGHT];
+}
+
+/**
+ * @brief 两腿腿长环贡献的支撑力之差（左减右）。
+ *
+ * 先把各减各的气弹簧加回去，再扣掉横滚那份（左 +roll、右 -roll，差值里是 2*roll）。
+ * 两腿重力前馈在本组用例里相同（同为竖直腿、同一俯仰），相减抵消。
+ */
+static float actual_leg_force_diff(void)
+{
+    return (Chassis.leg[CHASSIS_LEFT].F0 - Chassis.leg[CHASSIS_RIGHT].F0) +
+           (Chassis.leg[CHASSIS_LEFT].F0_spring -
+            Chassis.leg[CHASSIS_RIGHT].F0_spring) -
+           (2.0f * Chassis.roll_pid.lastOutput);
+}
+
+/**
+ * @brief 每条腿各自闭环腿长：两腿腿长、目标、速度各不相同时，
+ * 支撑力之差必须正好等于两个独立腿长环的输出之差。
+ *
+ * ⚠ 这条专打"共模"：共模只看左右平均腿长，两条腿永远拿到同一份高度环输出，
+ * 腿长差完全没人管——架空时左右停在不同长度上、伸缩不同步，就是它。
+ * 期望值用 Chassis_Config 现算、带限幅，改 kp/kd 不会让它红。
+ */
+static void test_leg_length_per_leg(void)
+{
+    const Chassis_Leg_Config_t *left = &Chassis_Config.leg[CHASSIS_LEFT];
+    float target;
+
+    Chassis_Init();
+    set_online_feedback();
+    /* 两腿相差 2 cm，误差只有 ±1~2 cm，量级上离 outputLimit 很远，不会被限幅盖掉。 */
+    set_leg_pose(CHASSIS_LEFT, 0.19f, CHASSIS_HALF_PI);
+    set_leg_pose(CHASSIS_RIGHT, 0.21f, CHASSIS_HALF_PI);
+    Chassis_Leg_Update();
+    assert(Chassis.leg[CHASSIS_LEFT].valid_flag == 1U);
+    assert(Chassis.leg[CHASSIS_RIGHT].valid_flag == 1U);
+
+    Chassis.mode = CHASSIS_MODE_FOLLOW;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_STANDING);
+
+    /*
+     * 场景一：同一个目标、不同腿长、静止。共模下两腿力差恒为 0，
+     * 逐腿下左边往外推、右边往里拉。goal 与目标同值，保证斜坡不动。
+     */
+    target = 0.5f * (Chassis.leg[CHASSIS_LEFT].L0 +
+                     Chassis.leg[CHASSIS_RIGHT].L0);
+    Chassis.goal.L0 = target;
+    Chassis.leg[CHASSIS_LEFT].target_L0 = target;
+    Chassis.leg[CHASSIS_RIGHT].target_L0 = target;
+    Chassis_Control();
+    assert(fabsf(expected_leg_length_diff()) > 1.0f);
+    assert(fabsf(actual_leg_force_diff() - expected_leg_length_diff()) < 0.05f);
+
+    /*
+     * 场景二：目标也各不相同，且只有左腿在动（d_L0 非零）。
+     * 场景一两腿目标相同、d_L0 为 0，"左右目标串了"和"d_L0 喂反/喂错腿"
+     * 这两种错在那里都看不出来，只有这里能抓。
+     * goal 取在两个目标之上：斜坡把两腿目标朝同一方向推同样一步，差值不变。
+     */
+    Chassis.goal.L0 = 0.30f;
+    Chassis.leg[CHASSIS_LEFT].target_L0 = 0.18f;
+    Chassis.leg[CHASSIS_RIGHT].target_L0 = 0.23f;
+    /*
+     * 只转一个电机：两个一起转时，符号组合可能正好是纯摆腿、d_L0 为 0。
+     * Chassis_Control 不从电机速度重算腿速，要手动刷新一次腿状态。
+     */
+    Chassis.dm_motor[left->joint[CHASSIS_JOINT_PHI1].motor_index].speed_radps =
+        1.0f;
+    Chassis_Leg_Update();
+    Chassis_Control();
+    assert(fabsf(Chassis.leg[CHASSIS_LEFT].d_L0) > 1.0e-3f);
+    assert(fabsf(Chassis.leg[CHASSIS_RIGHT].d_L0) < 1.0e-6f);
+    assert(fabsf(actual_leg_force_diff() - expected_leg_length_diff()) < 0.05f);
+}
+
+/**
+ * @brief 横滚是单级：横滚 PID 直接出左右差动支撑力，左腿 +、右腿 -，叠加在逐腿腿长环之后。
+ *
+ * ⚠ 配方里要用 sed 把 roll_pid.outputLimit 强制打开（见 Chassis/CLAUDE.md），
+ * 否则工作区里架空测试临时清零时，这条就会空转、什么都没测。
+ * 第一句断言就是拦这个的：宁可大声失败，也不要安静地通过。
+ */
+static void test_roll_force(void)
+{
+    const algorithm_pid_config_t *roll_cfg = &Chassis_Config.roll_pid;
+    const float roll_rad = 0.03f; /* 小角度：输出落在限幅以内，才验得到 kp */
+    float expect_force;
+    float target;
+
+    assert(roll_cfg->outputLimit > 0.0f);
+
+    Chassis_Init();
+    set_online_feedback();
+    set_symmetric_leg_pose(0.20f, CHASSIS_HALF_PI);
+    Chassis.mode = CHASSIS_MODE_FOLLOW;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_STANDING);
+
+    /* 两腿等长、同一个目标：腿长环两腿输出相同，力差全来自横滚。 */
+    target = Chassis.leg[CHASSIS_LEFT].L0;
+    Chassis.goal.L0 = target;
+    Chassis.leg[CHASSIS_LEFT].target_L0 = target;
+    Chassis.leg[CHASSIS_RIGHT].target_L0 = target;
+
+    Chassis.imu.roll = roll_rad / Chassis_Config.imu.roll_angle_scale;
+    Chassis.imu.gyro[Chassis_Config.imu.roll_rate_axis] = 0.0f;
+    Chassis_Control();
+
+    expect_force = Algorithm_LimitSymmetric(
+        roll_cfg->kp * (Chassis_Config.roll_target - roll_rad),
+        roll_cfg->outputLimit);
+    assert(fabsf(expect_force) > 1.0f);
+    assert(fabsf(Chassis.roll_pid.lastOutput - expect_force) < 1.0e-3f);
+
+    /*
+     * 方向与 HEAD 原横滚环一致：F0左 += 横滚力、F0右 -= 横滚力。
+     * 两腿等长同目标，腿长环那份相等，所以两腿总力差（加回弹簧后）= 2 * 横滚力。
+     */
+    assert(fabsf(((Chassis.leg[CHASSIS_LEFT].F0 -
+                   Chassis.leg[CHASSIS_RIGHT].F0) +
+                  (Chassis.leg[CHASSIS_LEFT].F0_spring -
+                   Chassis.leg[CHASSIS_RIGHT].F0_spring)) -
+                 (2.0f * expect_force)) < 0.05f);
+    /* 横滚不改腿长目标：单级是直接出力，不碰 target_L0。 */
+    assert(fabsf(Chassis.leg[CHASSIS_LEFT].target_L0 - target) < 1.0e-6f);
+    assert(fabsf(Chassis.leg[CHASSIS_RIGHT].target_L0 - target) < 1.0e-6f);
+
+    /*
+     * 再给一个横滚角速度，验 kd 那一路：d_roll 为 0 时"角速度喂反"这种错看不出来。
+     * 横滚角和角速度同号时，阻尼要让输出的绝对值更大。
+     */
+    Chassis.imu.gyro[Chassis_Config.imu.roll_rate_axis] =
+        0.1f / Chassis_Config.imu.roll_rate_scale;
+    Chassis_Control();
+    expect_force = Algorithm_LimitSymmetric(
+        (roll_cfg->kp * (Chassis_Config.roll_target - roll_rad)) -
+            (roll_cfg->kd * 0.1f),
+        roll_cfg->outputLimit);
+    assert(fabsf(Chassis.roll_pid.lastOutput - expect_force) < 1.0e-3f);
+    assert(fabsf(actual_leg_force_diff() - expected_leg_length_diff()) < 0.05f);
 }
 
 static void test_vertical_theta_balance(void)
@@ -1715,14 +1878,22 @@ static void test_off_ground_push_L0_cap(void)
            (Chassis_Config.lqr.L0_max - margin));
     /*
      * 只有右腿拿到推力，左腿被保护线挡掉。
-     * 比较前要先把气弹簧那份加回去：两条腿此刻【腿长不同】，F0_spring 也就不同，
-     * 而它已经在 Chassis_Control 里从各自的 F0 扣掉了。不还原就会把气弹簧的
-     * 左右差当成推力差，本用例验的是 fn_comp，不是气弹簧。
+     * 比较前要先把两样【随腿长而异】的量还原，本用例验的是 fn_comp：
+     *   - 气弹簧：两条腿此刻腿长不同，F0_spring 也就不同，它已经在
+     *     Chassis_Control 里从各自的 F0 扣掉了；
+     *   - 腿长环：每条腿各自闭环，腿长不同输出就不同。改成逐腿之前两腿拿到
+     *     同一份共模高度环输出，相减自然抵消，这一项是改逐腿后才需要扣的；
+     *   - 横滚：左 +roll、右 -roll。本用例横滚为 0 时是空操作，一并扣掉更稳。
+     * 不还原就会把这两样的左右差当成推力差。
      */
     assert(fabsf(((Chassis.leg[CHASSIS_RIGHT].F0 +
-                   Chassis.leg[CHASSIS_RIGHT].F0_spring) -
+                   Chassis.leg[CHASSIS_RIGHT].F0_spring -
+                   Chassis.leg_length_pid[CHASSIS_RIGHT].lastOutput +
+                   Chassis.roll_pid.lastOutput) -
                   (Chassis.leg[CHASSIS_LEFT].F0 +
-                   Chassis.leg[CHASSIS_LEFT].F0_spring)) -
+                   Chassis.leg[CHASSIS_LEFT].F0_spring -
+                   Chassis.leg_length_pid[CHASSIS_LEFT].lastOutput -
+                   Chassis.roll_pid.lastOutput)) -
                  Chassis.ground.fn_comp[CHASSIS_RIGHT]) < 1.0e-3f);
 }
 
@@ -2419,6 +2590,8 @@ int main(void)
     test_wheel_offline_gate();
     test_fault_calculation();
     test_lqr_realtime_leg_length();
+    test_leg_length_per_leg();
+    test_roll_force();
     test_vertical_theta_balance();
     test_lqr_leg_length_limit();
     test_wheel_leg_speed_estimate();

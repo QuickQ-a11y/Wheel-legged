@@ -283,7 +283,8 @@ struct Chassis
 
     /* 需要跨控制周期保存的滤波器和PID状态。 */
     algorithm_kalman_t speed_kalman;
-    algorithm_pid_state_t leg_length_pid;   /* 共模：车身高度，只此一份。 */
+    /* 每条腿各自的腿长闭环，吃各自的 target_L0 / L0 / d_L0。 */
+    algorithm_pid_state_t leg_length_pid[CHASSIS_LEG_COUNT];
     algorithm_pid_state_t roll_pid;
     algorithm_pid_state_t joint_angle_pid[APP_DM_COUNT];
     algorithm_pid_state_t joint_speed_pid[APP_DM_COUNT];

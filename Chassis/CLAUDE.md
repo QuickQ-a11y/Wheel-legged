@@ -116,16 +116,24 @@ sed 's/APP_CHASSIS_OUTPUT_ENABLE 1U/APP_CHASSIS_OUTPUT_ENABLE 0U/' \
 
 CFG=User_File/3_Chariot/1_Module/Chassis/chassis_config.c
 
-# recovery: gates off, off_ground_act_flag forced to 1
+# recovery: gates off, off_ground_act_flag forced to 1, roll limit forced open
 sed -e 's/\.joint_flag = 1U,/.joint_flag = 0U,/' \
     -e 's/\.wheel_flag = 1U,/.wheel_flag = 0U,/' \
-    -e 's/\.off_ground_act_flag = 0U,/.off_ground_act_flag = 1U,/' $CFG > $TMP/cfg_rec.c
+    -e 's/\.off_ground_act_flag = 0U,/.off_ground_act_flag = 1U,/' \
+    -e '/\.roll_pid = {/,/}/ s/^\(\s*\)\.outputLimit = [0-9.]*f,.*/\1.outputLimit = 60.0f,/' \
+    $CFG > $TMP/cfg_rec.c
 
 # observer: gates off, off_ground_act_flag forced to 0
 sed -e 's/\.joint_flag = 1U,/.joint_flag = 0U,/' \
     -e 's/\.wheel_flag = 1U,/.wheel_flag = 0U,/' \
     -e 's/\.off_ground_act_flag = 1U,/.off_ground_act_flag = 0U,/' $CFG > $TMP/cfg_obs.c
 ```
+
+The last `sed` on the recovery copy exists because `roll_pid.outputLimit` is zeroed for rig
+tests. `test_roll_force` asserts the limit is non-zero as its first line, so without the `sed` it
+fails loudly instead of passing without testing anything. The pattern is anchored to the
+`.roll_pid` block and only rewrites the live line (the commented-out ground value starts with
+`//` and does not match).
 
 Both compile with `-I$TMP/inc` **first** so the patched `app_config.h` wins.
 
@@ -220,10 +228,32 @@ detection silently unreachable.
 
 ```
 device feedback -> five-bar state -> wheel/leg speed fusion (2-state Kalman)
-  -> 10-state vector -> leg-length PID + roll PID + gravity feedforward -> F0
+  -> 10-state vector -> per-leg leg-length PID ± roll force + gravity feedforward
+  - F0_spring -> F0
   -> poly22 K fit from live L0 -> per-state error clamp -> K·error -> 4 outputs
   -> VMC maps (F0, Tp) to joint torques -> torque/current limit -> safety gates
 ```
+
+**F0 is closed per leg** (`Chassis.leg_length_pid[side]`, each on its own `target_L0` / `L0` /
+`d_L0`), with **roll as a single-loop force** on top: `roll_pid` (IMU roll, N) is added `+` to the
+left leg and `−` to the right, same sign as before. Until 2026-09-26 it was "common-mode height
+(average L0) + differential roll force". That constrained the left/right leg-length difference
+only indirectly, through body roll — so on a test rig, where the rig holds roll fixed, nothing
+closed it and the legs settled at different lengths.
+
+⚠ **Per-leg loops limit roll levelling, whatever form the roll loop takes.** The per-leg PIDs add
+a differential stiffness `kp_leg`, so a roll force `F` only buys a leg-length difference of
+`F / kp_leg`: the steady-state levelling gain is `kp_roll / kp_leg` (800 / 2500 ≈ 0.32 m/rad at the committed gains),
+and a P-only loop leaves residual roll on a side slope. A cascade (roll → per-leg `target_L0`
+offset) does **not** escape this — for the P/D terms it is the same linear system (cascade gain
+`kp_roll / kp_leg` gives identical output every tick); the two differ only in where saturation
+happens. The pre-4.3 note about per-leg PIDs "fighting" roll was comparing per-leg against
+common-mode, not force against cascade. (A cascade was briefly tried on 2026-09-26; it bought nothing
+over the single loop and was reverted to the original.)
+
+On a test rig, zero `roll_pid.outputLimit` (the rig fixes roll, so the loop would just push the
+two legs apart). The MPC branch (`output.mpc_flag`) is separate and still models height + roll
+itself.
 
 State order is fixed and must never be reordered: `s, d_s, fai, d_fai, theta_l, d_theta_l, theta_r, d_theta_r, theta_b, d_theta_b`. Output order: left wheel, right wheel, left leg swing, right leg swing.
 
