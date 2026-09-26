@@ -70,7 +70,13 @@ static void Chassis_Feedback_Update(void)
 
     /* 遥控输入在任务层转换为模式和物理目标，不接触LQR或电机输出。 */
     Remote_Task_Update();
-    Chassis_Remote_Update(&Remote);
+    /*
+     * ⚠ 数据源决定滚轮（knobA）干什么：本地 DT7/DR16 时它选三档腿长，
+     * 板间转发的 FS-i6X 时它选模式组。判据只有设备层 Board_IsOnline() 一个，
+     * task_remote.c 选源用的也是它，不存在第二份事实。
+     */
+    Chassis_Remote_Update(&Remote,
+                          (Board_IsOnline(HAL_GetTick()) == 0U) ? 1U : 0U);
 
     /* DM状态保留最后一次反馈值，online只表示本周期是否超时。 */
     for (index = 0U; index < MOTOR_DM_COUNT; index++)

@@ -16,6 +16,28 @@ static void Remote_Hold(void)
 }
 
 /**
+ * @brief 滚轮选三档腿长，只用在【本地 DT7/DR16】那条路上。
+ *
+ * ⚠⚠ 三个常量的名字不是按长度排的：M 是【原拨轮中位档】、也是三档里最短的，
+ * S(0.28) 反而比 M(0.18) 长。照"S 一定最短"去读会把方向搞反。
+ *
+ * 滚轮字段无效时 DR16_MakeRemote 不写 knobA，留在 0，正好落进中间带拿到 M
+ * ——那是三档里最短的一档，退化方向是安全的。
+ */
+static float Remote_Leg_Select(const Remote_t *remote)
+{
+    if (remote->knobA > APP_RC_DIAL_THRESHOLD)
+    {
+        return APP_RC_LEG_S;
+    }
+    if (remote->knobA < -APP_RC_DIAL_THRESHOLD)
+    {
+        return APP_RC_LEG_L;
+    }
+    return APP_RC_LEG_M;
+}
+
+/**
  * @brief VrA 选模式组，双阈值滞回。
  *
  * 中间带里保持当前组，所以旋钮停在中值附近时不会反复横跳。
@@ -42,12 +64,18 @@ static void Remote_Group_Update(const Remote_t *remote)
  * ⚠ 只判 DOWN，其余一律当 UP。SwA/SwB 是两档开关读不出 MID，
  * DR16 降级映射还会留下 UNKNOWN，这么写让这两种情况都落到安全的一侧。
  */
-static Chassis_Mode_t Remote_Mode_Select(const Remote_t *remote)
+static Chassis_Mode_t Remote_Mode_Select(const Remote_t *remote,
+                                        uint8_t local_dr16)
 {
     uint8_t a_down = (remote->sw[REMOTE_SW_A] == REMOTE_SWITCH_DOWN) ? 1U : 0U;
     uint8_t b_down = (remote->sw[REMOTE_SW_B] == REMOTE_SWITCH_DOWN) ? 1U : 0U;
 
-    Chassis.goal.L0 = APP_RC_LEG_M;
+    /*
+     * 本地 DT7/DR16 时腿长由滚轮定；板间转发的 FS-i6X 没有多余旋钮，
+     * 恒为 M，只有下面高组 SwA 打下去的压缩腿档才换成 CROUCH。
+     */
+    Chassis.goal.L0 =
+        (local_dr16 != 0U) ? Remote_Leg_Select(remote) : APP_RC_LEG_M;
 
     if (Chassis.knob_group == 0U)
     {
@@ -126,7 +154,7 @@ static void Remote_Goal_Update(const Remote_t *remote)
  * 当前的拨杆位置，任何状态下拨一下就能改，因此不存在模式卡死。
  * 离线或急停只关闭输出许可并回中运动目标，模式保持不变，控制中间量继续计算。
  */
-void Chassis_Remote_Update(const Remote_t *remote)
+void Chassis_Remote_Update(const Remote_t *remote, uint8_t local_dr16)
 {
     Remote_Switch_t enable_sw = remote->sw[REMOTE_SW_C];
 
@@ -162,8 +190,20 @@ void Chassis_Remote_Update(const Remote_t *remote)
         return;
     }
 
-    Remote_Group_Update(remote);
-    Chassis.mode = Remote_Mode_Select(remote);
+    /*
+     * ⚠ 本地 DT7/DR16 上滚轮已经被腿长占了，没有旋钮可以选组，所以锁低组。
+     * 低组给的是 FOLLOW / TOP（SwB 在 DR16 上恒为 UNKNOWN，按 UP 处理），
+     * 丢掉的高组只有压缩腿和跳跃——压缩腿本来就是一个固定腿长，滚轮自己够得到。
+     */
+    if (local_dr16 != 0U)
+    {
+        Chassis.knob_group = 0U;
+    }
+    else
+    {
+        Remote_Group_Update(remote);
+    }
+    Chassis.mode = Remote_Mode_Select(remote, local_dr16);
     if (Chassis.mode == CHASSIS_MODE_JUMP)
     {
         /*

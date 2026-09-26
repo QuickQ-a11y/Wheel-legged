@@ -32,8 +32,16 @@ extern "C" {
  * @brief 将通用遥控输入转换为底盘运动目标和外层模式。
  *
  * Remote.online为零时只关闭输出许可并保持控制计算，不使用陈旧命令。
+ *
+ * @param local_dr16 置位表示本周期的输入来自【底盘本地插的 DT7/DR16】，
+ *                   而不是云台经板间 CAN 转发的 FS-i6X。
+ *
+ * ⚠ 这个参数存在的唯一原因是【滚轮只有一个】：DT7 的滚轮和 i6X 的 VrA 解出来
+ * 都是 knobA，但两边要它干的事不同——本地 DR16 时它选三档腿长（i6X 上这件事
+ * 由高组 SwA 的压缩腿档承担），板间转发时它选模式组。两个职责挤不到一个旋钮上，
+ * 所以按数据源分。数据源的唯一判据是设备层的 Board_IsOnline()，由任务层读。
  */
-void Chassis_Remote_Update(const Remote_t *remote);
+void Chassis_Remote_Update(const Remote_t *remote, uint8_t local_dr16);
 
 #ifdef __cplusplus
 }
