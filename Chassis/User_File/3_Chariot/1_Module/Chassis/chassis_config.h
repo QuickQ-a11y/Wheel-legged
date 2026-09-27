@@ -399,6 +399,61 @@ typedef struct
 } Chassis_Step_Config_t;
 
 /**
+ * @brief 跳跃五相参数。相序和各相判据取自ZJU §13.8，逐项对照见
+ *        Codex文档/遥控键位与模式分配.md §5.1。
+ */
+typedef struct
+{
+    /*
+     * 站立满多久才允许起跳，s。ZJU要求"已站稳N拍"；这一项同时就是两次跳跃
+     * 之间的冷却——跳完回STANDING时站立计时清零，要重新站满才能再跳。
+     * ZJU单独设冷却是为了防缓冲电容能量耗尽、关节电机欠压掉线。
+     */
+    float stand_time;
+    float pitch_limit;      /* 跳跃全程的机体俯仰保护，rad，必须 < pi/2。 */
+
+    /* CHARGE：压腿蓄力，完整LQR平衡。 */
+    float charge_L0;        /* 蓄力目标腿长，m。 */
+    float charge_L0_rate;   /* 蓄力腿长斜率，m/s。 */
+    float charge_timeout;   /* 压不到位也起跳的超时，s。ZJU取0.2。 */
+    float L0_tol;           /* 蓄力和空中收腿判腿长到位的容差，m。 */
+    float still_d_L0;       /* 蓄力判"已压到底且静止"的腿速上限，m/s。 */
+
+    /*
+     * EXTEND：开环轴向力起跳，N。ZJU用开环关节力矩，理由是出力和母线电流
+     * 可预期；这里放在虚拟腿空间给，腿不对称时不会扭腿，Tp仍由LQR出。
+     * ⚠ 这一相【不扣气弹簧】，弹簧帮着推——SPR的教训：不关补偿的话，
+     * 0N和450N的弹簧跳得一样高。换算到关节约 extend_F0*0.14 N*m，
+     * 受 output.joint_T_limit 限幅。
+     */
+    float extend_F0;
+    float extend_L0;        /* 两腿都伸过它即判起跳完成，m，要离机构极限0.375留余量。 */
+    float extend_timeout;   /* 伸不到位的超时，s。超时说明没离地，直接进落地缓冲。 */
+
+    /* RETRACT：空中收腿，轮子不转，腿保持大地竖直。 */
+    float air_L0;           /* 空中收腿目标，m。要顶着约100N气弹簧收，收不到ZJU的0.105。 */
+    float air_L0_rate;      /* 空中腿长斜率，RETRACT和LAND_PREP共用，m/s。ZJU取2.5。 */
+    float retract_hold;     /* 收到位需连续保持的时间，s。ZJU取100拍。 */
+    float retract_timeout;  /* s */
+
+    /*
+     * LAND_PREP：伸到 land_L0 等触地，触地由离地观测判。
+     * ⚠ land_L0 要不小于 lqr.L0_max - observer.land_L0_margin：观测器的
+     * 触地判据B是"伸腿速度从峰值回落"，腿在空中伸到目标、自然减速时也会
+     * 满足它；只有停在那条线以上，判据B才关掉，剩下的腿长回缩和支撑力
+     * 两路才是真触地。这就是ZJU空中把腿一直推到接近最长的原因。
+     */
+    float land_L0;
+    float land_min;         /* 进本相后至少等这么久才认触地，s。 */
+    float land_timeout;     /* 判不出触地的超时，s。超时后车在地上且轮子关着，不能长。 */
+    float recover_time;     /* 落地缓冲时长，s，结束后交回STANDING。 */
+
+    /* 十维误差逐状态缩放，0关闭该状态反馈；空中两相复用 off_ground_scale。 */
+    float extend_scale[CHASSIS_STATE_COUNT];   /* 起跳：ZJU m_jump，屏蔽位移和速度。 */
+    float recover_scale[CHASSIS_STATE_COUNT];  /* 落地缓冲：ZJU m_land，只屏蔽位移。 */
+} Chassis_Jump_Config_t;
+
+/**
  * @brief 整车实测机械与质量参数，控制前馈和观测统一从这里取。
  *
  * 每项注释同时记录MATLAB模型 ABK_LQR.m 的对应取值。两边不一致时，
@@ -645,6 +700,7 @@ typedef struct
     Chassis_Top_Config_t top;
     Chassis_Follow_Config_t follow;
     Chassis_Step_Config_t step;
+    Chassis_Jump_Config_t jump;
     Chassis_Observer_Config_t observer;
     Chassis_LQR_Config_t lqr;
     Chassis_LESO_Config_t leso;

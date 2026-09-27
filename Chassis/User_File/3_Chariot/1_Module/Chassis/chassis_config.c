@@ -401,6 +401,55 @@ const Chassis_Config_t Chassis_Config = {
         .phi0_max = 2.90f,
     },
     /*
+     * 跳跃。⚠ 小轮腿没有上机过，腿长按本块 lqr 腿长范围 0.11~0.24 等比缩的
+     * 占位值；没有气弹簧，extend_F0 按整车约 6 kg 取的。用之前先按实机重定。
+     */
+    .jump = {
+        .stand_time = 1.0f,
+        .pitch_limit = 0.80f,
+        .charge_L0 = 0.12f,
+        .charge_L0_rate = 1.0f,
+        .charge_timeout = 0.30f,
+        .L0_tol = 0.02f,
+        .still_d_L0 = 0.20f,
+        .extend_F0 = 60.0f,
+        .extend_L0 = 0.22f,
+        .extend_timeout = 0.30f,
+        .air_L0 = 0.14f,
+        .air_L0_rate = 2.0f,
+        .retract_hold = 0.05f,
+        .retract_timeout = 0.30f,
+        /* lqr.L0_max 0.24 - observer.land_L0_margin 0.03 = 0.21，land_L0 不能低于它。 */
+        .land_L0 = 0.22f,
+        .land_min = 0.05f,
+        .land_timeout = 0.50f,
+        .recover_time = 0.30f,
+        .extend_scale = {
+            [CHASSIS_STATE_S] = 0.0f,
+            [CHASSIS_STATE_D_S] = 0.0f,
+            [CHASSIS_STATE_FAI] = 1.0f,
+            [CHASSIS_STATE_D_FAI] = 1.0f,
+            [CHASSIS_STATE_THETA_L] = 1.0f,
+            [CHASSIS_STATE_D_THETA_L] = 1.0f,
+            [CHASSIS_STATE_THETA_R] = 1.0f,
+            [CHASSIS_STATE_D_THETA_R] = 1.0f,
+            [CHASSIS_STATE_THETA_B] = 1.0f,
+            [CHASSIS_STATE_D_THETA_B] = 1.0f,
+        },
+        .recover_scale = {
+            [CHASSIS_STATE_S] = 0.0f,
+            [CHASSIS_STATE_D_S] = 1.0f,
+            [CHASSIS_STATE_FAI] = 1.0f,
+            [CHASSIS_STATE_D_FAI] = 1.0f,
+            [CHASSIS_STATE_THETA_L] = 1.0f,
+            [CHASSIS_STATE_D_THETA_L] = 1.0f,
+            [CHASSIS_STATE_THETA_R] = 1.0f,
+            [CHASSIS_STATE_D_THETA_R] = 1.0f,
+            [CHASSIS_STATE_THETA_B] = 1.0f,
+            [CHASSIS_STATE_D_THETA_B] = 1.0f,
+        },
+    },
+    /*
      * 只读观测阈值。凡是随整车重量或执行器能力等比缩放的量一律写成比例：
      * 力类以单腿静载 Observer_Static_Load() 为基准，即
      * (leg_mass + wheel_mass + 0.5*body_mass)*gravity，与ZJU式90一致；
@@ -1231,6 +1280,58 @@ const Chassis_Config_t Chassis_Config = {
         .pitch_limit = 1.45f,
         .phi0_min = 0.30f,
         .phi0_max = 2.90f,
+    },
+    /*
+     * 跳跃。相序、每项含义和各校出处见 Chassis_Jump_Config_t 的注释。
+     * ⚠ 全部是【未上机】的初值。先架空把 extend_F0 降到 60 看相序和超时，
+     * 再落地从 100 起逐步加大，同时盯母线电压和 DM 掉线。
+     * 落地试跳前 body_mass、roll 限幅、F0_gravity_scale 要先恢复正常值。
+     */
+    .jump = {
+        .stand_time = 1.0f,
+        .pitch_limit = 0.80f,
+        .charge_L0 = 0.16f,
+        .charge_L0_rate = 1.0f,
+        .charge_timeout = 0.30f,
+        .L0_tol = 0.02f,
+        .still_d_L0 = 0.20f,
+        /* 起跳换算到关节约 150*0.13 = 20 N*m，低于 joint_T_limit。 */
+        .extend_F0 = 150.0f,
+        .extend_L0 = 0.33f,
+        .extend_timeout = 0.30f,
+        .air_L0 = 0.22f,
+        .air_L0_rate = 2.0f,
+        .retract_hold = 0.05f,
+        .retract_timeout = 0.30f,
+        /* lqr.L0_max 0.35 - observer.land_L0_margin 0.03 = 0.32，land_L0 不能低于它。 */
+        .land_L0 = 0.33f,
+        .land_min = 0.05f,
+        .land_timeout = 0.50f,
+        .recover_time = 0.30f,
+        .extend_scale = {
+            [CHASSIS_STATE_S] = 0.0f,
+            [CHASSIS_STATE_D_S] = 0.0f,
+            [CHASSIS_STATE_FAI] = 1.0f,
+            [CHASSIS_STATE_D_FAI] = 1.0f,
+            [CHASSIS_STATE_THETA_L] = 1.0f,
+            [CHASSIS_STATE_D_THETA_L] = 1.0f,
+            [CHASSIS_STATE_THETA_R] = 1.0f,
+            [CHASSIS_STATE_D_THETA_R] = 1.0f,
+            [CHASSIS_STATE_THETA_B] = 1.0f,
+            [CHASSIS_STATE_D_THETA_B] = 1.0f,
+        },
+        .recover_scale = {
+            [CHASSIS_STATE_S] = 0.0f,
+            [CHASSIS_STATE_D_S] = 1.0f,
+            [CHASSIS_STATE_FAI] = 1.0f,
+            [CHASSIS_STATE_D_FAI] = 1.0f,
+            [CHASSIS_STATE_THETA_L] = 1.0f,
+            [CHASSIS_STATE_D_THETA_L] = 1.0f,
+            [CHASSIS_STATE_THETA_R] = 1.0f,
+            [CHASSIS_STATE_D_THETA_R] = 1.0f,
+            [CHASSIS_STATE_THETA_B] = 1.0f,
+            [CHASSIS_STATE_D_THETA_B] = 1.0f,
+        },
     },
     /*
      * 只读观测阈值。凡是随整车重量或执行器能力等比缩放的量一律写成比例：

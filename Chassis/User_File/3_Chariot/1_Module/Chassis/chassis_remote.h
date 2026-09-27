@@ -18,13 +18,16 @@ extern "C" {
  * 两组的冲突处理【刻意不对称】，这不是笔误：
  *   低组里小陀螺和台阶是两个互斥动作，两个都拨下去无从判断要哪个，回落 FOLLOW；
  *   高组里跳跃本身就包含压腿蓄力，所以 SwB 直接盖过 SwA，不存在冲突。
+ *
+ * 跳跃不是模式：它那一档的模式仍是 FOLLOW，另外置 Chassis.goal.jump_flag，
+ * 由控制层取上升沿、在站立里做一次跳跃动作。
  */
 #define CHASSIS_MAP_LO_A_UP_B_UP CHASSIS_MODE_FOLLOW
 #define CHASSIS_MAP_LO_A_DN_B_UP CHASSIS_MODE_TOP
 #define CHASSIS_MAP_LO_A_UP_B_DN CHASSIS_MODE_STEP
 #define CHASSIS_MAP_LO_A_DN_B_DN CHASSIS_MODE_FOLLOW
 
-#define CHASSIS_MAP_HI_B_DN CHASSIS_MODE_JUMP
+#define CHASSIS_MAP_HI_B_DN CHASSIS_MODE_FOLLOW /* 跳跃：另置 goal.jump_flag。 */
 #define CHASSIS_MAP_HI_A_DN CHASSIS_MODE_FOLLOW /* 压缩腿只改腿长，模式仍是 FOLLOW。 */
 #define CHASSIS_MAP_HI_A_UP CHASSIS_MODE_FOLLOW
 

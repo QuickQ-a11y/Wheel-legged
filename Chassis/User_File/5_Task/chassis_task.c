@@ -235,6 +235,10 @@ static void Chassis_Task_Entry(void *argument)
             Chassis_Step();
             break;
 
+        case CHASSIS_JUMP:
+            Chassis_Jump();
+            break;
+
         case CHASSIS_ZERO_FORCE:
         default:
             Chassis_Zero_Output();

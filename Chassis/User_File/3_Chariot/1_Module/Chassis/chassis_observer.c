@@ -44,13 +44,17 @@ static float Observer_Static_Load(const Chassis_Model_Config_t *config)
 }
 
 /**
- * @brief 当前处于倒地或台阶动作，离地与卡腿判定在这些状态下不成立。
+ * @brief 当前处于倒地、台阶或跳跃动作，整车离地与卡腿判定在这些状态下不成立。
+ *
+ * 跳跃自己管空中的掩码、轮子和腿长，通用的整车离地动作不能再插一手；
+ * 逐腿的离地/触地标志照常计算，跳跃的等落地相要用它。
  */
 static uint8_t Observer_In_Action(const Chassis_t *chassis)
 {
     return ((chassis->state == CHASSIS_FALLEN) ||
             (chassis->state == CHASSIS_FALLING_TO_STAND) ||
-            (chassis->state == CHASSIS_STEP)) ? 1U : 0U;
+            (chassis->state == CHASSIS_STEP) ||
+            (chassis->state == CHASSIS_JUMP)) ? 1U : 0U;
 }
 
 void Chassis_Slip_Init(Chassis_Slip_t *slip)
@@ -201,6 +205,27 @@ void Chassis_Slip_Calc(const Chassis_Config_t *config, Chassis_t *chassis)
 void Chassis_Ground_Init(Chassis_Ground_t *ground)
 {
     memset(ground, 0, sizeof(*ground));
+}
+
+/**
+ * @brief 把两腿直接判成离地，此后只等触地判据翻回来。
+ *
+ * 取自ZJU §13.8：空中收腿结束时"强制把两条腿标记为离地"。收腿时腿长速度
+ * 为负，会被触地判据A（腿速反向）当成触地，所以收腿期间的标志不可信；
+ * 从这里重新开始，伸腿峰值也一并清零。
+ */
+void Chassis_Ground_Mark_Off(Chassis_Ground_t *ground)
+{
+    uint32_t side;
+
+    for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+    {
+        ground->off_ground_flag[side] = 1U;
+        ground->off_time[side] = 0.0f;
+        ground->land_time[side] = 0.0f;
+        ground->land_speed_flag[side] = 0U;
+        ground->d_L0_peak[side] = 0.0f;
+    }
 }
 
 /**

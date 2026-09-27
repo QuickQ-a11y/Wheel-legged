@@ -263,6 +263,40 @@ Remote scheme in STANDING: sticks command **velocities only**. Position and head
 
 CAN mapping (`app_config.h:44-45`): **FDCAN1 = the two RIGHT DM hips (`0x001`/`0x002`) *plus* both DJI wheel ESCs (`0x201`/`0x202`)**; **FDCAN2 = the two LEFT DM hips (`0x003`/`0x004`)**. DM feedback ID = `0x010 + motor ID`. The `0x200` frame byte slot is derived from the feedback ID via `APP_DJI_TX_SLOT()` — never hardcode it.
 
+### Jump (跳跃)
+
+**Not a mode.** The remote layer only sets a level, `Chassis.goal.jump_flag` (local DR16: left
+switch UP; i6X: high-group SwB DOWN), and `mode` stays `FOLLOW`. `Chassis_State_Update` takes
+the **rising edge** and enters `CHASSIS_JUMP` only after `state_time` in STANDING has reached
+`jump.stand_time` — an edge that arrives earlier is dropped, not deferred. That one rule gives
+"no jump at power-on", "no repeat while the switch stays up" and the inter-jump cooldown
+(`State_Enter(STANDING)` restarts the clock). Mode edges are **deferred** while in `CHASSIS_JUMP`
+(`last_mode` is not updated); only `ZERO_FORCE` (step 1) cuts in immediately.
+
+`Chassis_Jump()` follows the `Chassis_Step` pattern: set targets → `Chassis_Control()` →
+decide the phase from this tick's feedback. The per-phase differences live **inside**
+`Chassis_Control`, keyed on `state == CHASSIS_JUMP` and `jump_phase`:
+
+- `LQR_Calc` mask — EXTEND `jump.extend_scale`, RETRACT/LAND_PREP `off_ground_scale`,
+  RECOVER `jump.recover_scale`, CHARGE all ones.
+- F0 — EXTEND overwrites both legs with the open-loop `jump.extend_F0` **after** the spring
+  subtraction (the strut pushes for free); the air phases swap the gravity feedforward for
+  `-(leg_mass + wheel_mass)·g` and zero the roll force; MPC is bypassed for the whole jump.
+- Wheels — both zeroed in the air phases.
+
+`Observer_In_Action()` includes `CHASSIS_JUMP`, so the generic whole-body off-ground actions
+(`all_off_flag`, `fn_comp`, landing PID reset) stay out of the way; the per-leg
+`off_ground_flag` still runs and LAND_PREP waits on it after `Chassis_Ground_Mark_Off()`.
+
+⚠ `jump.land_L0` must be ≥ `lqr.L0_max − observer.land_L0_margin`: landing criterion B ("leg
+extension speed dropped from its peak") also fires when an airborne leg simply reaches its
+target. EXTEND timeout goes to **RECOVER, not the air phases** — switching the wheels off
+while still on the ground drops the robot.
+
+Host tests: `test_jump_*` in `test_chassis_recovery.c`. `set_leg_axial_force(total)` writes
+`total − F0_spring` into the motors; **`total = 0` is airborne** (only the leg/wheel weight
+remains, ratio ≈ 0.28), ground contact is `ground.Fn_static`.
+
 ### Safety gating — read before changing any motor output
 
 A computed command reaches a motor only if **all** of these pass, and each is a separate place to look:

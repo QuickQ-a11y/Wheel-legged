@@ -13,6 +13,8 @@ static void Remote_Hold(void)
     Chassis.yaw_stick_flag = 0U;
     memset(Chassis.goal.bench_d_L0, 0, sizeof(Chassis.goal.bench_d_L0));
     memset(Chassis.goal.bench_d_phi0, 0, sizeof(Chassis.goal.bench_d_phi0));
+    /* 不撤掉的话，恢复运行那一拍就是一个现成的上升沿。 */
+    Chassis.goal.jump_flag = 0U;
 }
 
 /**
@@ -56,12 +58,13 @@ static void Remote_Group_Update(const Remote_t *remote)
 }
 
 /**
- * @brief 按 VrA 组和 SwA/SwB 选出模式，同时定下腿长。
+ * @brief 按 VrA 组和 SwA/SwB 选出模式，同时定下腿长和跳跃请求。
  *
- * 模式和腿长由同一组拨杆共同决定（压缩腿就是"模式不变、腿长变短"），
- * 所以放在一个函数里一次算完，不拆成两个各判一遍同样的拨杆。
+ * 模式、腿长和跳跃请求由同一组拨杆共同决定（压缩腿就是"模式不变、腿长变短"，
+ * 跳跃就是"模式不变、多一个请求"），所以放在一个函数里一次算完，
+ * 不拆成几个各判一遍同样的拨杆。
  *
- * ⚠ 只判 DOWN，其余一律当 UP。SwA/SwB 是两档开关读不出 MID，
+ * ⚠ 选模式只判 DOWN，其余一律当 UP。SwA/SwB 是两档开关读不出 MID，
  * DR16 降级映射还会留下 UNKNOWN，这么写让这两种情况都落到安全的一侧。
  */
 static Chassis_Mode_t Remote_Mode_Select(const Remote_t *remote,
@@ -76,6 +79,14 @@ static Chassis_Mode_t Remote_Mode_Select(const Remote_t *remote,
      */
     Chassis.goal.L0 =
         (local_dr16 != 0U) ? Remote_Leg_Select(remote) : APP_RC_LEG_M;
+    /*
+     * 本地 DT7/DR16：左拨杆（映射成 SwA）打到最上请求跳跃，模式照旧是 FOLLOW。
+     * ⚠ 只认本地 DR16。i6X 的 SwA 在 UP 是常态（上电要求全部拨杆在上），
+     * 那条路上这么判，一站起来就会跳。i6X 的跳跃在下面高组的 SwB。
+     */
+    Chassis.goal.jump_flag =
+        ((local_dr16 != 0U) &&
+         (remote->sw[REMOTE_SW_A] == REMOTE_SWITCH_UP)) ? 1U : 0U;
 
     if (Chassis.knob_group == 0U)
     {
@@ -96,6 +107,7 @@ static Chassis_Mode_t Remote_Mode_Select(const Remote_t *remote,
 
     if (b_down != 0U)
     {
+        Chassis.goal.jump_flag = 1U;
         return CHASSIS_MAP_HI_B_DN;
     }
     if (a_down != 0U)
@@ -193,7 +205,8 @@ void Chassis_Remote_Update(const Remote_t *remote, uint8_t local_dr16)
     /*
      * ⚠ 本地 DT7/DR16 上滚轮已经被腿长占了，没有旋钮可以选组，所以锁低组。
      * 低组给的是 FOLLOW / TOP（SwB 在 DR16 上恒为 UNKNOWN，按 UP 处理），
-     * 丢掉的高组只有压缩腿和跳跃——压缩腿本来就是一个固定腿长，滚轮自己够得到。
+     * 丢掉的高组只有压缩腿和跳跃——压缩腿本来就是一个固定腿长，滚轮自己够得到；
+     * 跳跃在本地 DR16 上改由左拨杆打到最上触发，见 Remote_Mode_Select()。
      */
     if (local_dr16 != 0U)
     {
@@ -204,16 +217,5 @@ void Chassis_Remote_Update(const Remote_t *remote, uint8_t local_dr16)
         Remote_Group_Update(remote);
     }
     Chassis.mode = Remote_Mode_Select(remote, local_dr16);
-    if (Chassis.mode == CHASSIS_MODE_JUMP)
-    {
-        /*
-         * ⚠ 跳跃状态机【尚未实现】，先回落到 FOLLOW，不能让 mode 停在 JUMP——
-         * Chassis_State_Update 认不出它，会走到未定义的分支。
-         * 实现跳跃时连带要补的还有"跳完自动回 STANDING"的锁存：跳跃是一次性
-         * 动作，做完时 SwB 还停在 DOWN，不锁存就会立刻再跳一次。那是整套映射
-         * 里唯一需要破例做边沿的地方，设计见 Codex文档/遥控键位与模式分配.md。
-         */
-        Chassis.mode = CHASSIS_MODE_FOLLOW;
-    }
     Remote_Goal_Update(remote);
 }

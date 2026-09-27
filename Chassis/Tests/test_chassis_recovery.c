@@ -2567,6 +2567,355 @@ static void test_spring_observer_consistency(void)
     assert_zero_output();
 }
 
+/* 连续调用 n 拍跳跃控制，中途相位变成 phase 就提前停下；返回实际调用的拍数。 */
+static uint32_t run_jump_until(Chassis_Jump_Phase_t phase, uint32_t n)
+{
+    uint32_t iteration;
+
+    for (iteration = 0U; iteration < n; iteration++)
+    {
+        Chassis_Jump();
+        if ((Chassis.state != CHASSIS_JUMP) || (Chassis.jump_phase == phase))
+        {
+            return iteration + 1U;
+        }
+    }
+    return n;
+}
+
+/* 秒换算成控制拍数，多给两拍余量，避免浮点累加刚好差一拍。 */
+static uint32_t ticks(float seconds)
+{
+    return (uint32_t)(seconds / Chassis_Config.default_dt) + 2U;
+}
+
+/*
+ * 按【腿的总轴向力】反推两路关节反馈力矩。气弹簧那份不经过电机，
+ * 所以写进电机的是 total - F0_spring，理由同 enter_all_off_ground()。
+ * 取 -30 N 即悬空（支撑力掉到离地门限以下）；取单腿静载 ground.Fn_static
+ * 即腿上压着车，观测器会判成触地。⚠ 取 0 不是触地：总力为 0 时支撑力只剩
+ * 腿轮自重，比例约 0.28，仍低于触地门限。
+ */
+static void set_leg_axial_force(float total_F0)
+{
+    uint32_t side;
+
+    for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+    {
+        const Chassis_Leg_Config_t *leg_config = &Chassis_Config.leg[side];
+        VMC_Torque_t torque;
+
+        assert(VMC_Torque_Calc(leg_config, &Chassis.leg[side],
+                               total_F0 - Chassis.leg[side].F0_spring, 0.0f,
+                               &torque) == 1U);
+        Chassis.dm_motor[leg_config->joint[CHASSIS_JOINT_PHI1].motor_index]
+            .torque_nm = torque.T1;
+        Chassis.dm_motor[leg_config->joint[CHASSIS_JOINT_PHI4].motor_index]
+            .torque_nm = torque.T4;
+    }
+}
+
+/*
+ * 站立并站满 jump.stand_time，此后一个 jump_flag 上升沿就能起跳。
+ * 站立腿长离 charge_L0 留出几倍容差，蓄力相才不会第一拍就判到位——
+ * 写死一个数的话，以后调 charge_L0 会让这里悄悄失效。
+ */
+static void enter_jump_ready(void)
+{
+    const float stand_L0 =
+        Chassis_Config.jump.charge_L0 + 4.0f * Chassis_Config.jump.L0_tol;
+    uint32_t iteration;
+
+    Chassis_Init();
+    set_online_feedback();
+    set_symmetric_leg_pose(stand_L0, CHASSIS_HALF_PI);
+    Chassis.mode = CHASSIS_MODE_FOLLOW;
+    Chassis.goal.L0 = stand_L0;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_STANDING);
+    for (iteration = 0U; iteration < ticks(Chassis_Config.jump.stand_time);
+         iteration++)
+    {
+        Chassis_State_Update();
+    }
+    assert(Chassis.state == CHASSIS_STANDING);
+}
+
+static void enter_jump(void)
+{
+    enter_jump_ready();
+    Chassis.goal.jump_flag = 1U;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_JUMP);
+    assert(Chassis.jump_phase == CHASSIS_JUMP_CHARGE);
+}
+
+static void assert_jump_scale(const float *scale)
+{
+    uint32_t state;
+
+    for (state = 0U; state < CHASSIS_STATE_COUNT; state++)
+    {
+        assert(Chassis.lqr.scale[state] == scale[state]);
+    }
+}
+
+/*
+ * 起跳只认 jump_flag 的上升沿，而且要先站满 stand_time。
+ * 这两条合起来保证三件事：上电时拨杆已在最上不会跳；没站稳就拨上去不会跳；
+ * 跳完拨杆还停在最上不会连跳——站满之后必须拨下再拨上。
+ */
+static void test_jump_trigger_edge(void)
+{
+    uint32_t iteration;
+
+    /* 站满之后的上升沿：起跳，mode 不变。 */
+    enter_jump();
+    assert(Chassis.mode == CHASSIS_MODE_FOLLOW);
+
+    /* 进站立那一拍 flag 就是高的：没有站满之后的边沿，一直按着也不跳。 */
+    Chassis_Init();
+    set_online_feedback();
+    set_symmetric_leg_pose(0.20f, CHASSIS_HALF_PI);
+    Chassis.mode = CHASSIS_MODE_FOLLOW;
+    Chassis.goal.jump_flag = 1U;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_STANDING);
+    for (iteration = 0U; iteration < ticks(Chassis_Config.jump.stand_time);
+         iteration++)
+    {
+        Chassis_State_Update();
+    }
+    assert(Chassis.state == CHASSIS_STANDING);
+
+    /* 拨下再拨上，站满之后的新边沿才算数。 */
+    Chassis.goal.jump_flag = 0U;
+    Chassis_State_Update();
+    Chassis.goal.jump_flag = 1U;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_JUMP);
+
+    /* 刚站起来就拨上去：这个边沿作废，之后站满了也不补跳。 */
+    Chassis_Init();
+    set_online_feedback();
+    set_symmetric_leg_pose(0.20f, CHASSIS_HALF_PI);
+    Chassis.mode = CHASSIS_MODE_FOLLOW;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_STANDING);
+    Chassis.goal.jump_flag = 1U;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_STANDING);
+    for (iteration = 0U; iteration < ticks(Chassis_Config.jump.stand_time);
+         iteration++)
+    {
+        Chassis_State_Update();
+    }
+    assert(Chassis.state == CHASSIS_STANDING);
+}
+
+/*
+ * 完整走一遍五相：蓄力 -> 起跳 -> 空中收腿 -> 伸腿等落地 -> 落地缓冲 -> 站立。
+ * 每一相验它独有的那件事：起跳是开环力且不扣弹簧；空中轮子不转、只留腿摆通道；
+ * 等落地时两腿被标成离地、但不触发通用的整车离地动作；缓冲结束回到站立。
+ */
+static void test_jump_phases(void)
+{
+    const Chassis_Jump_Config_t *jump = &Chassis_Config.jump;
+    const float leg_weight_n =
+        (Chassis_Config.model.leg_mass + Chassis_Config.model.wheel_mass) *
+        Chassis_Config.model.gravity;
+    float entry_L0;
+    uint32_t used;
+    uint32_t side;
+
+    enter_jump();
+
+    /* CHARGE：腿长目标按限速往 charge_L0 走，不是一步到位。 */
+    entry_L0 = Chassis.leg[CHASSIS_LEFT].target_L0;
+    Chassis_Jump();
+    assert(Chassis.jump_phase == CHASSIS_JUMP_CHARGE);
+    assert(fabsf((entry_L0 - Chassis.leg[CHASSIS_LEFT].target_L0) -
+                 jump->charge_L0_rate * Chassis.dt) < TEST_TOLERANCE);
+
+    /* 压到 charge_L0 且腿速为零：进起跳。 */
+    set_symmetric_leg_pose(jump->charge_L0, CHASSIS_HALF_PI);
+    Chassis_Jump();
+    assert(Chassis.jump_phase == CHASSIS_JUMP_EXTEND);
+
+    /* EXTEND：开环轴向力，气弹簧那份不扣（弹簧帮着推），位移通道按掩码屏蔽。 */
+    Chassis_Jump();
+    assert(Chassis.jump_phase == CHASSIS_JUMP_EXTEND);
+    for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+    {
+        assert(fabsf(Chassis.leg[side].F0 - jump->extend_F0) < 1.0e-3f);
+    }
+    assert_jump_scale(jump->extend_scale);
+
+    /* 伸过 extend_L0：进空中收腿，腿长目标从当前实际腿长接管。 */
+    entry_L0 = jump->extend_L0 + 0.005f;
+    set_symmetric_leg_pose(entry_L0, CHASSIS_HALF_PI);
+    Chassis_Jump();
+    assert(Chassis.jump_phase == CHASSIS_JUMP_RETRACT);
+
+    /*
+     * RETRACT：轮子不转、只留腿摆通道；轴向力 = 腿长PID - 腿轮自重 - 气弹簧。
+     * 空中没有机体压在腿上，重力前馈只剩腿和轮自己的重量，而且方向是往里拉。
+     */
+    Chassis_Jump();
+    assert(fabsf((entry_L0 - Chassis.leg[CHASSIS_LEFT].target_L0) -
+                 jump->air_L0_rate * Chassis.dt) < TEST_TOLERANCE);
+    assert(Chassis.output.T_wheel[CHASSIS_LEFT] == 0.0f);
+    assert(Chassis.output.T_wheel[CHASSIS_RIGHT] == 0.0f);
+    assert_zero_wheel_request();
+    assert_jump_scale(Chassis_Config.off_ground_scale);
+    for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+    {
+        assert(fabsf(Chassis.leg[side].F0 -
+                     (Chassis.leg_length_pid[side].lastOutput -
+                      leg_weight_n - Chassis.leg[side].F0_spring)) < 1.0e-3f);
+    }
+
+    /* 收到 air_L0 并保持 retract_hold：进伸腿等落地，两腿被标成离地。 */
+    set_symmetric_leg_pose(jump->air_L0, CHASSIS_HALF_PI);
+    used = run_jump_until(CHASSIS_JUMP_LAND_PREP, ticks(jump->retract_hold));
+    assert(Chassis.jump_phase == CHASSIS_JUMP_LAND_PREP);
+    assert(used > 1U);
+    assert(Chassis.ground.off_ground_flag[CHASSIS_LEFT] == 1U);
+    assert(Chassis.ground.off_ground_flag[CHASSIS_RIGHT] == 1U);
+
+    /*
+     * LAND_PREP：仍在空中（支撑力很低）时不退出；通用的整车离地动作
+     * （下压推力、离地掩码、落地复位）在跳跃里不插手，all_off_flag 保持为 0。
+     */
+    set_symmetric_leg_pose(jump->land_L0, CHASSIS_HALF_PI);
+    set_leg_axial_force(-30.0f);
+    run_jump_until(CHASSIS_JUMP_RECOVER, ticks(jump->land_min));
+    assert(Chassis.jump_phase == CHASSIS_JUMP_LAND_PREP);
+    assert(Chassis.ground.all_off_flag == 0U);
+    assert(Chassis.output.T_wheel[CHASSIS_LEFT] == 0.0f);
+    assert(Chassis.output.T_wheel[CHASSIS_RIGHT] == 0.0f);
+    assert_jump_scale(Chassis_Config.off_ground_scale);
+
+    /*
+     * 触地：支撑力回来，观测器清掉离地标志，进落地缓冲。要确认是被落地判出来
+     * 的而不是熬到超时：落地判据只要 land_hold_s 加一点滤波时间，远不到剩余
+     * 超时的一半。
+     */
+    set_leg_axial_force(Chassis.ground.Fn_static);
+    used = run_jump_until(CHASSIS_JUMP_RECOVER, ticks(jump->land_timeout));
+    assert(Chassis.jump_phase == CHASSIS_JUMP_RECOVER);
+    assert(used < ticks(0.5f * (jump->land_timeout - jump->land_min)));
+    assert(Chassis.ground.off_ground_flag[CHASSIS_LEFT] == 0U);
+    assert(Chassis.ground.off_ground_flag[CHASSIS_RIGHT] == 0U);
+
+    /* RECOVER：按缓冲掩码跑满 recover_time 后回到站立，mode 始终是 FOLLOW。 */
+    Chassis_Jump();
+    assert_jump_scale(jump->recover_scale);
+    run_jump_until(CHASSIS_JUMP_CHARGE, ticks(jump->recover_time));
+    assert(Chassis.state == CHASSIS_STANDING);
+    assert(Chassis.mode == CHASSIS_MODE_FOLLOW);
+}
+
+/*
+ * 跳完之后拨杆还停在最上：不许连跳。拨下再拨上，而且要重新站满才再跳一次
+ * ——stand_time 同时就是两次跳跃之间的冷却。
+ */
+static void test_jump_no_repeat_while_held(void)
+{
+    const Chassis_Jump_Config_t *jump = &Chassis_Config.jump;
+    uint32_t iteration;
+
+    enter_jump();
+    set_symmetric_leg_pose(jump->charge_L0, CHASSIS_HALF_PI);
+    Chassis_Jump();
+    assert(Chassis.jump_phase == CHASSIS_JUMP_EXTEND);
+    /* 起跳没伸到位就超时：直接转落地缓冲，再回站立。 */
+    run_jump_until(CHASSIS_JUMP_RECOVER, ticks(jump->extend_timeout));
+    assert(Chassis.jump_phase == CHASSIS_JUMP_RECOVER);
+    run_jump_until(CHASSIS_JUMP_CHARGE, ticks(jump->recover_time));
+    assert(Chassis.state == CHASSIS_STANDING);
+
+    /* 刚落地就拨下再拨上：还没站满，这就是冷却，不跳。 */
+    Chassis.goal.jump_flag = 0U;
+    Chassis_State_Update();
+    Chassis.goal.jump_flag = 1U;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_STANDING);
+
+    /* 拨杆一直停在最上：站满了也没有新边沿，不跳。 */
+    for (iteration = 0U; iteration < ticks(jump->stand_time); iteration++)
+    {
+        Chassis_State_Update();
+    }
+    assert(Chassis.state == CHASSIS_STANDING);
+
+    /* 站满之后拨下再拨上：再跳一次。 */
+    Chassis.goal.jump_flag = 0U;
+    Chassis_State_Update();
+    Chassis.goal.jump_flag = 1U;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_JUMP);
+}
+
+/* 每一相都有超时：腿到不了位也不许卡在跳跃里。 */
+static void test_jump_timeouts(void)
+{
+    const Chassis_Jump_Config_t *jump = &Chassis_Config.jump;
+
+    /* 蓄力压不到 charge_L0：超时照样起跳。 */
+    enter_jump();
+    run_jump_until(CHASSIS_JUMP_EXTEND, ticks(jump->charge_timeout));
+    assert(Chassis.jump_phase == CHASSIS_JUMP_EXTEND);
+
+    /*
+     * 起跳伸不到 extend_L0：说明根本没离地，转落地缓冲而不是空中收腿
+     * ——在地上进空中相会把轮子关掉，车会直接倒。
+     */
+    run_jump_until(CHASSIS_JUMP_RECOVER, ticks(jump->extend_timeout));
+    assert(Chassis.jump_phase == CHASSIS_JUMP_RECOVER);
+
+    /* 空中收不到 air_L0：超时照样进等落地。 */
+    enter_jump();
+    set_symmetric_leg_pose(jump->charge_L0, CHASSIS_HALF_PI);
+    Chassis_Jump();
+    set_symmetric_leg_pose(jump->extend_L0 + 0.005f, CHASSIS_HALF_PI);
+    Chassis_Jump();
+    assert(Chassis.jump_phase == CHASSIS_JUMP_RETRACT);
+    run_jump_until(CHASSIS_JUMP_LAND_PREP, ticks(jump->retract_timeout));
+    assert(Chassis.jump_phase == CHASSIS_JUMP_LAND_PREP);
+
+    /* 一直判不出触地：超时进落地缓冲，此时两腿仍标着离地。 */
+    set_leg_axial_force(-30.0f);
+    run_jump_until(CHASSIS_JUMP_RECOVER, ticks(jump->land_timeout));
+    assert(Chassis.jump_phase == CHASSIS_JUMP_RECOVER);
+    assert(Chassis.ground.off_ground_flag[CHASSIS_LEFT] == 1U);
+}
+
+/*
+ * 跳跃中拨模式：推迟到回站立之后再处理，跳到一半切小陀螺会在空中开轮子。
+ * 只有零力矩例外，照旧最高优先级——它是任何时候都能用的万能出口。
+ * 姿态保护全程有效。
+ */
+static void test_jump_mode_and_protection(void)
+{
+    enter_jump();
+    Chassis.mode = CHASSIS_MODE_TOP;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_JUMP);
+    assert(Chassis.last_mode == CHASSIS_MODE_FOLLOW);
+
+    Chassis.mode = CHASSIS_MODE_ZERO_FORCE;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_ZERO_FORCE);
+
+    enter_jump();
+    Chassis.imu.pitch = (Chassis_Config.jump.pitch_limit + 0.1f) /
+                        Chassis_Config.imu.pitch_angle_scale;
+    Chassis_State_Update();
+    assert(Chassis.state == CHASSIS_ZERO_FORCE);
+    assert((Chassis.fault & CHASSIS_FAULT_CONTROL) != 0U);
+}
+
 int main(void)
 {
     test_output_disabled();
@@ -2622,5 +2971,10 @@ int main(void)
     test_swing_falls_back_when_inverted();
     test_phase_hold_no_pingpong();
     test_swing_exit_gate_beats_stale_stable_time();
+    test_jump_trigger_edge();
+    test_jump_phases();
+    test_jump_no_repeat_while_held();
+    test_jump_timeouts();
+    test_jump_mode_and_protection();
     return 0;
 }

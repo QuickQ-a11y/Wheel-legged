@@ -34,23 +34,21 @@ typedef enum
     CHASSIS_MODE_SELF_SAVE,      /* 触发重新站立动作链。 */
     CHASSIS_MODE_BENCH,          /* 保持独立小板凳姿态。 */
     CHASSIS_MODE_STEP,           /* 正向辅助爬台阶。 */
-    CHASSIS_MODE_JUMP,           /* 压腿蓄力起跳。⚠ 状态机未实现，映射层暂时回落到 FOLLOW。 */
     CHASSIS_MODE_COUNT,
 } Chassis_Mode_t;
 
 /*
- * 跳跃五阶段。⚠ 本轮【只占名字】，没有任何状态机代码引用它。
- * 设计思路：压腿蓄力 -> 伸腿起跳 -> 空中收腿并保持机体姿态 ->
- * 主动伸腿准备落地 -> 落地重回正常平衡，完成后由映射层锁存回 FOLLOW。
- * 详见 ../../../../../Codex文档/遥控键位与模式分配.md。
+ * 跳跃五相，取自ZJU §13.8 的 Jump 子状态机（PreCompress/Jump/Recovery/Air/Return）。
+ * 跳跃【不是模式】：它是站立里一次性的动作，由 goal.jump_flag 的上升沿触发，
+ * 跑在 CHASSIS_JUMP 状态下，做完回 STANDING，mode 自始至终是 FOLLOW。
  */
 typedef enum
 {
-    CHASSIS_JUMP_CHARGE = 0,  /* 压腿蓄力。 */
-    CHASSIS_JUMP_EXTEND,      /* 伸腿起跳。 */
-    CHASSIS_JUMP_RETRACT,     /* 空中收腿并保持机体姿态。 */
-    CHASSIS_JUMP_LAND_PREP,   /* 主动伸腿准备落地。 */
-    CHASSIS_JUMP_RECOVER,     /* 落地重回正常平衡。 */
+    CHASSIS_JUMP_CHARGE = 0,  /* 压腿蓄力，完整LQR平衡。 */
+    CHASSIS_JUMP_EXTEND,      /* 开环轴向力伸腿起跳。 */
+    CHASSIS_JUMP_RETRACT,     /* 空中收腿，轮子不转，只控腿摆。 */
+    CHASSIS_JUMP_LAND_PREP,   /* 伸腿等落地，由离地观测判触地。 */
+    CHASSIS_JUMP_RECOVER,     /* 落地缓冲，屏蔽位移后交回站立。 */
 } Chassis_Jump_Phase_t;
 
 /* 内部执行状态：表示本周期任务应调用哪一条控制流程。 */
@@ -62,6 +60,7 @@ typedef enum
     CHASSIS_FALLING_TO_STAND,    /* 收腿到小板凳并等待稳定。 */
     CHASSIS_BENCH,               /* 独立板凳位置环和轮LQR。 */
     CHASSIS_STEP,                /* 辅助爬台阶状态机。 */
+    CHASSIS_JUMP,                /* 跳跃五相状态机。 */
 } Chassis_State_t;
 
 /*
@@ -135,6 +134,7 @@ typedef struct
     float L0;                /* 左右对称目标腿长，m。 */
     float bench_d_L0[CHASSIS_LEG_COUNT];   /* 板凳单腿腿长调节速率，m/s。 */
     float bench_d_phi0[CHASSIS_LEG_COUNT]; /* 板凳单腿腿角调节速率，rad/s。 */
+    uint8_t jump_flag;       /* 跳跃请求电平，控制层只认它的上升沿。 */
 } Chassis_Goal_t;
 
 /** @brief 整车平动和姿态状态，名称与十维模型保持一致。 */
@@ -241,6 +241,10 @@ struct Chassis
      */
     uint8_t step_posture_flag;
 
+    Chassis_Jump_Phase_t jump_phase;
+    float jump_time;                /* 当前跳跃相已持续的时间，s。 */
+    uint8_t last_jump_flag;         /* 上一拍的 goal.jump_flag，取上升沿用。 */
+
     /*
      * 整车离地动作的跨周期状态。起飞那一拍把腿长目标锁进latch，落地那一拍
      * 恢复回去——空中把腿推出去了，不还原就等于永久改了车身高度指令。
@@ -327,6 +331,11 @@ void Chassis_Bench(void);
  * @brief 执行辅助爬台阶四阶段状态机并复用正常LQR和VMC控制链。
  */
 void Chassis_Step(void);
+
+/**
+ * @brief 执行跳跃五相状态机，复用正常LQR和VMC控制链，做完回到站立。
+ */
+void Chassis_Jump(void);
 
 /**
  * @brief 将底盘电机命令清零并重置运动融合状态。

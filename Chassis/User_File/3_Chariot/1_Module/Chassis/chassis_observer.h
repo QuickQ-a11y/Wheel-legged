@@ -141,6 +141,11 @@ void Chassis_Slip_Calc(const Chassis_Config_t *config, Chassis_t *chassis);
 void Chassis_Ground_Init(Chassis_Ground_t *ground);
 
 /**
+ * @brief 把两腿直接判成离地，此后只等触地判据翻回来。供跳跃的等落地相使用。
+ */
+void Chassis_Ground_Mark_Off(Chassis_Ground_t *ground);
+
+/**
  * @brief 反解虚拟腿广义力并估算单腿支撑力及其标称静载比。
  */
 void Chassis_Ground_Update(const Chassis_Config_t *config, Chassis_t *chassis);

@@ -479,6 +479,25 @@ static void State_Enter(Chassis_State_t state)
                     Chassis_Config.step.approach_L0;
         }
     }
+    else if (state == CHASSIS_JUMP)
+    {
+        /*
+         * ZJU的Init：复位PID积分，锁存起跳瞬间的航向，位移参考和实测位移一起归零。
+         * 刻意不调 Control_Reset()：蓄力相仍是完整平衡，速度卡尔曼和离地观测
+         * 不能在这一拍被清空。腿长目标沿用站立时的值，由 CHARGE 按斜坡往下压。
+         */
+        memcpy(Chassis.lqr.target,
+               Chassis_Config.target,
+               sizeof(Chassis.lqr.target));
+        Chassis.lqr.target[CHASSIS_STATE_S] = 0.0f;
+        Chassis.body.s = 0.0f;
+        Chassis.lqr.target[CHASSIS_STATE_FAI] =
+            Chassis.imu.yaw_total * Chassis_Config.imu.yaw_angle_scale;
+        Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_LEFT]);
+        Algorithm_PID_Init(&Chassis.leg_length_pid[CHASSIS_RIGHT]);
+        Chassis.jump_phase = CHASSIS_JUMP_CHARGE;
+        Chassis.jump_time = 0.0f;
+    }
 }
 
 /** @brief 重新初始化速度Kalman、前进速度、加速度和位移状态。 */
@@ -633,6 +652,15 @@ void Chassis_State_Update(void)
     uint32_t output_fault;
     uint32_t active_fault;
     uint32_t last_output_fault;
+    /*
+     * 跳跃请求只认上升沿。基准每拍都更新，零力矩提前返回的那些拍也不例外，
+     * 否则边沿会跨着一整段零力矩去和进零力矩之前的值比较。
+     */
+    uint8_t jump_edge_flag =
+        ((Chassis.goal.jump_flag != 0U) &&
+         (Chassis.last_jump_flag == 0U)) ? 1U : 0U;
+
+    Chassis.last_jump_flag = Chassis.goal.jump_flag;
 
     /* 1. 外部主动零力具有最高优先级，不进入任何闭环控制。 */
     if (Chassis.mode == CHASSIS_MODE_ZERO_FORCE)
@@ -675,8 +703,14 @@ void Chassis_State_Update(void)
             Chassis.imu.yaw_total * Chassis_Config.imu.yaw_angle_scale;
     }
 
-    /* 3. 仅在外部模式变化时选择入口状态，避免每周期重复初始化。 */
-    if (Chassis.mode != Chassis.last_mode)
+    /*
+     * 3. 仅在外部模式变化时选择入口状态，避免每周期重复初始化。
+     * 跳跃是一次性动作，中途拨模式要等它回到站立再处理：last_mode 不更新，
+     * 边沿就留着。跳到一半切进小陀螺会在空中把轮子打开。零力矩不受影响，
+     * 它在第1步就处理了，照旧是任何时候都能用的出口。
+     */
+    if ((Chassis.mode != Chassis.last_mode) &&
+        (Chassis.state != CHASSIS_JUMP))
     {
         /*
          * 能否直接进入站立：左右腿正解有效、机体倾角较小且两条虚拟腿都
@@ -809,6 +843,39 @@ void Chassis_State_Update(void)
     {
         Chassis.fault = output_fault | CHASSIS_FAULT_CONTROL;
         State_Enter(CHASSIS_ZERO_FORCE);
+    }
+
+    /* 6. 跳跃全程的姿态保护。腿摆范围沿用站立那一套，俯仰用跳跃自己的限值。 */
+    if ((Chassis.state == CHASSIS_JUMP) &&
+        (leg_valid_flag != 0U) &&
+        ((fabsf(theta_b) > Chassis_Config.jump.pitch_limit) ||
+         (Angle_In_Range(
+              Chassis.leg[CHASSIS_LEFT].phi0_total,
+              Chassis_Config.recovery.stand_phi0_min,
+              Chassis_Config.recovery.stand_phi0_max) == 0U) ||
+         (Angle_In_Range(
+              Chassis.leg[CHASSIS_RIGHT].phi0_total,
+              Chassis_Config.recovery.stand_phi0_min,
+              Chassis_Config.recovery.stand_phi0_max) == 0U)))
+    {
+        Chassis.fault = output_fault | CHASSIS_FAULT_CONTROL;
+        State_Enter(CHASSIS_ZERO_FORCE);
+    }
+
+    /*
+     * 7. 起跳：站满 jump.stand_time 之后的 jump_flag 上升沿。没站满时这个
+     * 边沿直接作废、不留着补跳，所以上电时拨杆就在最上、或者跳完拨杆一直
+     * 停在最上，都不会自己跳起来。跳完经 State_Enter(STANDING) 重新计时，
+     * stand_time 因此也是两次跳跃之间的冷却。
+     */
+    if (Chassis.state == CHASSIS_STANDING)
+    {
+        Chassis.state_time += Chassis.dt;
+        if ((jump_edge_flag != 0U) &&
+            (Chassis.state_time >= Chassis_Config.jump.stand_time))
+        {
+            State_Enter(CHASSIS_JUMP);
+        }
     }
 
     /* 活动状态保留设备和数学故障，供末端输出门和Watch共同使用。 */
@@ -1551,11 +1618,31 @@ static void LQR_Calc(void)
     uint32_t state;
 
     /*
+     * 跳跃按相选掩码，取自ZJU §13.15：起跳屏蔽位移和速度（m_jump），
+     * 空中两相只留腿摆、与整车离地同一套（m_flight），落地缓冲只屏蔽位移
+     * （m_land）。蓄力相是完整平衡，落到最后的全一分支。
      * 整车离地优先于小陀螺：既在小陀螺又腾空时牵引力为零，位置和航向
      * 控制毫无意义，只剩腿摆通道可控。掩码取自ZJU式142。
      */
-    if ((Chassis_Config.output.off_ground_act_flag != 0U) &&
-        (Chassis.ground.all_off_flag != 0U))
+    if ((Chassis.state == CHASSIS_JUMP) &&
+        (Chassis.jump_phase == CHASSIS_JUMP_EXTEND))
+    {
+        memcpy(Chassis.lqr.scale,
+               Chassis_Config.jump.extend_scale,
+               sizeof(Chassis.lqr.scale));
+    }
+    else if ((Chassis.state == CHASSIS_JUMP) &&
+             (Chassis.jump_phase == CHASSIS_JUMP_RECOVER))
+    {
+        memcpy(Chassis.lqr.scale,
+               Chassis_Config.jump.recover_scale,
+               sizeof(Chassis.lqr.scale));
+    }
+    else if (((Chassis.state == CHASSIS_JUMP) &&
+              ((Chassis.jump_phase == CHASSIS_JUMP_RETRACT) ||
+               (Chassis.jump_phase == CHASSIS_JUMP_LAND_PREP))) ||
+             ((Chassis_Config.output.off_ground_act_flag != 0U) &&
+              (Chassis.ground.all_off_flag != 0U)))
     {
         memcpy(Chassis.lqr.scale,
                Chassis_Config.off_ground_scale,
@@ -1623,6 +1710,11 @@ void Chassis_Control(void)
 {
     float measurement[ALGORITHM_KALMAN_MAX_MEASUREMENT_COUNT] = {0.0f};
     uint8_t off_ground_act_flag;
+    /* 跳跃的两个空中相：轮子不转，支撑力只剩腿轮自重，横滚无从执行。 */
+    uint8_t jump_air_flag =
+        ((Chassis.state == CHASSIS_JUMP) &&
+         ((Chassis.jump_phase == CHASSIS_JUMP_RETRACT) ||
+          (Chassis.jump_phase == CHASSIS_JUMP_LAND_PREP))) ? 1U : 0U;
     float dt;
     float theta_b;
     float d_theta_b;
@@ -1894,6 +1986,22 @@ void Chassis_Control(void)
                 cosf(Chassis.leg[side].theta);
         }
         /*
+         * 跳跃空中相（ZJU式139）：没有机体压在腿上，腿和轮自己的重量把腿往外拉，
+         * 电机要往里拉住它，所以重力前馈换成 -(m_leg + m_wheel)*g；空中的横滚
+         * 力没有反作用对象，清零。这里取正值，由下方减号还原成向里的力。
+         */
+        if (jump_air_flag != 0U)
+        {
+            for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+            {
+                gravity_force[side] =
+                    (Chassis_Config.model.leg_mass +
+                     Chassis_Config.model.wheel_mass) *
+                    Chassis_Config.model.gravity;
+            }
+            roll_force = 0.0f;
+        }
+        /*
          * 只发布输入，不求解。求解跑在独立的低优先级 MPC 任务里、按自己的周期
          * 自定时，见 chassis_task.c 的 Chassis_MPC_Task_Entry()。
          *
@@ -1917,8 +2025,12 @@ void Chassis_Control(void)
             Chassis_MPC.age++;
         }
 
-        /* F0_left/F0_right 的正负号沿用原写法，两者当前均为0。 */
-        if (Chassis_Config.output.mpc_flag != 0U)
+        /*
+         * F0_left/F0_right 的正负号沿用原写法，两者当前均为0。
+         * 跳跃一律走PID路径：MPC的模型里没有起跳和空中这几相。
+         */
+        if ((Chassis_Config.output.mpc_flag != 0U) &&
+            (Chassis.state != CHASSIS_JUMP))
         {
             /*
              * MPC直接给绝对支撑力：重力已经作为仿射项在模型里，不再叠加
@@ -1950,6 +2062,20 @@ void Chassis_Control(void)
         for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
         {
             Chassis.leg[side].F0 -= Chassis.leg[side].F0_spring;
+        }
+
+        /*
+         * 起跳相：开环轴向力整个覆盖掉上面的结果，两腿相同，【不扣气弹簧】
+         * ——弹簧那份正好帮着推。ZJU用开环是为了出力和母线电流可预期；
+         * SPR的教训是不关弹簧补偿的话，0N和450N的弹簧跳得一样高。
+         */
+        if ((Chassis.state == CHASSIS_JUMP) &&
+            (Chassis.jump_phase == CHASSIS_JUMP_EXTEND))
+        {
+            for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+            {
+                Chassis.leg[side].F0 = Chassis_Config.jump.extend_F0;
+            }
         }
 
         /*
@@ -2023,6 +2149,12 @@ void Chassis_Control(void)
                 Chassis.output.T_wheel[side] = 0.0f;
             }
         }
+    }
+    /* 跳跃空中相两个轮子都不转，理由同上；什么时候算落地由跳跃状态机定。 */
+    if (jump_air_flag != 0U)
+    {
+        Chassis.output.T_wheel[CHASSIS_LEFT] = 0.0f;
+        Chassis.output.T_wheel[CHASSIS_RIGHT] = 0.0f;
     }
     /* 轮通道只在力矩侧限幅一次，电调命令由换算得到，不再二次限幅。 */
     if ((Chassis_Config.wheel.T_limit > 0.0f) &&
@@ -2490,5 +2622,173 @@ void Chassis_Step(void)
          (Chassis.step_phase == CHASSIS_STEP_RECOVER)))
     {
         memset(Chassis.output.I_wheel, 0, sizeof(Chassis.output.I_wheel));
+    }
+}
+
+/**
+ * @brief 切换跳跃相，本相计时清零。
+ *
+ * 空中收腿从当前实际腿长接管（ZJU：锁存为收腿起点），等落地先把两腿判成
+ * 离地（ZJU：收腿结束时强制标记离地），落地缓冲锁住触地那一刻的腿长和位移
+ * ——腿长目标不锁的话，腿长PID会把刚压缩下去的腿猛地顶回 land_L0，车会弹起来。
+ */
+static void Jump_Phase_Enter(Chassis_Jump_Phase_t phase)
+{
+    uint32_t side;
+
+    Chassis.jump_phase = phase;
+    Chassis.jump_time = 0.0f;
+    Chassis.stable_time = 0.0f;
+    if ((phase == CHASSIS_JUMP_RETRACT) || (phase == CHASSIS_JUMP_RECOVER))
+    {
+        for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+        {
+            Chassis.leg[side].target_L0 = Chassis.leg[side].L0;
+        }
+    }
+    if (phase == CHASSIS_JUMP_LAND_PREP)
+    {
+        Chassis_Ground_Mark_Off(&Chassis.ground);
+    }
+    else if (phase == CHASSIS_JUMP_RECOVER)
+    {
+        Chassis.body.s = 0.0f;
+        Chassis.lqr.target[CHASSIS_STATE_S] = 0.0f;
+    }
+}
+
+void Chassis_Jump(void)
+{
+    const Chassis_Jump_Config_t *jump = &Chassis_Config.jump;
+    float dt = Chassis.dt;
+    float goal_L0 = 0.0f;
+    float L0_rate = 0.0f;
+    uint8_t reach_flag = 1U;
+    uint32_t side;
+
+    if (Chassis.state != CHASSIS_JUMP)
+    {
+        Chassis_Zero_Output();
+        return;
+    }
+
+    /*
+     * 1. 本相的腿长目标，按限速逼近。起跳是开环力、落地缓冲锁在触地时的
+     *    腿长，这两相不走斜坡。
+     */
+    if (Chassis.jump_phase == CHASSIS_JUMP_CHARGE)
+    {
+        goal_L0 = jump->charge_L0;
+        L0_rate = jump->charge_L0_rate;
+    }
+    else if (Chassis.jump_phase == CHASSIS_JUMP_RETRACT)
+    {
+        goal_L0 = jump->air_L0;
+        L0_rate = jump->air_L0_rate;
+    }
+    else if (Chassis.jump_phase == CHASSIS_JUMP_LAND_PREP)
+    {
+        goal_L0 = jump->land_L0;
+        L0_rate = jump->air_L0_rate;
+    }
+    if (L0_rate > 0.0f)
+    {
+        for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+        {
+            Chassis.leg[side].target_L0 =
+                Move_Toward(Chassis.leg[side].target_L0,
+                            goal_L0,
+                            L0_rate * dt);
+        }
+    }
+
+    /*
+     * 2. 目标备好后跑一遍完整控制链。各相的差别都在链内按 jump_phase 分支：
+     *    LQR_Calc 里的掩码、F0装配里的开环起跳力和空中重力前馈、空中轮子清零。
+     */
+    Chassis_Control();
+    if (Chassis.state != CHASSIS_JUMP)
+    {
+        return;
+    }
+
+    /* 3. 用本拍反馈判相位切换。 */
+    Chassis.jump_time += dt;
+    switch (Chassis.jump_phase)
+    {
+    case CHASSIS_JUMP_CHARGE:
+        /* ZJU式134：压到底且已静止，或者超时。 */
+        for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+        {
+            if ((fabsf(Chassis.leg[side].L0 - jump->charge_L0) >
+                 jump->L0_tol) ||
+                (fabsf(Chassis.leg[side].d_L0) > jump->still_d_L0))
+            {
+                reach_flag = 0U;
+            }
+        }
+        if ((reach_flag != 0U) ||
+            (Chassis.jump_time >= jump->charge_timeout))
+        {
+            Jump_Phase_Enter(CHASSIS_JUMP_EXTEND);
+        }
+        break;
+
+    case CHASSIS_JUMP_EXTEND:
+        /* ZJU式136：两腿都伸过 extend_L0。伸不到就是没跳起来，回站立。 */
+        for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+        {
+            if (Chassis.leg[side].L0 <= jump->extend_L0)
+            {
+                reach_flag = 0U;
+            }
+        }
+        if (reach_flag != 0U)
+        {
+            Jump_Phase_Enter(CHASSIS_JUMP_RETRACT);
+        }
+        else if (Chassis.jump_time >= jump->extend_timeout)
+        {
+            Jump_Phase_Enter(CHASSIS_JUMP_RECOVER);
+        }
+        break;
+
+    case CHASSIS_JUMP_RETRACT:
+        /* ZJU式140：两腿收到位并连续保持一段时间，或者超时。 */
+        for (side = 0U; side < CHASSIS_LEG_COUNT; side++)
+        {
+            if (fabsf(Chassis.leg[side].L0 - jump->air_L0) > jump->L0_tol)
+            {
+                reach_flag = 0U;
+            }
+        }
+        Chassis.stable_time =
+            (reach_flag != 0U) ? (Chassis.stable_time + dt) : 0.0f;
+        if ((Chassis.stable_time >= jump->retract_hold) ||
+            (Chassis.jump_time >= jump->retract_timeout))
+        {
+            Jump_Phase_Enter(CHASSIS_JUMP_LAND_PREP);
+        }
+        break;
+
+    case CHASSIS_JUMP_LAND_PREP:
+        /* 两腿都被离地观测判回触地，或者超时——空中相轮子不转，在地上久待会倒。 */
+        if (((Chassis.ground.off_ground_flag[CHASSIS_LEFT] == 0U) &&
+             (Chassis.ground.off_ground_flag[CHASSIS_RIGHT] == 0U) &&
+             (Chassis.jump_time >= jump->land_min)) ||
+            (Chassis.jump_time >= jump->land_timeout))
+        {
+            Jump_Phase_Enter(CHASSIS_JUMP_RECOVER);
+        }
+        break;
+
+    case CHASSIS_JUMP_RECOVER:
+    default:
+        /* 缓冲结束交回站立，由 State_Enter(STANDING) 做完整的接管复位。 */
+        if (Chassis.jump_time >= jump->recover_time)
+        {
+            State_Enter(CHASSIS_STANDING);
+        }
+        break;
     }
 }

@@ -141,20 +141,28 @@ static void testHighGroup(void)
     assert(Chassis.mode == CHASSIS_MODE_FOLLOW);
     assert_near(Chassis.goal.L0, APP_RC_LEG_CROUCH);
 
+    assert(Chassis.goal.jump_flag == 0U);
+
     /*
      * SwB 下 = 跳跃，无论 SwA 在哪（跳跃本身就含压腿蓄力，不冲突）。
-     * ⚠ 跳跃状态机未实现，映射层必须回落到 FOLLOW——mode 停在 JUMP 的话
-     * Chassis_State_Update 认不出它。腿长也要回到行驶值，不能留在 CROUCH。
+     * 跳跃不是一个模式：mode 仍是 FOLLOW，只多一个 jump_flag 电平，
+     * 由控制层取上升沿。腿长也要回到行驶值，不能留在 CROUCH。
      */
     remote.sw[REMOTE_SW_B] = REMOTE_SWITCH_DOWN;
     Chassis_Remote_Update(&remote, 0U);
     assert(Chassis.mode == CHASSIS_MODE_FOLLOW);
+    assert(Chassis.goal.jump_flag == 1U);
     assert_near(Chassis.goal.L0, APP_RC_LEG_M);
 
     remote.sw[REMOTE_SW_A] = REMOTE_SWITCH_UP;
     Chassis_Remote_Update(&remote, 0U);
     assert(Chassis.mode == CHASSIS_MODE_FOLLOW);
+    assert(Chassis.goal.jump_flag == 1U);
     assert_near(Chassis.goal.L0, APP_RC_LEG_M);
+
+    remote.sw[REMOTE_SW_B] = REMOTE_SWITCH_UP;
+    Chassis_Remote_Update(&remote, 0U);
+    assert(Chassis.goal.jump_flag == 0U);
 }
 
 /** @brief VrA 切组带滞回：中间带里保持当前组，不随噪声横跳。 */
@@ -395,6 +403,57 @@ static void testLocalDr16HasNoCrouch(void)
     assert(fabsf(Chassis.goal.L0 - APP_RC_LEG_CROUCH) > TEST_TOLERANCE);
 }
 
+/**
+ * @brief 本地 DT7/DR16：左拨杆打到最上请求跳跃，中间是普通站立，最下是小陀螺。
+ *
+ * ⚠ 这条只属于本地 DR16。i6X 的 SwA 在 UP 是【常态】（上电要求全部拨杆在上），
+ * 那条路上 UP 置跳跃的话，一上电站起来就会跳，所以要单独钉住 i6X 不受影响。
+ */
+static void testLocalDr16LeftUpRequestsJump(void)
+{
+    Remote_t remote = testBaseRemote();
+
+    memset(&Chassis, 0, sizeof(Chassis));
+
+    remote.sw[REMOTE_SW_A] = REMOTE_SWITCH_UP;
+    Chassis_Remote_Update(&remote, 1U);
+    assert(Chassis.mode == CHASSIS_MODE_FOLLOW);
+    assert(Chassis.goal.jump_flag == 1U);
+
+    remote.sw[REMOTE_SW_A] = REMOTE_SWITCH_MID;
+    Chassis_Remote_Update(&remote, 1U);
+    assert(Chassis.mode == CHASSIS_MODE_FOLLOW);
+    assert(Chassis.goal.jump_flag == 0U);
+
+    remote.sw[REMOTE_SW_A] = REMOTE_SWITCH_DOWN;
+    Chassis_Remote_Update(&remote, 1U);
+    assert(Chassis.mode == CHASSIS_MODE_TOP);
+    assert(Chassis.goal.jump_flag == 0U);
+
+    /* 急停和卸力待命都必须把请求撤掉，否则恢复运行那一拍就是个现成的上升沿。 */
+    remote.sw[REMOTE_SW_A] = REMOTE_SWITCH_UP;
+    Chassis_Remote_Update(&remote, 1U);
+    assert(Chassis.goal.jump_flag == 1U);
+    remote.sw[REMOTE_SW_C] = REMOTE_SWITCH_UP;
+    Chassis_Remote_Update(&remote, 1U);
+    assert(Chassis.goal.jump_flag == 0U);
+
+    remote.sw[REMOTE_SW_C] = REMOTE_SWITCH_DOWN;
+    Chassis_Remote_Update(&remote, 1U);
+    assert(Chassis.goal.jump_flag == 1U);
+    remote.sw[REMOTE_SW_C] = REMOTE_SWITCH_MID;
+    Chassis_Remote_Update(&remote, 1U);
+    assert(Chassis.goal.jump_flag == 0U);
+
+    /* i6X 那条路上 SwA 在 UP 是常态，绝不能请求跳跃。 */
+    remote.sw[REMOTE_SW_C] = REMOTE_SWITCH_DOWN;
+    remote.sw[REMOTE_SW_A] = REMOTE_SWITCH_UP;
+    remote.knobA = -1.0f;
+    Chassis_Remote_Update(&remote, 0U);
+    assert(Chassis.mode == CHASSIS_MODE_FOLLOW);
+    assert(Chassis.goal.jump_flag == 0U);
+}
+
 int main(void)
 {
     testEnableLevel();
@@ -409,5 +468,6 @@ int main(void)
     testLocalDr16LocksLowGroup();
     testBoardSourceUnaffectedByKnob();
     testLocalDr16HasNoCrouch();
+    testLocalDr16LeftUpRequestsJump();
     return 0;
 }
