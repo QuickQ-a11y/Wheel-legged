@@ -14,6 +14,10 @@ extern "C" {
  *
  * ⚠ 前三台在 FDCAN2、拨盘在 FDCAN3，是【两条总线】，各自一个 0x200 帧。
  * 总线归属由 Motor_DJI_BusOf() 唯一决定，别在别处再判一次。
+ *
+ * ⚠ 拨盘选成翎控（app_config.h 的 APP_TRIGGER_MOTOR）时，MOTOR_DJI_TRIGGER 这一路闲置：
+ * Shooter 不读它，调用方给 Motor_DJI_UpdateTxFrames 的 triggerBusEnable 传 0，
+ * FDCAN3 上那一帧不发。设备层本身不跟着选型变——这份映射描述的仍是 M2006 拨盘的接法。
  */
 typedef enum
 {

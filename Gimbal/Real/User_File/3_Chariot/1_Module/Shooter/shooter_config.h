@@ -64,11 +64,20 @@ typedef struct
     algorithm_pid_config_t trigger_speed_pid;
 
     /*
+     * 拨盘力矩限幅的默认值，按电流给，A。写进 Shooter.trigger_I_limit，运行中在 Watch 里调。
+     * 速度环输出之后按它硬限幅，刹车也受它约束——卡弹时顶不碎弹丸靠的就是它。
+     */
+    float trigger_default_I_limit;
+
+    /*
      * 防卡弹。判据是【电调堵转码 或 电流饱和】，取或——
      * C610 在反馈 data[7] 直接报堵转，这是 C620 没有的白送诊断；
      * 但手册没写它的响应延迟和灵敏度，所以不拿它当唯一判据。
+     *
+     * ⚠ 电流饱和按【力矩限幅的比例】判，不是电调满量程：限幅调低之后，
+     * 反馈电流再也到不了满量程，写死的阈值会让这条判据失效。
      */
-    float jam_current;      /* 电流饱和阈值，C610 原始口径（±APP_DJI_CURRENT_MAX）。 */
+    float jam_current_ratio; /* |反馈电流| ≥ 这个比例 × 力矩限幅，即判电流饱和。 */
     float jam_confirm_s;    /* 判据持续这么久才确认卡弹，s。 */
     float jam_back_s;       /* 退弹持续时长，s。 */
     float jam_back_rad;     /* 退弹角度，输出轴 rad。 */

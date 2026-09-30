@@ -359,10 +359,10 @@ void Remote_Task_Init(void)
     remoteTaskHandle = osThreadNew(Remote_Task_Entry, NULL, &remoteTaskAttributes);
 }
 
-void Remote_Task_Update(void)
+void Remote_Task_GetRemote(Remote_t *remote)
 {
     (void)osMutexAcquire(remoteStateMutex, osWaitForever);
 
-    Remote = remotePublished;
+    *remote = remotePublished;
     (void)osMutexRelease(remoteStateMutex);
 }

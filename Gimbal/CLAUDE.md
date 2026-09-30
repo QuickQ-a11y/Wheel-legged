@@ -20,7 +20,7 @@
 |---|---|---|---|
 | FDCAN1 | 空 | 0 | — |
 | FDCAN2 | 3 × 摩擦轮 M2006/C610，电调 ID 1/2/3 | 4000 | 44% ~ 54% |
-| FDCAN3 | 2 × DM4310（MIT）+ 板间报文 + **拨盘 M2006，电调 ID 4** | 6400 | 71% ~ 86% |
+| FDCAN3 | 2 × DM4310（MIT）+ 板间报文 + **拨盘**：M2006（电调 ID 4）或翎控 MG4005E（0x141），二选一 | 6400 | 71% ~ 86% |
 
 **拨盘物理装在底盘上，却由云台代码控制**，所以它只能挂 FDCAN3——那是两板之间
 唯一的那条线。标准帧 8 字节无位填充 111 位、最坏 135 位，1 Mbps 上限只有
@@ -31,8 +31,18 @@ FDCAN3 合计 8000 帧/s、最坏负载 108%，直接超容量。200 Hz 不丢�
 接收机帧率本来只有 71~143 Hz。
 
 ⚠ 两块板都会收到 FDCAN3 上的**全部**帧（`Driver_FDCAN_ConfigStdFilter` 掩码为 0，
-全收），各自在分发层丢弃。底盘的分发已按总线过滤，拨盘的 0x200/0x204 不会被误解析，
-但它要多收多丢 2000 帧/s。实机判据：两块板的 CAN 错误计数。
+全收），各自在分发层丢弃。底盘的分发已按总线过滤（FDCAN3 只交给 `Board_UpdateFeedback`，
+它只认 0x3/0x4），拨盘的 0x200/0x204 或 0x141 都不会被误解析，但它要多收多丢 2000 帧/s。
+实机判据：两块板的 CAN 错误计数。
+
+两种拨盘的负载相同（都是 1 kHz 命令 + 1 kHz 回复），换型号不用重算这张表。
+选型只在 `app_config.h` 的 `APP_TRIGGER_MOTOR` 一处；没选中的那台，帧一帧都不发
+（`test_shooter` 的 `testOnlyChosenTriggerTransmits` 钉着）。
+
+⚠ 所有 FDCAN 都是 `AutoRetransmission = DISABLE`：没人应答的帧只发一次就丢，
+驱动层的 BusOff / FIFO 满 / 入队失败也都是静默丢帧、**不回报**任何计数。
+所以 `CAN_Task_GetTxErrorCount()`（`GIMBAL_FAULT_CAN` 的来源）只统计发送缓存满、
+RTOS 调用失败这类软件错误，对总线好坏没有感知——别拿它判断总线健康。
 
 ⚠ 再往任何一条总线上加节点之前，先重算上面这张表。
 
@@ -58,7 +68,10 @@ FDCAN3 合计 8000 帧/s、最坏负载 108%，直接超容量。200 Hz 不丢�
 | 控制电流量程 | ±16384 = ±20 A | **±10000 = ±10 A** |
 
 错误码：0 无异常 / 2 电压过高 / 3 三相未接 / 4 位置传感器丢失 / 6 **堵转** / 7 校准失败。
-**拨盘卡弹就是堵转码**，这是白送的诊断，已接进 `SHOOTER_FAULT_ESC`。
+**拨盘卡弹就是堵转码**，这是白送的诊断，接进的是**卡弹状态机**，不是 `SHOOTER_FAULT_ESC`：
+拨盘的堵转码若算电调故障，安全门会把发射部分全关——摩擦轮停转，退弹电流也发不出去
+（4.23 接入卡弹状态机时就埋下了，主机单测因为输出门关着一直没看出来）。
+摩擦轮的堵转码、以及拨盘的其他错误码照旧计入 `SHOOTER_FAULT_ESC`。
 
 照抄 C620 的解法会让错误码永远读成 0，而且看不出来——`test_motor_dji.c` 的
 `testFeedbackParse` 专门把 `data[6]` 留空来拦这个。
@@ -72,15 +85,86 @@ FDCAN3 合计 8000 帧/s、最坏负载 108%，直接超容量。200 Hz 不丢�
 所以 `Motor_DJI_UpdateTxFrames(fricBusEnable, triggerBusEnable)` 带两个参数，
 由 `Shooter_Config.output.fric_flag` / `trigger_flag` 驱动，**两个都从 0 出厂**。
 FDCAN3 上有 DM 电机和底盘板会 ACK，没有这个风险，但仍留开关以便分别调试。
+`trigger_flag` 管的是"选中的那台拨盘"，M2006 和翎控都受它控制。
+
+### 翎控 MG4005E-i10 拨盘（`2_Device/Motor/Motor_LK`）
+
+与 M2006 拨盘二选一，`app_config.h` 的 `APP_TRIGGER_MOTOR`（`APP_TRIGGER_M2006` /
+`APP_TRIGGER_LK4005`，**默认翎控**）。只用 **0xA1 转矩闭环**命令：串级环在云台板上算，
+电机只跟电流，拨盘力矩才能在固件里硬限幅。协议是工作区
+`Others/本家代码/.../modules/motor/LKmotor/LK-TECH电机CAN协议说明V2_3.pdf` §20，
+本机手册是 `Material/MG40-50系电机用户手册.pdf`。
+
+- FDCAN3、电机 ID 1，命令和回复**同一个 ID** 0x141。上位机 Broadcast Mode 必须关。
+- **小端**，DJI 的 0x200 帧是大端，两份驱动不能互抄。
+- 翎控只在收到命令时才回复，所以安全时也照发 iq=0 帧，否则在线判定会掉。
+- 0xA1 的 iq **不受**上位机 Max Torque Current 限制，没有 DM 那种"寄存器量程要与固件一致"
+  的陷阱；固件限幅就是唯一的软件限幅。
+- 回复里**没有错误码**。本轮只判在线；过温、欠压由电机自己保护。要读得轮询 0x9A，
+  但协议 V2.3 与 MG 手册的位定义对不上，"失去输入保护"还可能开机即锁存、误报成永久故障，
+  所以等上机观察后再定。
+
+⚠⚠ **`app_config.h` 里四个翎控标度常量没有实机核对过**，两份官方文档互相矛盾或根本没写：
+
+| 常量 | 现值 | 疑点 |
+|---|---|---|
+| `APP_LK_IQ_PER_A` | 2048/16.5 | MG 手册 ±2048↔±16.5 A；协议 V2.3 ±2048↔±33 A，差一倍 |
+| `APP_LK_ENCODER_PER_ROUND` | 65536 | 回复帧是 uint16，驱动却是 18 bit 编码器，打包成几位没写 |
+| `APP_LK_ENCODER_DIR` | +1 | V2.3 说角度"顺时针增加"，MG 手册说转矩"逆时针为正"，可能相反；反了位置环会一直转 |
+| `APP_LK_TRIGGER_GEAR_RATIO` | 10 | 4005E 是双编码器，回复里是电机端还是输出端没写；输出端的话应为 1 |
+
+**上机核对步骤（核对完才开 `trigger_flag`）：**
+
+1. 上位机：ID 1、CAN 1 Mbps、Broadcast Mode 关；设 Lose Input Protection（可恢复，
+   50~100 ms），云台板死机时电机会自己停。
+2. 第一次开 `trigger_flag` 前，把 `trigger_default_I_limit` **临时改成 0** 再烧录，
+   这样只收反馈、不出力。手转输出轴一整圈，看：`trigger_motor.encoderRaw` 回绕约 10 次
+   （电机端）还是 1 次（输出端），最大值约 65535 还是 16383；`trigger_angle` 是否变化约 ±2π；
+   它的正负是否与 `speedDps` 一致（决定 `APP_LK_ENCODER_DIR`）。
+3. 限幅给 0.5 A、不装弹、空打单发：`speedDps` 应与命令同号，再核对 `APP_SHOOT_TRIGGER_DIR`；
+   用手堵住拨盘，命令的 `trigger_I` 与读回的 `trigger_motor.currentRaw` 应一致。
+   绝对安培数只能靠厂家确认或外部测量。
+4. 逐步调低 `Shooter.trigger_I_limit`，直到故意卡弹时不再搅碎弹丸；确认此时仍会
+   进入 SUSPECT → BACKING。
+5. 急停：摩擦轮转起来后打 SwC=UP，应刹停（不滑行、不反转）；关遥控重复一遍。
 
 ## 发射机构模块（`3_Chariot/1_Module/Shooter`）
 
 与 Gimbal 模块**平级**，由**独立的 `shooter_task`** 驱动，1 kHz，与 `gimbal_task`
 **同为 `osPriorityHigh`**，各自 `osDelayUntil` 独立相位、各自测自己的 `dt`。
 
-⚠ **两者互不封锁**：各有自己的 `fault` 和 `safe_flag`。原先发射机构寄在 Gimbal 里，
-`GIMBAL_FAULT_DJI` 会置 `Gimbal.safe_flag`——**一台摩擦轮掉线连瞄准都做不了**。
-拆开之后卡弹不影响云台，云台故障也不会停下已经转起来的摩擦轮。
+⚠ **两者互不封锁。云台按"部分"停，发射按"台"停**：
+
+- 云台部分（yaw、pitch）：任一台 DM 离线（`GIMBAL_FAULT_DM`）或上报故障码
+  （`GIMBAL_FAULT_DM_ERR`：反馈状态既非 0 失能、也非 1 使能，即 3/4/5/8~E）→ 两台一起清零。
+  状态 0 不算故障，那是上电还没使能上，由重发使能处理。
+- 发射部分（三摩擦轮 + 拨盘）**按台隔离**：已使能总线上哪台离线（`SHOOTER_FAULT_MOTOR`）
+  或报错（`SHOOTER_FAULT_ESC`，拨盘堵转码除外），**只清那一台**的最终命令，其余照常出力、
+  照常刹车。摩擦轮离线不停拨盘，拨盘离线也不停摩擦轮。故障位按台记在
+  `Shooter.fric_fault[]` / `trigger_fault`，`Shooter.fault` 只是它们的按位或、供 Watch 总览。
+  离线那台必须清零：它的转速是旧值，拿它算刹车就等于一个固定电流。
+  （曾经做成"任一台故障四路一起停"，用户决定先不做发射部分的级联。）
+- 两部分的 `fault` / `safe_flag` 互不引用。原先发射机构寄在 Gimbal 里，`GIMBAL_FAULT_DJI`
+  会置 `Gimbal.safe_flag`——一台摩擦轮掉线连瞄准都做不了。
+- `test_gimbal_fault` 只链云台代码、`test_shooter` 只链发射代码，能各自单独链上，
+  本身就是"互不依赖"的证据。
+
+⚠⚠ **急停（SwC 在 UP 或 UNKNOWN）和遥控离线时同时停两部分，这是红线**，但两部分停法不同：
+
+- 云台：卸力，零力矩。
+- 发射：**PID 刹车**——摩擦轮速度环目标置 0、拨盘回待发（纯速度 P），**积分逐拍清**，
+  刹车电流随转速衰减到 0。**不用固定电流**：固定值在转停之后还会继续推，把轮子反向拖起来。
+  急停**不关**安全门，关了刹车电流就发不出去；只有 `fault` 才清零，而且清零优先于刹车——
+  离线电机的转速是旧值，拿它算刹车就成了固定电流。
+- VrB 回下半程（正常关摩擦轮）也走同一条刹车路径。参考 RoboWalker `crt_booster.cpp:187`、
+  湖南大学 `shoot_task.c:158`，都是"关摩擦轮 = 速度目标置 0"。RoboWalker 在 `:183`
+  清的是 `PID_Angle` 的积分而不是 `PID_Omega`，别照抄。
+- 急停期间卡弹状态机强制回 NORMAL、拨弹回 IDLE：BACKING 的退弹也不许再动。
+- **上膛锁** `Shooter.trigger_lock`：急停/离线期间置 1，解除后 VrB 必须先退出拨弹区才清 0，
+  **上电即为 1**。防止一松急停就开火——那时摩擦轮刚从 0 起转，立刻拨弹还容易卡弹。只锁拨盘。
+- 这一版之前，发射部分**完全不看**遥控在线和 SwC：急停时四路照常全力输出，只是被
+  "`Shooter.enable_flag` 没有写入点 + 两个输出门出厂为 0"挡住了。`enable_flag` 已删除，
+  发射部分由 SwC 急停 + VrB + 两个按总线分的输出门控制。
 
 ⚠ **拆成两个任务没有引入新的共享状态**，这是拆得动的前提：云台只碰 `Motor_DM`、
 发射机构只碰 `Motor_DJI`（两边互相引用次数为 0），而 CAN 发送缓存由 `task_can`
@@ -89,10 +173,11 @@ FDCAN3 上有 DM 电机和底盘板会 ACK，没有这个风险，但仍留开�
 ⚠ 优先级给同级而不是比云台低一级，是因为两者都是 1 kHz 硬周期：低一级会被
 `osPriorityAboveNormal` 的遥控/USB 任务抢占，而拨盘位置环对周期抖动比速度环敏感。
 
-⚠ 两个任务各自读全局 `Remote`（`task_remote.c` 只在写侧加 `remoteStateMutex`），
-所以**云台和发射机构可能看到相邻两帧的遥控值**。现在不构成问题——云台用
-SwC/右摇杆/SwD，发射机构用 VrB，互相独立。将来若出现两者必须看同一帧的语义，
-这里要先加同步。
+⚠ **两个任务各取各的遥控快照**：`Remote_Task_GetRemote()` 加锁拷贝遥控任务发布的快照，
+云台取到全局 `Remote`（Watch 入口），发射取到 `Shooter.remote`。原先 `Remote` 只由
+`Gimbal_Feedback_Update` 刷新、发射机构直接读它——云台任务一卡，急停就传不到发射部分，
+而且两任务会同读一份正被对方改写的全局变量。两者仍可能取到相邻两帧，现在不构成问题
+（云台用 SwC/右摇杆/SwD，发射用 SwC/VrB，SwC 两边各自判）。
 
 - `shooter_config.*` —— `const Shooter_Config_t`，两个按总线分的输出门、摩擦轮速度环参数
 - `shooter_control.*` —— 唯一的全局 `Shooter_t Shooter`，是长期 Watch 入口
@@ -122,8 +207,8 @@ VrB 已接进控制：过中位开摩擦轮，进末端 2% 使能区拨弹。语
 才跑拨弹逻辑，`BACKING`/`GIVEUP` 期间整个旁路——否则退弹的目标角会被下一轮加发覆盖。
 这是从 RoboWalker `crt_booster.cpp:155` 抄来的，删掉它单测会红。
 
-⚠ **`GIVEUP` 故意不置 fault 位。** fault 会经 `safe_flag` 把四台电机全部清零，
-而拨盘卡死时摩擦轮应该继续转——脱困后要能立刻接着打。放弃这件事由
+⚠ **`GIVEUP` 故意不置 fault 位。** 它只把拨盘的请求电流压成 0，摩擦轮照转——
+脱困后要能立刻接着打。放弃这件事由
 `Shooter.jam_state` 本身表示，不另存一份。
 
 ⚠ **目标角从"上一次目标"累加，不是从当前反馈角累加。** 参考实现
@@ -143,6 +228,30 @@ VrB 已接进控制：过中位开摩擦轮，进末端 2% 使能区拨弹。语
 
 ⚠ 位置环的 `outputLimit` 是**目标角速度**的上限，直接决定连发跟不跟得上
 `APP_SHOOT_BURST_HZ`。连发跟不上时先查它，不是先查速度环。
+
+### 拨盘力矩限幅
+
+`Shooter.trigger_I_limit`，单位 A，Watch 可改。初值取 `Shooter_Config.trigger_default_I_limit`
+（M2006 5 A、翎控 3 A，都未整定），重启回到这个默认值。
+
+- 速度环输出之后硬限幅，刹车也受它约束。调它的目的：故意卡弹时顶不碎弹丸。
+- 卡弹的"电流饱和"阈值是它的 `jam_current_ratio`（0.95）倍。原来写死成满量程的 9500，
+  限幅一调低，这条判据就永远到不了。
+- 换算用 `APP_TRIGGER_RAW_PER_A`：C610 是 1000 计数/A；翎控是 `APP_LK_IQ_PER_A`，
+  ⚠ 这个数还没核对，所以翎控的"A"眼下只是个名义值。
+
+⚠ 公共 PID 的 `integralLimit` 限的是**积分状态**（误差 × s），不是输出：I 项 = ki × 积分状态。
+拨盘速度环已按这个单位改正（M2006 那组原来填 5000，实际允许 I 项到满量程 50 倍）。
+
+### 已知问题（记录在案，这一版没改）
+
+- **摩擦轮速度环的 `integralLimit` 还是按电流口径填的 5000**，I 项上限只有
+  0.02 × 5000 = 100（满量程 1%），会有明显的稳态转速差。
+- **退弹不会真的反转拨盘**：退弹是 `trigger_target -= jam_back_rad`，而目标角是从上一次目标
+  累加的，卡住时远在反馈角前面，退 0.3 发之后仍在前面，拨盘还是往前顶。
+  `testJamByErrorCodeBacksOff` 只断言了目标角变小。
+- FDCAN3 在不重发模式下，仲裁输掉的帧直接丢（RM0468 的 DAR 一节）。拨盘命令
+  0x200 / 0x141 的优先级低于 DM 反馈 0x011/0x012，可能被挤掉一部分。**推断，未实机验证。**
 
 ⚠ 待发（`IDLE`）时两个环的积分**每拍都清**。只在进入那一拍清是不够的：
 误差为 0 时积分不会自己衰减，陈旧积分会让拨盘在待发状态一直带着小电流。
@@ -350,22 +459,68 @@ Watch 表达式要跟着改。
 
 ### 主机单测配方
 
+在 `Gimbal/Real/` 下执行。**桩头文件已收进仓库 `Tests/stub/`**（`stm32h7xx_hal.h` / `fdcan.h` /
+`spi.h`，顶替 CubeMX 生成的那几个），必须排在 include 路径**最前面**。`task_can.h`、
+`task_imu.h`、`task_remote.h` 用真的（`-IUser_File/5_Task`）——有这三个桩垫底，它们在主机上
+编得过；桩打得越低，测试用到的结构体就越接近真的。`HAL_GetTick`、`hfdcan1/2/3` 以及被桩掉的
+设备层接口，由各测试文件自己定义。**每个测试文件顶部都有完整的 gcc 命令。**
+
 ```bash
+STUB="-ITests/stub -IUser_File/5_Task"
 INC="-IUser_File/1_Middleware/0_Common -IUser_File/1_Middleware/2_Algorithm \
 -IUser_File/2_Device/Communication/DR16 -IUser_File/2_Device/Communication/USB \
 -IUser_File/2_Device/Communication/FlySky"
 ```
 
-| Test | Extra sources |
-|---|---|
-| `test_angle` | `2_Algorithm/Angle.c` |
-| `test_dr16` | `DR16/device_dr16.c` |
-| `test_ibus` | `FlySky/device_ibus.c` |
-| `test_sbus` | `FlySky/device_sbus.c` |
-| `test_motor_dji` | `Motor_DJI/device_motor_dji.c` —— 需要三个桩头文件，见下 |
-| `test_shooter` | `Shooter/shooter_control.c` `Shooter/shooter_config.c` `Motor_DJI/device_motor_dji.c` `2_Algorithm/PID.c` —— 同样要那三个桩 |
-| `test_usb_protocol` | `USB/device_usb_protocol.c` `2_Algorithm/CRC.c` |
-| `test_board_protocol` | see below — spans both projects |
+| Test | 需要 `$STUB` | 链接的源文件 |
+|---|---|---|
+| `test_angle` | | `2_Algorithm/Angle.c` |
+| `test_dr16` | | `DR16/device_dr16.c` |
+| `test_ibus` | | `FlySky/device_ibus.c` |
+| `test_sbus` | | `FlySky/device_sbus.c` |
+| `test_usb_protocol` | | `USB/device_usb_protocol.c` `2_Algorithm/CRC.c` |
+| `test_motor_dji` | ✓ | `Motor_DJI/device_motor_dji.c` |
+| `test_motor_lk` | ✓ | `Motor_LK/device_motor_lk.c` —— **跑两遍**，见下 |
+| `test_can_dispatch` | ✓ | `5_Task/task_can_dispatch.c` + DM/DJI/LK 三个设备层 `.c` + `2_Algorithm/Angle.c` |
+| `test_shooter` | ✓ | `Shooter/shooter_control.c` + sed 出的临时配置（代替 `shooter_config.c`） `Motor_DJI/device_motor_dji.c` `Motor_LK/device_motor_lk.c` `2_Algorithm/PID.c` —— **跑 5 遍**，见下 |
+| `test_gimbal_fault` | ✓ | `Gimbal/gimbal_control.c` `Gimbal/gimbal_config.c` `2_Algorithm/PID.c` `2_Algorithm/Angle.c`（DM/IMU/遥控/板间/CAN 接口由测试文件桩掉） |
+| `test_board_protocol` | ✓ | see below — spans both projects |
+
+⚠⚠ **`test_shooter` 要跑 5 遍**，每一遍都在变异检查里独家抓住过至少一个错误，少跑哪遍都有漏。
+
+两个输出门写死在 `shooter_config.c` 里（与底盘同一个风格，不留 `#ifndef`）。要打开就 sed 出
+临时配置、拿它代替 `shooter_config.c` 去链。sed **强制**写成要的值，不假设工作区当前是几——
+这两个门是实机上随时会拨的调试开关，照"现在是几"写的配方迟早悄悄失效
+（同 `Chassis/CLAUDE.md` 的 config overrides 一节）：
+
+```bash
+CFG=User_File/3_Chariot/1_Module/Shooter/shooter_config.c
+sed -e 's/\.fric_flag = 0U,/.fric_flag = 1U,/' \
+    -e 's/\.trigger_flag = 0U,/.trigger_flag = 1U,/' $CFG > $TMP/shooter_cfg_open.c
+sed -e 's/\.fric_flag = 1U,/.fric_flag = 0U,/' \
+    -e 's/\.trigger_flag = 0U,/.trigger_flag = 1U,/' $CFG > $TMP/shooter_cfg_trig.c
+```
+
+| 变体 | 配置 | `-D` | 为什么要这一遍 |
+|---|---|---|---|
+| M2006，门全开 | `shooter_cfg_open.c` | `APP_TRIGGER_MOTOR=APP_TRIGGER_M2006` `TEST_FRIC_FLAG=1` `TEST_TRIGGER_FLAG=1` | 门关着时 `Shooter.I` 恒为 0，安全门、刹车、故障清零一行都测不到——堵转码停摩擦轮的缺陷就这样藏了一轮 |
+| 同上，送弹方向翻转 | `shooter_cfg_open.c` | 再加 `APP_SHOOT_TRIGGER_DIR=(-1.0f)` | DIR 为 +1 时"乘了"和"漏乘"一样 |
+| M2006，只开拨盘门 | `shooter_cfg_trig.c` | `APP_TRIGGER_MOTOR=APP_TRIGGER_M2006` `TEST_FRIC_FLAG=0` `TEST_TRIGGER_FLAG=1` | 分步装机：未使能总线上的电机不能计入故障 |
+| 翎控，门全开 | `shooter_cfg_open.c` | `APP_TRIGGER_MOTOR=APP_TRIGGER_LK4005` `TEST_FRIC_FLAG=1` `TEST_TRIGGER_FLAG=1` | 翎控专属的换算、在线判定、帧路由 |
+| 同上，送弹方向翻转 | `shooter_cfg_open.c` | 再加 `APP_SHOOT_TRIGGER_DIR=(-1.0f)` | 同 M2006 |
+
+⚠ `TEST_FRIC_FLAG` / `TEST_TRIGGER_FLAG` 是**测试自己的**宏，声明这一遍**期望**的门，
+`main` 一开头拿它核对 `Shooter_Config`，不给就 `#error`。sed 一旦没匹配上（比如有人把那一行
+对齐了空格），门就还关着，依赖门开的用例会静默跳过、整遍照样"全过"——这道核对专拦这种假通过
+（实测：拿原配置却声明门全开，`main` 第一行断言失败）。
+
+`APP_TRIGGER_MOTOR`、`APP_SHOOT_TRIGGER_DIR` 在 `app_config.h` 留了 `#ifndef` 就是为这张表，别顺手删掉。
+
+⚠ **`test_motor_lk` 跑两遍**，第二遍加 `-DAPP_LK_ENCODER_DIR=(-1.0f)`，理由同上：
+编码器方向默认 +1 时查不出漏乘。
+
+`test_shooter` 和 `test_gimbal_fault` 都是【真】模块代码 + 桩掉下层：前者不链任何云台代码、
+后者不链任何发射代码，能各自单独链上，就是"两部分互不依赖"的证据。
 
 `test_ibus` / `test_sbus` 只需要 `remote_input.h`，不碰 HAL。
 两者都用常量而不是写死下标表达映射，所以回填通道常量之后仍然成立。
@@ -375,25 +530,18 @@ INC="-IUser_File/1_Middleware/0_Common -IUser_File/1_Middleware/2_Algorithm \
 也能往返自洽，等于没测。`testBitPackingIsolation` 同理：一次只设一路，
 "所有通道设成同一个值再往返"照样能过错位的代码，逐路隔离才抓得到。
 
-⚠⚠ **`test_shooter` 要跑两遍**，第二遍加 `-DAPP_SHOOT_TRIGGER_DIR=(-1.0f)` 把送弹方向翻过来。
-默认 `DIR` 是 `+1`，此时"代码乘了这个常量"和"压根没乘"在数学上完全一样，
-单跑默认那遍查不出漏乘；而实机上把宏翻成 -1 却毫无反应会非常难查。
-`app_config.h` 里那个 `#ifndef` 就是为这件事留的，别顺手删掉。
-
-`test_motor_dji`、`test_shooter` 和 `test_board_protocol` 一样需要三个桩头文件
-（`stm32h7xx_hal.h` / `fdcan.h` / `task_can.h`，见下段），符号由测试文件自己定义；
-但它只链一个工程的文件，不用分两次 gcc。`fdcan.h` 那个桩要同时声明
-`hfdcan1/2/3` 三个句柄——发射机构跨两条总线，测试要靠句柄区分帧发到哪条上。
+`fdcan.h` 那个桩同时声明 `hfdcan1/2/3` 三个句柄——发射机构跨两条总线，测试靠句柄区分
+帧发到哪条上。它还带上 `stm32h7xx_hal.h`：真的 `fdcan.h` 经 `main.h` 带进整个 HAL，
+`device_motor_dm.c` 的 `HAL_GetTick` 就是这么间接拿到声明的。
 ⚠ `Limit.h` 是纯 inline 头文件，**没有 `Limit.c` 可链**，别往命令里加。
 
 `test_board_protocol` packs with the gimbal's `device_board.c` and unpacks with the chassis's,
 so it links **one file from each project**. Both projects have a `device_board.h` with the same
 name and different contents, so the two `.c` files must be compiled in **separate gcc
 invocations** with their own `-I`, then linked; a single invocation picks the wrong header.
-It also needs three stub headers on the include path (`stm32h7xx_hal.h` declaring `HAL_GetTick`,
-`fdcan.h` with a dummy `FDCAN_HandleTypeDef` + `hfdcan3`, `task_can.h` declaring
-`CAN_Task_UpdateTxFrame`); the test file itself defines those symbols. The exact command is in
-the comment block at the top of `Gimbal/Real/Tests/test_board_protocol.c`.
+Both need `-ITests/stub` first; the gimbal half also needs `-IUser_File/5_Task` for the real
+`task_can.h`. The exact command is in the comment block at the top of
+`Gimbal/Real/Tests/test_board_protocol.c`.
 
 ## 板专属文档
 

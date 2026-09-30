@@ -18,7 +18,13 @@ extern "C" {
 #define GIMBAL_FAULT_IMU 0x02U      /* IMU 未初始化或姿态未就绪。 */
 #define GIMBAL_FAULT_DM 0x04U       /* 云台 DM 电机离线。 */
 /* 0x08 曾是 GIMBAL_FAULT_DJI，发射机构拆成独立模块后移到 SHOOTER_FAULT_MOTOR。 */
-#define GIMBAL_FAULT_CAN 0x10U      /* CAN 发送错误累计超限。 */
+/*
+ * ⚠ 这个计数只统计发送缓存满、RTOS 调用失败这类软件错误，【不含】总线发送失败——
+ * BusOff、无 ACK、FIFO 满在驱动层都是静默丢帧，不回报。发射机构运行时也没有路径
+ * 能让它自增，所以它不会把发射部分的故障带到云台来。
+ */
+#define GIMBAL_FAULT_CAN 0x10U      /* CAN 发送缓存/调度错误累计超限。 */
+#define GIMBAL_FAULT_DM_ERR 0x20U   /* 云台 DM 电机上报故障码（反馈状态既非 0 失能也非 1 使能）。 */
 #define GIMBAL_FAULT_REMOTE 0x100U  /* 遥控离线。 */
 
 /** @brief 云台外层状态，由右拨杆直接决定。 */
@@ -41,6 +47,11 @@ typedef struct
     float T_req;          /* 控制器请求力矩，N*m；故障时仍然计算。 */
     float T;              /* 安全门后实际下发的力矩，N*m。 */
     uint8_t online;       /* 电机在线。 */
+    /*
+     * DM 反馈状态码（反馈帧 data[0] 高 4 位，DM 手册"反馈帧 ERR"一节）：
+     * 0 失能、1 使能；3/4/5 校准或传感器异常、8~E 过压/欠压/过流/过温/通信丢失/过载。
+     */
+    uint8_t dm_state;
     algorithm_pid_state_t angle_pid; /* 外环状态。 */
     algorithm_pid_state_t speed_pid; /* 内环状态。 */
 } Gimbal_Axis_t;

@@ -35,6 +35,7 @@ static void Joint_Update(Gimbal_Axis_t *axis,
     axis->d_angle_joint = motor.velocityRadps * gain;
     axis->T_fb = motor.torqueNm * gain;
     axis->online = Motor_DM_IsOnline(index, nowTick);
+    axis->dm_state = motor.state;
 }
 
 /**
@@ -168,8 +169,12 @@ void Gimbal_Feedback_Update(void)
 {
     uint32_t nowTick = HAL_GetTick();
 
-    /* 把遥控任务的发布快照取到全局 Remote，之后本周期的消费都读它。 */
-    Remote_Task_Update();
+    /*
+     * 把遥控任务的发布快照取到全局 Remote，之后本周期的消费都读它。
+     * 发射机构自己另取一份到 Shooter.remote，不借这里——否则云台任务一卡，
+     * 发射部分就拿着旧快照，急停也传不过去。
+     */
+    Remote_Task_GetRemote(&Remote);
     IMU_Task_GetState(&Gimbal.imu);
 
     Joint_Update(&Gimbal.yaw, &Gimbal_Config.yaw, MOTOR_DM_YAW, nowTick);
@@ -202,6 +207,15 @@ void Gimbal_Feedback_Update(void)
     if ((Gimbal.yaw.online == 0U) || (Gimbal.pitch.online == 0U))
     {
         Gimbal.fault |= GIMBAL_FAULT_DM;
+    }
+    /*
+     * DM 报故障后自己退出使能，但仍按帧率回反馈，光看在线看不出来。
+     * 按"部分内任一台故障、两台一起停"计入。状态 0（失能）不算：那是上电还没使能上，
+     * 由 Motor_DM_UpdateTxFrames 重发使能处理。
+     */
+    if ((Gimbal.yaw.dm_state > 1U) || (Gimbal.pitch.dm_state > 1U))
+    {
+        Gimbal.fault |= GIMBAL_FAULT_DM_ERR;
     }
     if (CAN_Task_GetTxErrorCount() > APP_CAN_TX_ERROR_MAX)
     {

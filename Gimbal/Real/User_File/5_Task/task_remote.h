@@ -75,9 +75,13 @@ extern task_remote_state_t remoteTaskDebugState;
 void Remote_Task_Init(void);
 
 /**
- * @brief 将任务发布的完整遥控快照刷新到全局Remote。
+ * @brief 取一份遥控任务发布的完整快照（加锁拷贝）。
+ *
+ * 云台和发射两个任务【各取各的】：云台取到全局 Remote（Watch 入口），
+ * 发射取到 Shooter.remote。发射部分的急停和遥控离线判定因此不依赖云台任务
+ * 替它刷新，两个任务也不会同读一份正被对方改写的全局 Remote。
  */
-void Remote_Task_Update(void);
+void Remote_Task_GetRemote(Remote_t *remote);
 
 #ifdef __cplusplus
 }

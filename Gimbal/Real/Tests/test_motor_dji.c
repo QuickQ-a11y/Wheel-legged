@@ -1,13 +1,12 @@
 /*
  * 发射机构 DJI（M2006 + C610）设备层单测。
  *
- * device_motor_dji.c 要 stm32h7xx_hal.h / fdcan.h / task_can.h 三个头文件，
- * 复用 test_board_protocol 那三个桩（配方见 Gimbal/CLAUDE.md 的 Host tests 一节），
+ * device_motor_dji.c 要 stm32h7xx_hal.h / fdcan.h（桩，在 Tests/stub）和真的 task_can.h，
  * 符号由本文件自己定义。
  *
- * 编译（在 Gimbal/Real/ 下执行）：
- *   gcc -Wall -Wextra -I<stub> -IUser_File/1_Middleware/0_Common \
- *       -IUser_File/1_Middleware/2_Algorithm \
+ * 编译（在 Gimbal/Real/ 下执行；Tests/stub 必须排在最前）：
+ *   gcc -Wall -Wextra -ITests/stub -IUser_File/5_Task \
+ *       -IUser_File/1_Middleware/0_Common -IUser_File/1_Middleware/2_Algorithm \
  *       -IUser_File/2_Device/Motor/Motor_DJI \
  *       -o t Tests/test_motor_dji.c \
  *       User_File/2_Device/Motor/Motor_DJI/device_motor_dji.c -lm

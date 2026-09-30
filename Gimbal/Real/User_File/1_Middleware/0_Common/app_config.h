@@ -92,6 +92,75 @@ static_assert((APP_DJI_FRIC_1_RX_ID != APP_DJI_FRIC_2_RX_ID) &&
               "friction ESC ids must differ");
 
 /*
+ * 翎控（LK-TECH）MG4005E-i10 拨盘，与 M2006 拨盘二选一（见下方 APP_TRIGGER_MOTOR），
+ * 只用 0xA1 转矩闭环命令（协议 V2.3 §20）：串级环在云台板上算、电机只跟电流，
+ * 这样拨盘力矩能在固件里硬限幅，不至于把弹丸搅碎。
+ *
+ *   FDCAN3  电机 ID 1  —— 拨盘装在底盘上，只能走两板之间那条线（与 M2006 拨盘同理）
+ *
+ * 命令和回复用【同一个】标准帧 ID：0x140 + 电机 ID。电机 ID 在上位机 LK Motor Tool
+ * 里设；Broadcast Mode 必须关——多电机 0x280 命令和单电机命令不能同时用。
+ * 负载与 M2006 拨盘相同：1 kHz 命令 + 1 kHz 回复 = 2000 帧/s，FDCAN3 合计不变。
+ *
+ * ⚠ 字节序是【小端】，DJI 的 0x200 帧是大端，两份驱动不能互抄。
+ * ⚠ 0xA1 的 iq 不受上位机 Max Torque Current 限制（协议 V2.3 §20 备注），固件限幅
+ *   就是唯一的软件限幅；也因此这里没有 DM 那种"寄存器量程必须与固件一致"的陷阱。
+ */
+#define APP_LK_FRAME_LEN 8U
+#define APP_LK_TRIGGER_ID 0x141U /* 0x140 + 电机 ID 1，FDCAN3。 */
+#define APP_LK_CMD_TORQUE 0xA1U  /* 转矩闭环命令；回复帧 data[0] 同值。 */
+#define APP_LK_IQ_MAX 2000       /* 0xA1 iqControl 协议有效范围 ±2000。 */
+#define APP_LK_TIMEOUT_TICKS 50U
+
+/*
+ * ⚠⚠ 下面四个数【没有实机核对过】：两份官方文档互相矛盾，或者根本没写。
+ * 核对步骤见 Gimbal/CLAUDE.md 的翎控一节；核对完之前别开 Shooter_Config 的 trigger_flag。
+ *
+ *   IQ_PER_A           MG40-50 手册：反馈 ±2048 ↔ ±16.5 A；协议 V2.3：±2048 ↔ ±33 A，差一倍。
+ *                      取本机手册的值。它决定拨盘力矩限幅里的"A"是不是真的 A。
+ *   ENCODER_PER_ROUND  回复帧编码器字段是 uint16，本机驱动却是 18 bit 编码器，打包成几位没写。
+ *   ENCODER_DIR        协议 V2.3 说角度"顺时针增加"，MG 手册说转矩"逆时针为正"，两者可能相反；
+ *                      反了的话拨盘位置环是正反馈，会一直转。留 #ifndef 让 test_motor_lk 翻过来跑。
+ *   GEAR_RATIO         i10 即 1:10。但 4005E 是双编码器，回复帧里是电机端还是输出端没写——
+ *                      是输出端的话这里应该是 1。
+ */
+#define APP_LK_IQ_PER_A (2048.0f / 16.5f)
+#define APP_LK_ENCODER_PER_ROUND 65536
+#ifndef APP_LK_ENCODER_DIR
+#define APP_LK_ENCODER_DIR (+1.0f)
+#endif
+#define APP_LK_TRIGGER_GEAR_RATIO 10.0f
+
+/*
+ * 拨盘电机选型，编译期二选一（与 APP_REMOTE_BACKEND 同一个做法）：
+ *
+ *   APP_TRIGGER_M2006   M2006 + C610，电调 ID 4，走 Motor_DJI 的 MOTOR_DJI_TRIGGER
+ *   APP_TRIGGER_LK4005  翎控 MG4005E-i10，ID 1（0x141），走 Motor_LK，0xA1 转矩闭环
+ *
+ * 两者都挂 FDCAN3、都是 1 kHz 命令 + 回复，总线负载相同。没选中的那台设备层照样编译、
+ * 照样接在分发层上，只是 Shooter 不读它、也不发它的帧。
+ *
+ * ⚠ 取值故意从 1 开始：#if 里拼错的宏名会被预处理器当成 0，从 0 编号的话会
+ *   悄悄选中其中一个（单测里真这样栽过一次），下面的 #error 也就拦不住。
+ * 留 #ifndef 是为了 test_shooter 两种都跑。
+ */
+#define APP_TRIGGER_M2006 1
+#define APP_TRIGGER_LK4005 2
+#ifndef APP_TRIGGER_MOTOR
+#define APP_TRIGGER_MOTOR APP_TRIGGER_LK4005
+#endif
+#if (APP_TRIGGER_MOTOR != APP_TRIGGER_M2006) && (APP_TRIGGER_MOTOR != APP_TRIGGER_LK4005)
+#error "APP_TRIGGER_MOTOR must be APP_TRIGGER_M2006 or APP_TRIGGER_LK4005"
+#endif
+
+/* 拨盘电调每安培对应的原始计数，把 Shooter.trigger_I_limit（A）换算成电调口径。 */
+#if APP_TRIGGER_MOTOR == APP_TRIGGER_LK4005
+#define APP_TRIGGER_RAW_PER_A APP_LK_IQ_PER_A
+#else
+#define APP_TRIGGER_RAW_PER_A ((float)APP_DJI_CURRENT_MAX / 10.0f) /* C610：±10000 = ±10 A */
+#endif
+
+/*
  * 云台两台 DM4310，均挂 FDCAN3，与板间通信共用一条物理总线。
  * 反馈 ID = 0x010 + 电机 ID，两者都在达妙调试助手里设定，改 ID 时要一起核对。
  *
@@ -100,19 +169,21 @@ static_assert((APP_DJI_FRIC_1_RX_ID != APP_DJI_FRIC_2_RX_ID) &&
  * 匹配不上 FDCAN3 的帧。同理 Board_UpdateFeedback() 只认板间两个 ID，其余在打
  * 时间戳之前就返回。这两条是共用总线的前提，改分发逻辑时不要破坏。
  *
- * ⚠⚠ FDCAN3 上还挂着【拨盘 M2006】（电调 ID 4）。拨盘物理装在底盘上却由云台控制，
- * 只能走这条两板之间的线。三方共用一条 1 Mbps 总线，负载已经不宽裕：
+ * ⚠⚠ FDCAN3 上还挂着【拨盘】：M2006（电调 ID 4）或翎控 MG4005E（0x141），二选一，
+ * 见 APP_TRIGGER_MOTOR。拨盘物理装在底盘上却由云台控制，只能走这条两板之间的线。
+ * 三方共用一条 1 Mbps 总线，负载已经不宽裕：
  *
  *   2 台 DM x (发+收) x 1 kHz      4000 帧/s
- *   拨盘 (控制帧 + 反馈) x 1 kHz    2000 帧/s
+ *   拨盘 (控制帧 + 反馈) x 1 kHz    2000 帧/s   （两种拨盘相同）
  *   板间两帧 x 200 Hz (DIV=5)        400 帧/s
  *   -------------------------------------------
  *   合计                           6400 帧/s   →  71% ~ 86%
  *
  * 标准帧 8 字节无位填充 111 位、最坏填充 135 位，1 Mbps 下上限只有 7400~9000 帧/s。
  * ⚠ 所以 APP_BOARD_SEND_DIV 【不能】再设成 1：那样是 8000 帧/s、最坏 108%，直接超容量。
- * 要再加节点先重算这张表。实机判据是 CAN_Task_GetTxErrorCount() 和底盘的
- * can_error_count——两块板都会收下 FDCAN3 的全部帧（滤波器是全收），只是各自丢弃。
+ * 要再加节点先重算这张表。两块板都会收下 FDCAN3 的全部帧（滤波器是全收），只是各自丢弃。
+ * ⚠ CAN_Task_GetTxErrorCount() 【不能】当总线判据：总线层的发送失败在驱动里都是静默丢帧，
+ * 不进这个计数（见 gimbal_control.h 的 GIMBAL_FAULT_CAN）。
  */
 #define APP_DM_YAW_ID 0x001U
 #define APP_DM_PITCH_ID 0x002U

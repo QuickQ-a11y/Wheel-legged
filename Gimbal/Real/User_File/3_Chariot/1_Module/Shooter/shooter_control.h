@@ -6,14 +6,19 @@ extern "C" {
 #endif
 
 #include "device_motor_dji.h"
+#include "remote_input.h"
 #include "shooter_config.h"
+
+#if APP_TRIGGER_MOTOR == APP_TRIGGER_LK4005
+#include "device_motor_lk.h"
+#endif
 
 #include <stdint.h>
 
-/* 故障位。任一置位都会封锁发射机构的电流输出，但不阻断请求量的计算。 */
+/* 故障位，按台记（fric_fault[] / trigger_fault）。置位只清【那一台】的最终输出，不阻断请求量的计算。 */
 #define SHOOTER_FAULT_NONE 0x00U
-#define SHOOTER_FAULT_MOTOR 0x01U /* 已使能的那条总线上有电机离线。 */
-#define SHOOTER_FAULT_ESC 0x02U   /* 有电机上报非零错误码（堵转、三相未接…）。 */
+#define SHOOTER_FAULT_MOTOR 0x01U /* 电机离线（只对已使能总线上的电机计入）。 */
+#define SHOOTER_FAULT_ESC 0x02U   /* 电机上报非零错误码（三相未接…；拨盘堵转交给卡弹状态机）。 */
 
 /*
  * 拨弹状态机。语义由 app_config.h 的 APP_SHOOT_BURST_* 注释块定义：
@@ -36,8 +41,8 @@ typedef enum
  *
  * ⚠ 判据只在 NORMAL 判。退弹本身也会顶出大电流，别的状态里再判会自锁。
  *
- * ⚠ GIVEUP【故意不置 fault 位】：fault 会经 safe_flag 把四台电机全部清零，
- * 而拨盘卡死时摩擦轮应该继续转——脱困后要能立刻接着打。
+ * ⚠ GIVEUP【故意不置 fault 位】：它只封锁拨盘的请求电流，摩擦轮照转——
+ * 脱困后要能立刻接着打。
  * 放弃这件事本身就由这个状态表示，不另存一份。
  */
 typedef enum
@@ -53,23 +58,52 @@ typedef enum
  *
  * ⚠ 与云台【互不封锁】：一台摩擦轮掉线不该让操作者连瞄准都做不了，
  * 反过来云台故障也不该停下已经转起来的摩擦轮。两个模块各有自己的 fault
- * 和 safe_flag，由 gimbal_task 并列调用。
+ * 和 safe_flag，由各自独立的任务驱动（shooter_task / gimbal_task），互相引用次数为 0。
  */
 typedef struct
 {
-    /*
-     * 本步的控制入口，都在 Watch 里手改。
-     * VrB 旋钮的接入是下一步——速度环整定期间要能随时改目标转速，
-     * 也不希望旋钮误碰就起转。
-     */
-    uint8_t enable_flag;   /* 总开关，为 0 时请求电流恒零。 */
     float fric_target_rpm; /* 摩擦轮目标转速，rpm。减速箱已拆，即轮速。Watch 可改。 */
+    /*
+     * 拨盘力矩限幅，按电流给，A。Watch 可改，重启回到 Shooter_Config 的默认值。
+     * 速度环输出之后硬限幅（刹车也受它约束），卡弹的"电流饱和"阈值按比例跟着它走。
+     * 调它的目的：卡弹时拨盘顶不碎弹丸。
+     */
+    float trigger_I_limit;
+
+    /*
+     * 本任务自己取的遥控快照（Remote_Task_GetRemote），不借云台任务刷新的全局 Remote：
+     * 云台任务一卡，发射部分就会拿着旧快照，急停也传不过来。
+     */
+    Remote_t remote;
+
+    /*
+     * 急停（SwC 在 UP 或 UNKNOWN）或遥控离线：两部分都要停，这是红线。
+     * 判据与 gimbal_control.c 的 Gimbal_State_Update 同源。
+     * ⚠ 发射部分的"停"是 PID 刹车，【不关】安全门——关了门刹车电流就发不出去；
+     * 真正清零只看 fault。
+     */
+    uint8_t stop_flag;
+    /*
+     * 上膛锁：急停/离线期间置 1，解除后 VrB 必须先退出拨弹区才清 0，上电即为 1。
+     * 防止一松急停就开火——那时摩擦轮刚从 0 起转，立刻拨弹还容易卡弹。只锁拨盘。
+     */
+    uint8_t trigger_lock;
 
     /* 由 VrB 派生的操作者意图。 */
     uint8_t fric_request;    /* VrB 过中位：摩擦轮开。 */
     uint8_t trigger_request; /* VrB 进使能区间：拨弹。 */
 
-    motor_dji_state_t motor[APP_DJI_COUNT]; /* 反馈快照，任务层每周期刷新。 */
+    motor_dji_state_t fric_motor[APP_DJI_FRIC_COUNT]; /* 摩擦轮反馈快照，每周期刷新。 */
+    /*
+     * 拨盘反馈快照，每周期刷新，类型随 APP_TRIGGER_MOTOR。两种状态的 angle（输出轴 rad）
+     * 和 currentRaw（电调原始口径）同名同义，卡弹判据因此不用分支；
+     * 转速字段不同名（speedRpm / speedDps），换算在 Shooter_Feedback_Update 里。
+     */
+#if APP_TRIGGER_MOTOR == APP_TRIGGER_LK4005
+    motor_lk_state_t trigger_motor;
+#else
+    motor_dji_state_t trigger_motor;
+#endif
     algorithm_pid_state_t fric_pid[APP_DJI_FRIC_COUNT];
     uint8_t fric_ready_flag; /* 三个摩擦轮都进了 fric_ready_rpm 带内。 */
 
@@ -91,11 +125,20 @@ typedef struct
     float burst_s;         /* 连发节拍计时，s。 */
     uint32_t jam_retry;    /* 本轮连续退弹次数，回到 IDLE 时清零。 */
 
-    int16_t I_req[APP_DJI_COUNT]; /* 请求电流；故障时仍然计算，供 Watch 观察。 */
-    int16_t I[APP_DJI_COUNT];     /* 安全门后实际下发的电流。 */
+    int16_t I_req[APP_DJI_FRIC_COUNT]; /* 摩擦轮请求电流；故障时仍然计算，供 Watch 观察。 */
+    int16_t I[APP_DJI_FRIC_COUNT];     /* 摩擦轮安全门后实际下发的电流。 */
+    int16_t trigger_I_req;             /* 拨盘请求电流，电调原始口径。 */
+    int16_t trigger_I;                 /* 拨盘安全门后实际下发的电流。 */
 
-    uint32_t fault;    /* 故障位集合，见 SHOOTER_FAULT_*。 */
-    uint8_t safe_flag; /* 置位表示本周期必须输出零。 */
+    /*
+     * ⚠ 发射部分【按台】隔离：哪台离线/报错只清它自己的最终命令，互不牵连——
+     * 摩擦轮离线不停拨盘，拨盘离线也不停摩擦轮。离线那台必须清零：它的转速是旧值，
+     * 拿它算刹车就等于一个固定电流。
+     */
+    uint32_t fric_fault[APP_DJI_FRIC_COUNT]; /* 每台摩擦轮的故障位，见 SHOOTER_FAULT_*。 */
+    uint32_t trigger_fault;                  /* 拨盘的故障位。 */
+    uint32_t fault;    /* 上面几台的按位或，只作 Watch 总览，不参与清零。 */
+    uint8_t safe_flag; /* 置位表示发射部分整体输出零；现在只由 APP_GIMBAL_OUTPUT_ENABLE 决定。 */
     float dt;          /* 本周期实际时长，单位 s。 */
 } Shooter_t;
 

@@ -51,27 +51,57 @@ const Shooter_Config_t Shooter_Config = {
         .integralLimit = 0.0f,
         .outputLimit = 20.0f,
     },
+#if APP_TRIGGER_MOTOR == APP_TRIGGER_LK4005
+    /*
+     * 翎控速度环，【全部未经实机整定】。输出是 0xA1 的 iq 原始值（协议范围 ±2000）。
+     *
+     * 起步量级按"每 rad/s 误差给多少安"与下面 M2006 那组取同值（kp 3 A、ki 0.1 A），
+     * 再乘 APP_LK_IQ_PER_A 换成翎控计数——两台电机的减速比和转矩常数都不同，
+     * 这只是个不离谱的起点。integralLimit 同样按积分状态单位：I 项限到满量程一半。
+     */
+    .trigger_speed_pid = {
+        .kp = 3.0f * APP_LK_IQ_PER_A,
+        .ki = 0.1f * APP_LK_IQ_PER_A,
+        .kd = 0.0f, /* 与摩擦轮同理：没有可信的角加速度来源，退化成 PI。 */
+        .integralLimit = ((float)APP_LK_IQ_MAX / 2.0f) / (0.1f * APP_LK_IQ_PER_A),
+        .outputLimit = (float)APP_LK_IQ_MAX,
+    },
+    /*
+     * 拨盘力矩限幅默认 3 A，【未经实机整定】：MG40-50 手册里驱动板 DG40R/C7 额定 6 A、
+     * 峰值 8 A，先给额定的一半。⚠ "A"的真假取决于 APP_LK_IQ_PER_A，那个数还没核对。
+     */
+    .trigger_default_I_limit = 3.0f,
+#else
     /*
      * 速度环 kp 的量纲推算：误差约 3 rad/s 时给满量程电流 10000，故 kp ≈ 3000；
-     * ki 先给小值靠积分消静差。积分单独限到满量程一半，
-     * 防止起转那段长时间大误差把积分灌满。
+     * ki 先给小值靠积分消静差。
+     *
+     * ⚠ integralLimit 限的是【积分状态】（误差 × s，这里是 rad），不是电流：公共 PID 的
+     * I 项 = ki × 积分状态（PID.c）。要把 I 项限到满量程一半，就得是 5000 / ki = 50。
+     * 原来按电流口径填了 5000，实际允许 I 项到 50 万，等于没有限。
      */
     .trigger_speed_pid = {
         .kp = 3000.0f,
         .ki = 100.0f,
         .kd = 0.0f, /* 与摩擦轮同理：没有可信的角加速度来源，退化成 PI。 */
-        .integralLimit = (float)(APP_DJI_CURRENT_MAX / 2),
+        .integralLimit = (float)(APP_DJI_CURRENT_MAX / 2) / 100.0f,
         .outputLimit = (float)APP_DJI_CURRENT_MAX,
     },
     /*
+     * 拨盘力矩限幅默认 5 A，【未经实机整定】：M2006 在 C610 上最多 10 A，
+     * 先给一半。上机时逐步往下调到"故意卡弹时顶不碎弹丸"为止。
+     */
+    .trigger_default_I_limit = 5.0f,
+#endif
+    /*
      * 防卡弹阈值，【全部未经实机整定】。
      *
-     * jam_current 取满量程的 95%，与 RoboWalker 的 9.5 A / 10 A 同比例。
+     * 电流饱和取力矩限幅的 95%，与 RoboWalker 的 9.5 A / 10 A 同比例。
      * 两个时长直接取自 RoboWalker（crt_booster.h:89,91）。
      * 退弹角按【一发的 30%】给，与 RoboWalker 的 π/12 对 2π/7 同比例，
      * 好处是换拨叉改 APP_SHOOT_AMMO_PER_ROUND 时它自动跟着缩放。
      */
-    .jam_current = (float)APP_DJI_CURRENT_MAX * 0.95f,
+    .jam_current_ratio = 0.95f,
     .jam_confirm_s = 0.5f,
     .jam_back_s = 0.3f,
     .jam_back_rad = APP_SHOOT_RAD_PER_AMMO * 0.3f,

@@ -3,13 +3,16 @@
 #include "task_can.h"
 #include "device_motor_dji.h"
 #include "device_motor_dm.h"
+#include "device_motor_lk.h"
 
 /**
  * @brief 分发应用层 CAN 接收报文。
  *
  * 当前硬件映射：
  * FDCAN2 接三个摩擦轮 M2006（C610，电调 ID 1~3）；
- * FDCAN3 接云台 Yaw、Pitch 两台 DM4310，外加拨盘 M2006（电调 ID 4）和板间报文。
+ * FDCAN3 接云台 Yaw、Pitch 两台 DM4310、板间报文，外加拨盘——
+ * M2006（电调 ID 4）或翎控 MG4005E（0x141）二选一，见 app_config.h 的 APP_TRIGGER_MOTOR。
+ * 两个拨盘设备层都接上：没选中的那个在总线上收不到自己的帧，不会被误认领。
  *
  * 两个设备层各自比对总线和 ID，这里不做任何 ID 判断——总线归属只在设备层
  * 定义一次（Motor_DJI_BusOf / motor_dm_config_t.bus），分发层再判一遍就成了
@@ -29,6 +32,14 @@ void CAN_Task_RxMessageCallback(const task_can_rx_message_t *message)
         (Motor_DJI_UpdateFeedback(message->bus,
                                   message->identifier,
                                   message->data) != 0U))
+    {
+        return;
+    }
+
+    if ((message->length == APP_LK_FRAME_LEN) &&
+        (Motor_LK_UpdateFeedback(message->bus,
+                                 message->identifier,
+                                 message->data) != 0U))
     {
         return;
     }

@@ -8,17 +8,17 @@
  * ⚠ 两个工程各有一个同名的 device_board.h 内容不同，所以两个 .c 必须
  * 【分两次 gcc 调用】各带自己的 -I 编译成 .o 再链接，一次编译会选错头文件。
  *
- * 编译（需要三个桩头文件，见工作区 CLAUDE.md 的 Host tests 一节）：
- *   gcc -c -Wall -Wextra -I<stub> -IUser_File/1_Middleware/0_Common \
- *       -IUser_File/1_Middleware/2_Algorithm \
+ * 编译（在 Gimbal/Real/ 下执行；桩头文件在 Tests/stub，必须排在最前）：
+ *   gcc -c -Wall -Wextra -ITests/stub -IUser_File/5_Task \
+ *       -IUser_File/1_Middleware/0_Common -IUser_File/1_Middleware/2_Algorithm \
  *       -IUser_File/2_Device/Communication/Board \
  *       -o gimbal_board.o User_File/2_Device/Communication/Board/device_board.c
- *   gcc -c -Wall -Wextra -I<stub> \
+ *   gcc -c -Wall -Wextra -ITests/stub \
  *       -I../../Chassis/User_File/1_Middleware/0_Common \
  *       -I../../Chassis/User_File/2_Device/Communication/Board \
  *       -o chassis_board.o \
  *       ../../Chassis/User_File/2_Device/Communication/Board/device_board.c
- *   gcc -Wall -Wextra -I<stub> -IUser_File/1_Middleware/0_Common \
+ *   gcc -Wall -Wextra -ITests/stub -IUser_File/1_Middleware/0_Common \
  *       -o t Tests/test_board_protocol.c gimbal_board.o chassis_board.o -lm
  */
 #include "app_config.h"
