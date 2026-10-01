@@ -107,23 +107,31 @@ void Remote_Task_GetRemote(Remote_t *remote) { *remote = stubRemote; }
 
 /*
  * 拨盘电调口径，按型号独立写，不复用生产代码的换算宏：
- *   FULL_SCALE_RAW  拿来造"电流顶满"的卡弹
- *   RAW_PER_A       每安培的原始计数，力矩限幅的期望值用它算
- *   ENC_PER_ROUND / GEAR  只用来【生成】自洽的反馈帧（advanceTrigger），不当期望值
+ *   FULL_SCALE_RAW         拿来造"电流顶满"的卡弹
+ *   RAW_PER_A              每安培的原始计数，力矩限幅的期望值用它算
+ *   ENC_PER_ROUND          反馈帧里编码器字段的量程，只用来【生成】自洽的反馈帧
+ *   COUNTS_PER_OUTPUT_ROUND  输出轴转一圈，编码器字段走过的计数
  */
 #if APP_TRIGGER_MOTOR == APP_TRIGGER_LK4005
 /* 翎控 0xA1：iq 协议范围 ±2000；每安培按本机手册 ±2048 ↔ ±16.5 A（⚠ 未实机核对）。 */
 #define TRIGGER_FULL_SCALE_RAW ((int16_t)2000)
 #define TRIGGER_RAW_PER_A (2048.0f / 16.5f)
-#define TRIGGER_ENC_PER_ROUND APP_LK_ENCODER_PER_ROUND
-#define TRIGGER_GEAR APP_LK_TRIGGER_GEAR_RATIO
+/* 2026-09-30 实测：回复帧编码器在【输出端】，输出轴一圈回绕一次、最大值 65535。 */
+#define TRIGGER_ENC_PER_ROUND 65536
+#define TRIGGER_COUNTS_PER_OUTPUT_ROUND 65536
 #else
-/* C610：±10000 = ±10 A（手册 §CAN 通信协议）。 */
+/* C610：±10000 = ±10 A（手册 §CAN 通信协议）；编码器在转子上，减速箱 36:1。 */
 #define TRIGGER_FULL_SCALE_RAW ((int16_t)10000)
 #define TRIGGER_RAW_PER_A 1000.0f
-#define TRIGGER_ENC_PER_ROUND APP_DJI_ENCODER_PER_ROUND
-#define TRIGGER_GEAR APP_DJI_TRIGGER_GEAR_RATIO
+#define TRIGGER_ENC_PER_ROUND 8192
+#define TRIGGER_COUNTS_PER_OUTPUT_ROUND (8192 * 36)
 #endif
+
+/*
+ * 用例用的拨盘力矩限幅，A。trigger_default_I_limit 是实机上随时会调的值（上机第一步
+ * 就要临时改成 0），用例不能跟着它变，见 initShooter。
+ */
+#define TEST_TRIGGER_I_LIMIT_A 3.0f
 
 /** @brief 造一帧 C610 反馈并喂给设备层。 */
 static void feedDji(uint32_t rxId, app_can_bus_t bus, uint16_t encoder, int16_t rpm,
@@ -165,10 +173,16 @@ static void feedTrigger(uint16_t encoder, int16_t speedNative, int16_t current,
     assert(Motor_LK_UpdateFeedback(APP_CAN_BUS_FDCAN3, APP_LK_TRIGGER_ID, data) == 1U);
 }
 
-/** @brief 1 ms 内转过 counts 个电机端计数时的转速，dps。 */
+/**
+ * @brief 1 ms 内编码器走过 counts 个计数时，回复帧里的转速，dps。
+ *
+ * 2026-09-30 实测：编码器在【输出端】，转速却在【电机端】（输出轴约一圈每秒时
+ * speedDps 三千多），所以输出端的 dps 要再乘减速比 10。
+ */
 static int16_t speedFromCountsPerMs(int32_t counts)
 {
-    return (int16_t)((float)counts / (float)TRIGGER_ENC_PER_ROUND * 360000.0f);
+    return (int16_t)((float)counts / (float)TRIGGER_COUNTS_PER_OUTPUT_ROUND * 360000.0f *
+                     10.0f);
 }
 #else
 /** @brief 拨盘一帧反馈：C610，speedNative 是转子 rpm。 */
@@ -297,6 +311,20 @@ static void advanceTrigger(int32_t counts, float knobB)
         step(knobB);
         left -= d;
     }
+}
+
+/**
+ * @brief 初始化发射机构，并把拨盘力矩限幅换成用例自己给定的值。
+ *
+ * 先核对 Shooter_Init 确实把配置默认值载进了 trigger_I_limit（这是要测的行为），
+ * 再换成 TEST_TRIGGER_I_LIMIT_A——默认值本身是实机调参值，工作区里可能正临时改成 0，
+ * 用例跟着它走的话，调一次参单测就全红。
+ */
+static void initShooter(void)
+{
+    Shooter_Init();
+    assert(Shooter.trigger_I_limit == Shooter_Config.trigger_default_I_limit);
+    Shooter.trigger_I_limit = TEST_TRIGGER_I_LIMIT_A;
 }
 
 /** @brief 拨盘不使能区 / 使能区对应的 VrB 归一化值。 */
@@ -893,8 +921,7 @@ static void testTriggerFeedbackUnits(void)
 static void testShotCompletesWhenTriggerTurns(void)
 {
     int32_t countsPerAmmo =
-        (int32_t)((float)TRIGGER_ENC_PER_ROUND * TRIGGER_GEAR /
-                  (float)APP_SHOOT_AMMO_PER_ROUND);
+        (int32_t)((float)TRIGGER_COUNTS_PER_OUTPUT_ROUND / (float)APP_SHOOT_AMMO_PER_ROUND);
     float target;
 
     settleIdle();
@@ -995,8 +1022,8 @@ static void testFricOffBrakesWithPid(void)
     }
 }
 
-/** @brief 急停/离线后的共同断言：请求清零、两路都在刹、安全门不关。 */
-static void assertBraking(void)
+/** @brief 急停/离线后的共同断言：请求清零、摩擦轮在刹、拨盘最终电流为 0、安全门不关。 */
+static void assertStopped(void)
 {
     uint32_t i;
 
@@ -1008,21 +1035,24 @@ static void assertBraking(void)
     {
         assert(Shooter.I_req[i] < 0); /* 摩擦轮正转，刹车电流为负 */
     }
-    assert(Shooter.trigger_I_req < 0); /* 拨盘正转（与送弹方向无关），刹车电流为负 */
-    /* 门不能关：关了刹车电流就发不出去，只能滑停。 */
+    /* 门不能关：摩擦轮要靠它把刹车电流发出去，关了就只能滑停。 */
     assert(Shooter.safe_flag == 0U);
     if (fricGateOpen() != 0U)
     {
         assert(Shooter.I[MOTOR_DJI_FRIC_1] == Shooter.I_req[MOTOR_DJI_FRIC_1]);
     }
-    if (triggerGateOpen() != 0U)
-    {
-        assert(Shooter.trigger_I == Shooter.trigger_I_req);
-    }
+    /*
+     * 拨盘不刹车，最终电流直接为 0：翎控在 0xA1 转矩模式下会一直执行收到的最后一个 iq，
+     * 云台板一停发（烧录、死机），刹车电流就变成开环的固定电流把拨盘拖着转
+     * （2026-09-30 烧录时实机遇到拨盘疯转）。急停时发 0，最后一帧就是 0。
+     * 先断言刹车请求不为 0（拨盘正在转），下面那条"为 0"才不是请求本来就是 0 的空过。
+     */
+    assert(Shooter.trigger_I_req < 0);
+    assert(Shooter.trigger_I == 0);
 }
 
 /**
- * @brief 急停（SwC=UP）：VrB 还拧在拨弹区也不许打，摩擦轮和拨盘都走 PID 刹车。
+ * @brief 急停（SwC=UP）：VrB 还拧在拨弹区也不许打；摩擦轮走 PID 刹车，拨盘电流清零。
  *
  * 拦"发射机构不看 SwC"——改之前的代码就是这样，探针实测急停时四路照常全力输出
  * 5001/5001/5001/10000。遥控离线和急停必须同时停两部分，这是红线。
@@ -1036,11 +1066,11 @@ static void testEstopBrakesShooter(void)
     feedTrigger(0U, 3600, 0, MOTOR_DJI_ERR_NONE);
     stepRemoteDt(TICK_S);
 
-    assertBraking();
+    assertStopped();
 }
 
 /**
- * @brief 遥控离线：与急停同样刹车，判定看的是 online，不是碰巧回中的拨杆。
+ * @brief 遥控离线：与急停同样处理，判定看的是 online，不是碰巧回中的拨杆。
  *
  * 两种快照都要停：task_remote 实际给的全零快照，以及留着旧值、只有 online=0 的快照。
  * 后者拦"只看 SwC 不看 online"。
@@ -1053,14 +1083,14 @@ static void testRemoteOfflineBrakes(void)
     feedFric(3000);
     feedTrigger(0U, 3600, 0, MOTOR_DJI_ERR_NONE);
     stepRemoteDt(TICK_S);
-    assertBraking();
+    assertStopped();
 
     spinUp();
     memset(&stubRemote, 0, sizeof(stubRemote));
     feedFric(3000);
     feedTrigger(0U, 3600, 0, MOTOR_DJI_ERR_NONE);
     stepRemoteDt(TICK_S);
-    assertBraking();
+    assertStopped();
 }
 
 /**
@@ -1123,10 +1153,8 @@ static void testOfflineMotorNotBraked(void)
     assert(Shooter.I[MOTOR_DJI_FRIC_2] == 0);
     assert(Shooter.I[MOTOR_DJI_FRIC_1] < 0);
     assert(Shooter.I[MOTOR_DJI_FRIC_3] < 0);
-    if (triggerGateOpen() != 0U)
-    {
-        assert(Shooter.trigger_I < 0);
-    }
+    /* 急停时拨盘不刹，最终电流为 0。 */
+    assert(Shooter.trigger_I == 0);
 }
 
 /* ---- 发射部分按台隔离：哪台离线/报错只停哪台，互不牵连 ---- */
@@ -1292,12 +1320,15 @@ static void testTriggerTorqueLimit(void)
     step(KNOB_FIRE);
     assert(Shooter.trigger_I_req == (int16_t)(1.0f * TRIGGER_RAW_PER_A * APP_SHOOT_TRIGGER_DIR));
 
-    /* 急停时拨盘高速正转：刹车电流同样只到 1 A。 */
-    remoteEstop(KNOB_OFF);
+    /*
+     * 松开 VrB 后拨盘还在高速正转：待发态的刹车电流同样只到 1 A，而且照发。
+     * （急停时拨盘不刹、直接清零，所以这条用正常待发来测。）
+     */
     feedFricHealthy();
     feedTrigger(0U, 3600, 0, MOTOR_DJI_ERR_NONE);
-    stepRemoteDt(TICK_S);
+    step(KNOB_OFF);
     assert(Shooter.trigger_I_req == (int16_t)(-1.0f * TRIGGER_RAW_PER_A));
+    assert(Shooter.trigger_I == Shooter.trigger_I_req);
 
     Shooter.trigger_I_limit = saved;
 }
@@ -1379,7 +1410,7 @@ static void testLockedAtPowerUp(void)
 {
     float before;
 
-    Shooter_Init();
+    initShooter();
 
     feedAllHealthy(0U);
     step(KNOB_FIRE);
@@ -1432,7 +1463,7 @@ int main(void)
     assert(Shooter_Config.output.fric_flag == TEST_FRIC_FLAG);
     assert(Shooter_Config.output.trigger_flag == TEST_TRIGGER_FLAG);
 
-    Shooter_Init();
+    initShooter();
 
     testSingleShotOnRisingEdge();
     testHoldBelowDelayStaysOneShot();

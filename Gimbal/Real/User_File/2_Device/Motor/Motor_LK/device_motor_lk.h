@@ -18,12 +18,12 @@ extern "C" {
  */
 typedef struct
 {
-    uint16_t encoderRaw;     /* 回复帧编码器值，0..APP_LK_ENCODER_PER_ROUND-1。 */
+    uint16_t encoderRaw;     /* 回复帧编码器值，0..APP_LK_ENCODER_PER_ROUND-1，【输出端】（实测）。 */
     uint16_t lastEncoderRaw; /* 上一次编码器值，用于判断本帧是否跨过回绕点。 */
-    int32_t totalRound;      /* 编码器累计整圈数，带符号。 */
+    int32_t totalRound;      /* 编码器累计整圈数，带符号；即输出轴整圈数。 */
     int32_t totalEncoder;    /* 编码器累计计数 = totalRound × APP_LK_ENCODER_PER_ROUND + encoderRaw。 */
-    float angle;             /* 【输出轴】累计角，rad。已除减速比、乘编码器方向，上电清零。 */
-    int16_t speedDps;        /* 转速，度/秒，【电机端】口径（手册：输出轴要除减速比）。 */
+    float angle;             /* 【输出轴】累计角，rad。已乘编码器方向，【不除】减速比，上电清零。 */
+    int16_t speedDps;        /* 转速，度/秒，【电机端】口径（实测）——输出轴要除减速比。 */
     int16_t currentRaw;      /* 反馈转矩电流 iq 原始值，口径见 APP_LK_IQ_PER_A。 */
     int8_t temperature;      /* 电机温度，℃。 */
     uint32_t feedbackCount;  /* 有效反馈帧累计数量。 */

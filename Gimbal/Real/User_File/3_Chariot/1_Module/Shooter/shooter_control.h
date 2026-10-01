@@ -79,8 +79,8 @@ typedef struct
     /*
      * 急停（SwC 在 UP 或 UNKNOWN）或遥控离线：两部分都要停，这是红线。
      * 判据与 gimbal_control.c 的 Gimbal_State_Update 同源。
-     * ⚠ 发射部分的"停"是 PID 刹车，【不关】安全门——关了门刹车电流就发不出去；
-     * 真正清零只看 fault。
+     * ⚠ 发射部分怎么停：摩擦轮 PID 刹车（【不关】安全门，关了刹车电流就发不出去）；
+     * 拨盘最终电流直接清零，不刹——理由见 Shooter_Command_Send。
      */
     uint8_t stop_flag;
     /*

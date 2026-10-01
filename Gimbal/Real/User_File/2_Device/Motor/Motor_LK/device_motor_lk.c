@@ -53,10 +53,12 @@ uint8_t Motor_LK_UpdateFeedback(app_can_bus_t bus,
     }
     lkMotor.totalEncoder = (lkMotor.totalRound * APP_LK_ENCODER_PER_ROUND) +
                            (int32_t)lkMotor.encoderRaw;
-    /* 累计计数 -> 输出轴弧度：除减速比、乘编码器方向，两个都还没实机核对，见 app_config.h。 */
+    /*
+     * 累计计数 -> 输出轴弧度。⚠ 回复帧的编码器在【输出端】（2026-09-30 实测：输出轴转一圈，
+     * encoderRaw 只回绕一次），所以【不除】减速比；减速比只用在电机端的转速上。
+     */
     lkMotor.angle = (float)lkMotor.totalEncoder * (2.0f * APP_PI_F) /
-                    ((float)APP_LK_ENCODER_PER_ROUND * APP_LK_TRIGGER_GEAR_RATIO) *
-                    APP_LK_ENCODER_DIR;
+                    (float)APP_LK_ENCODER_PER_ROUND * APP_LK_ENCODER_DIR;
 
     lkMotor.feedbackCount++;
     lkMotor.lastUpdateTick = HAL_GetTick();

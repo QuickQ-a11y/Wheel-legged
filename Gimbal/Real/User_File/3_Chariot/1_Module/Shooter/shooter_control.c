@@ -367,7 +367,8 @@ void Shooter_Control(void)
     {
         /*
          * 急停或遥控离线：两层状态机复位——退弹也不许再动，拨盘回待发。
-         * 待发态的串级环就是"目标角 = 当前角、积分逐拍清"的纯速度刹车。
+         * 待发态的串级环照算（请求供 Watch 观察），但拨盘的最终电流在
+         * Shooter_Command_Send 里清零，理由见那里。
          */
         Shooter_JamSetState(SHOOTER_JAM_NORMAL);
         Shooter_Trigger_EnterIdle();
@@ -455,9 +456,16 @@ void Shooter_Command_Send(void)
                 : 0;
         Motor_DJI_SetCommand((motor_dji_index_t)index, Shooter.I[index]);
     }
+    /*
+     * ⚠ 拨盘在急停/遥控离线时【不刹车】，最终电流直接清零（摩擦轮仍走 PID 刹车）。
+     * 翎控在 0xA1 转矩模式下会一直执行收到的最后一个 iq：云台板一停发（烧录时单片机被
+     * 停住、死机），那一帧刹车电流就成了开环的固定电流，把拨盘拖着转——2026-09-30 烧录时
+     * 实机遇到拨盘疯转。急停时发 0，先打急停再烧录，最后一帧就是 0。
+     * 这只管得了"急停后停发"这一种情况，真正的兜底是电机上位机里的 Lose Input Protection。
+     */
     Shooter.trigger_I =
         ((Shooter.safe_flag == 0U) && (Shooter_Config.output.trigger_flag != 0U) &&
-         (Shooter.trigger_fault == SHOOTER_FAULT_NONE))
+         (Shooter.trigger_fault == SHOOTER_FAULT_NONE) && (Shooter.stop_flag == 0U))
             ? Shooter.trigger_I_req
             : 0;
 

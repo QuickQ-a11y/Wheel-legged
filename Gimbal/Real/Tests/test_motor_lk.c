@@ -208,15 +208,18 @@ static void testEncoderWrapBothWays(void)
 }
 
 /**
- * @brief 【输出轴】角：电机端转满 减速比 圈 = 输出轴一圈 = 2π，方向跟 APP_LK_ENCODER_DIR。
+ * @brief 【输出轴】角：回复帧编码器在【输出端】，走满 65536 个计数 = 输出轴一圈 = 2π。
  *
- * 期望值 2π 是手写的字面量，不是拿驱动里的公式算的。
- * 拦三种错：漏除减速比（差 10 倍）、用错每圈计数（照抄 DJI 的 8192）、漏乘方向。
+ * 2026-09-30 实测：手转输出轴一整圈，encoderRaw 只回绕一次、最大值 65535——
+ * 4005E 是双编码器，0xA1 回复里的是输出端那个。所以 65536 和 2π 都是手写的实测字面量，
+ * 不拿驱动里的常量和公式来算。
+ * 拦三种错：又除了一次减速比（差 10 倍，第一版就是这样写的）、用错每圈计数
+ * （照抄协议 V2.3 的 14 bit 或 DJI 的 8192）、漏乘方向。
  */
 static void testOutputShaftAngle(void)
 {
-    const int32_t perStep = APP_LK_ENCODER_PER_ROUND / 4; /* 远小于半圈，不会被当成反转 */
-    int32_t total = (int32_t)((float)APP_LK_ENCODER_PER_ROUND * APP_LK_TRIGGER_GEAR_RATIO);
+    const int32_t perStep = 65536 / 4; /* 远小于半圈，不会被当成反转 */
+    int32_t total = 65536;             /* 实测：输出轴一圈 */
     motor_lk_state_t s;
     float angleStart;
     int32_t enc;
@@ -231,7 +234,7 @@ static void testOutputShaftAngle(void)
     {
         int32_t d = (total > perStep) ? perStep : total;
 
-        enc = (enc + d) % APP_LK_ENCODER_PER_ROUND;
+        enc = (enc + d) % 65536;
         assert(feed((uint16_t)enc) == 1U);
         total -= d;
     }
