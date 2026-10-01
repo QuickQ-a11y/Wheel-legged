@@ -140,7 +140,7 @@ FDCAN3 上有 DM 电机和底盘板会 ACK，没有这个风险，但仍留开�
 3. ✓ 已完成（2026-09-30）：限幅 0.5 A、不装弹、空打单发，转一个槽位、方向正确；
    命令与读回电流一致。绝对安培数只能靠厂家确认或外部测量，还没做。
 4. 逐步调低 `Shooter.trigger_I_limit`，直到故意卡弹时不再搅碎弹丸；确认此时仍会
-   进入 SUSPECT → BACKING。
+   进入 SUSPECT → BACKING，而且 BACKING 时 `trigger_omega` 反号——拨盘真的退回去了。
 5. 急停：摩擦轮转起来后打 SwC=UP，摩擦轮应刹停（不滑行、不反转），拨盘 `trigger_I` 应为 0；
    关遥控重复一遍。**烧录前先打急停**，最后一帧才是 0。
 
@@ -181,7 +181,7 @@ FDCAN3 上有 DM 电机和底盘板会 ACK，没有这个风险，但仍留开�
 - VrB 回下半程（正常关摩擦轮）也走同一条刹车路径。参考 RoboWalker `crt_booster.cpp:187`、
   湖南大学 `shoot_task.c:158`，都是"关摩擦轮 = 速度目标置 0"。RoboWalker 在 `:183`
   清的是 `PID_Angle` 的积分而不是 `PID_Omega`，别照抄。
-- 急停期间卡弹状态机强制回 NORMAL、拨弹回 IDLE：BACKING 的退弹也不许再动。
+- 急停期间卡弹状态机强制回 NORMAL、拨弹回 IDLE：BACKING 的回拨也不许再动，在途那一发直接放弃。
 - **上膛锁** `Shooter.trigger_lock`：急停/离线期间置 1，解除后 VrB 必须先退出拨弹区才清 0，
   **上电即为 1**。防止一松急停就开火——那时摩擦轮刚从 0 起转，立刻拨弹还容易卡弹。只锁拨盘。
 - 这一版之前，发射部分**完全不看**遥控在线和 SwC：急停时四路照常全力输出，只是被
@@ -218,24 +218,53 @@ FDCAN3 上有 DM 电机和底盘板会 ACK，没有这个风险，但仍留开�
 ### 拨盘：两层正交状态机 + 串级环
 
 VrB 已接进控制：过中位开摩擦轮，进末端 2% 使能区拨弹。语义见
-`app_config.h` 的 `APP_SHOOT_BURST_*` 注释块，**别重新设计**。
+`app_config.h` 的 `APP_SHOOT_BURST_*` 注释块，**别重新设计**
+（2026-10-01 用户定：松开 VrB 不再放弃在途那一发，见下面的 FINISH）。
 
-- **拨弹 FSM**：`IDLE -> HOLD -> BURST`。"那一发"发生在 `IDLE -> HOLD` 的**转移**上，
+- **拨弹 FSM**：`IDLE -> HOLD -> BURST`，松开后 `-> FINISH -> IDLE`。"那一发"发生在
+  `IDLE -> HOLD`（收尾中再进使能区则是 `FINISH -> HOLD`）的**转移**上，
   所以"一次进使能区 = 一发"天然成立，不需要在遥控层做边沿检测。
 - **防卡弹 FSM**：`NORMAL -> SUSPECT -> BACKING -> (NORMAL | GIVEUP)`。
-  判据是**电调堵转码 `MOTOR_DJI_ERR_STALL` 或 电流饱和**，取或。
+  判据是**电调堵转码 `MOTOR_DJI_ERR_STALL` 或 电流饱和**，取或（同 RoboWalker，它也是 C610 + M2006）。
+  确认后**回拨**：从**反馈角**往回退 `jam_back_rad`，到位或 `jam_back_s` 超时就结束，
+  目标回到**被卡的那一发**重打——做法取自上交 rm_controllers 的 `block()` + `normalize()`。
+  各家判据与回拨写法的对比、出处行号见 `Codex文档/拨盘卡弹方案对比.md`。
 
 ⚠ **两层是正交的，靠 `Shooter_Control` 里那一个 `if`**：只有 `NORMAL`/`SUSPECT`
-才跑拨弹逻辑，`BACKING`/`GIVEUP` 期间整个旁路——否则退弹的目标角会被下一轮加发覆盖。
+才跑拨弹逻辑，`BACKING`/`GIVEUP` 期间整个旁路——否则回拨的目标角会被下一轮加发覆盖。
 这是从 RoboWalker `crt_booster.cpp:155` 抄来的，删掉它单测会红。
+
+⚠⚠ **回拨的基准必须是反馈角，不能从目标角往回减。** 目标从上一次目标累加，卡住时远在反馈前面
+（连发时还会越攒越多），减完仍在前面，拨盘照样往前顶——改之前就是这样，探针实测三次 BACKING
+全程 +8 A 往前顶、一次都没反转。退完回到哪：`Shooter_Trigger_InFlightTarget()` 从当前目标往回扣整发数，
+扣到刚好还在反馈角前面，就是被卡的那一发（记在 `trigger_resume_target`）；它后面攒的积压扔掉，
+不然脱困后会按 outputLimit 一口气补打出去。
+
+⚠ **SUSPECT 期间连发节拍跳过、不补**：卡弹在确认之前自己松开时，不会把这段时间攒的发补打出去。
+
+⚠ **松开 VrB 走 `FINISH`，不是直接回 `IDLE`**：不再加发，在途那一发打完（到 `trigger_arrive_rad` 以内）
+才回待发，后面攒的积压扔掉。直接回 `IDLE` 会把目标拉回反馈角，单发途中松开时拨盘停在槽位中间
+（探针：按 30 ms 就松开只转了 0.6 发）。**急停/离线和 GIVEUP 解除才"立刻放弃"**，直接回 `IDLE`。
 
 ⚠ **`GIVEUP` 故意不置 fault 位。** 它只把拨盘的请求电流压成 0，摩擦轮照转——
 脱困后要能立刻接着打。放弃这件事由
-`Shooter.jam_state` 本身表示，不另存一份。
+`Shooter.jam_state` 本身表示，不另存一份。松开 VrB 解除时**被卡的那一发一起放弃**：
+否则 FINISH 会立刻顶回那颗卡死的弹，判卡弹、回拨、GIVEUP 没完没了。
+`jam_retry` 是**连续**回拨次数，重打的那一发打完就清零——一次长连发里卡三次、每次都解决了，不该进 GIVEUP。
 
 ⚠ **目标角从"上一次目标"累加，不是从当前反馈角累加。** 参考实现
 （RoboWalker `crt_booster.cpp:217` 的 `Get_Now_Angle() + 2π/7`）是后者，
 上一发没转到位时新目标基于半途角，这一发就短一截。`test_shooter` 专门钉死了这条。
+松开再按也一样：收尾到容差以内就回待发、待发态目标跟随反馈，拨盘停在终点前一点；下一发
+从上一发终点 `trigger_last_target` 累加，否则每松开一次丢一截相位。急停/放弃过就从当前角起。
+
+⚠ `trigger_arrive_rad`（到位容差）一个数管五处：数在途那一发、回拨到没到位、重打完没完、
+收尾到没到位、下一发从不从上一发终点起。**`jam_back_rad` 要明显大于它**，否则一进回拨就算到位。
+
+调卡弹时看的 Watch：`jam_state`（0 NORMAL / 1 SUSPECT / 2 BACKING / 3 GIVEUP）、`jam_retry`、
+`trigger_state`（0 IDLE / 1 HOLD / 2 BURST / 3 FINISH）、`trigger_target`、`trigger_resume_target`、
+`trigger_last_target`、`trigger_angle`、`trigger_omega`、`trigger_I_req`、`trigger_I`、
+`trigger_motor.errorCode`、`trigger_motor.currentRaw`。
 
 ⚠⚠ **模块内有两套口径，这是有意的：**
 
@@ -270,9 +299,6 @@ VrB 已接进控制：过中位开摩擦轮，进末端 2% 使能区拨弹。语
 
 - **摩擦轮速度环的 `integralLimit` 还是按电流口径填的 5000**，I 项上限只有
   0.02 × 5000 = 100（满量程 1%），会有明显的稳态转速差。
-- **退弹不会真的反转拨盘**：退弹是 `trigger_target -= jam_back_rad`，而目标角是从上一次目标
-  累加的，卡住时远在反馈角前面，退 0.3 发之后仍在前面，拨盘还是往前顶。
-  `testJamByErrorCodeBacksOff` 只断言了目标角变小。
 - FDCAN3 在不重发模式下，仲裁输掉的帧直接丢（RM0468 的 DAR 一节）。拨盘命令
   0x200 / 0x141 的优先级低于 DM 反馈 0x011/0x012，可能被挤掉一部分。**推断，未实机验证。**
 
@@ -284,6 +310,9 @@ VrB 已接进控制：过中位开摩擦轮，进末端 2% 使能区拨弹。语
 
 - ✓ 2026-09-30 **翎控拨盘**第一次上实机：反馈、标度、不装弹空打单发都核对过，
   `APP_SHOOT_AMMO_PER_ROUND` = 8、翎控下 `APP_SHOOT_TRIGGER_DIR` = +1 已确认（见翎控一节）。
+- 2026-10-01 卡弹自动回拨（从反馈角退、回去重打那一发）、松开收尾、SUSPECT 跳拍落地，
+  主机单测 + 变异检查覆盖。⚠ **未经实机测试**；C610 进了堵转之后还听不听反向命令、
+  `jam_back_rad` 退多少够，都要上机定。
 - ⚠ 还没做的：连发、卡弹与力矩限幅整定、装弹实打、急停刹车实测；
   **摩擦轮一次都没上过实机**；`Shooter_Config` 里的两组 PID 和四个卡弹阈值仍是占位值。
 
@@ -485,6 +514,10 @@ Watch 表达式要跟着改。
 
 ### 主机单测配方
 
+**下面的配方已固化在 `Tests/run_host_tests.sh`**：在 `Gimbal/Real/` 下 `./Tests/run_host_tests.sh` 跑全部 17 遍，
+带参数只跑名字里含它的（如 `shooter`）。先删旧二进制、先查 gcc 退出码、编译出警告也算失败。
+改了测试的链接关系就同步改脚本；下面的表和说明是脚本的依据，别只改一边。
+
 在 `Gimbal/Real/` 下执行。**桩头文件已收进仓库 `Tests/stub/`**（`stm32h7xx_hal.h` / `fdcan.h` /
 `spi.h`，顶替 CubeMX 生成的那几个），必须排在 include 路径**最前面**。`task_can.h`、
 `task_imu.h`、`task_remote.h` 用真的（`-IUser_File/5_Task`）——有这三个桩垫底，它们在主机上
@@ -571,5 +604,6 @@ Both need `-ITests/stub` first; the gimbal half also needs `-IUser_File/5_Task` 
 
 ## 板专属文档
 
-`Codex文档/` 目前为空，留给将来的云台专属文档。
+`Codex文档/` 放云台专属文档：
+- `拨盘卡弹方案对比.md` —— DJI 官方、上交、RoboWalker、湖南大学、SPR 的卡弹判据与回拨写法对比，带出处行号（2026-10-01）。
 共享文档和交接流在仓库根 `../Codex文档/`。

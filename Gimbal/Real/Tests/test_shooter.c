@@ -222,15 +222,16 @@ static void feedAllHealthy(uint16_t triggerEncoder)
 }
 
 /**
- * @brief 拨盘卡住：电流顶满、不转，摩擦轮健康。
+ * @brief 拨盘卡住：停在【当前位置】不动、电流顶满，摩擦轮健康。
  *
  * 用"电流饱和"这条判据造卡弹，与电机型号无关；堵转码那条只有 C610 有，
  * 在 testJamByErrorCodeBacksOff 里单独测。
+ * 编码器沿用上一帧的值：先 advanceTrigger 转进一发再卡，卡住的位置才是转进去的那里。
  */
 static void feedTriggerJam(void)
 {
     feedFricHealthy();
-    feedTrigger(0U, 0, TRIGGER_FULL_SCALE_RAW, MOTOR_DJI_ERR_NONE);
+    feedTrigger(Shooter.trigger_motor.encoderRaw, 0, TRIGGER_FULL_SCALE_RAW, MOTOR_DJI_ERR_NONE);
 }
 
 /** @brief 遥控在线、SwC 在中位（运行），VrB 给定。 */
@@ -339,10 +340,15 @@ static void settleIdle(void)
     uint32_t i;
 
     /*
-     * ⚠ 要跑够久：上一条用例可能把卡弹机停在 BACKING，而退弹本身要
-     * jam_back_s（300 ms）才结束。只跑几拍的话下一条用例会从"还在退弹"
-     * 的状态开始，而拨弹逻辑那时是被旁路的。
+     * 先打一拍急停：两层状态机一起复位，退弹、在途那一发统统放弃。
+     * ⚠ 不能只靠松开 VrB：松开之后在途那一发要打完才回待发，而用例里的拨盘
+     * 多半纹丝不动、永远打不完。急停是唯一"立刻放弃"的路径，实机上也一样。
      */
+    remoteEstop(KNOB_OFF);
+    feedAllHealthy(0U);
+    stepRemoteDt(TICK_S);
+
+    /* 再松开急停、退出拨弹区，解开上膛锁。 */
     for (i = 0U; i < 2000U; i++)
     {
         feedAllHealthy(0U);
@@ -356,6 +362,76 @@ static void settleIdle(void)
     assert(Shooter.trigger_state == SHOOTER_TRIGGER_IDLE);
     assert(Shooter.jam_state == SHOOTER_JAM_NORMAL);
     assert(Shooter.jam_retry == 0U);
+}
+
+/** @brief 一发对应的拨盘编码器计数。 */
+static int32_t countsPerAmmo(void)
+{
+    return (int32_t)((float)TRIGGER_COUNTS_PER_OUTPUT_ROUND / (float)APP_SHOOT_AMMO_PER_ROUND);
+}
+
+/** @brief 输出轴弧度 -> 拨盘编码器计数（带符号）。 */
+static int32_t countsOfRad(float rad)
+{
+    return (int32_t)(rad / (2.0f * APP_PI_F) * (float)TRIGGER_COUNTS_PER_OUTPUT_ROUND);
+}
+
+/** @brief 连发攒积压：拨盘不动、电流为零（不会判卡弹），按住到至少过 3 个连发节拍。 */
+static void holdBurstWithoutMoving(void)
+{
+    uint32_t i;
+
+    for (i = 0U; i < APP_SHOOT_BURST_DELAY_MS + (3000U / APP_SHOOT_BURST_HZ) + 10U; i++)
+    {
+        feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+        step(KNOB_FIRE);
+    }
+}
+
+/** @brief 一直卡着、VrB 停在 knobB，跑到卡弹机进入（或离开）指定状态为止。 */
+static void jamUntil(shooter_jam_state_t state, uint8_t entering, float knobB)
+{
+    uint32_t i;
+
+    for (i = 0U; i < 5000U; i++)
+    {
+        if ((Shooter.jam_state == state) == (entering != 0U))
+        {
+            return;
+        }
+        feedTriggerJam();
+        step(knobB);
+    }
+    assert(0); /* 5 s 都没等到，状态机卡住了 */
+}
+
+/**
+ * @brief 回拨中拨盘真的往回退：每拍走一点，走满 jam_back_rad 就停在那里，直到回拨结束。
+ *
+ * 每轮循环正好一拍，返回回拨持续了几拍（ms）。
+ */
+static uint32_t reverseUntilBackingEnds(void)
+{
+    int32_t backCounts = countsOfRad(Shooter_Config.jam_back_rad);
+    uint32_t backingMs = 0U;
+
+    while ((Shooter.jam_state == SHOOTER_JAM_BACKING) && (backingMs < 2000U))
+    {
+        if (backCounts > 0)
+        {
+            int32_t d = (backCounts > 500) ? 500 : backCounts;
+
+            advanceTrigger(-(int32_t)((float)d * APP_SHOOT_TRIGGER_DIR), KNOB_FIRE);
+            backCounts -= d;
+        }
+        else
+        {
+            feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+            step(KNOB_FIRE);
+        }
+        backingMs++;
+    }
+    return backingMs;
 }
 
 /* ---- 用例 ---- */
@@ -439,27 +515,74 @@ static void testBurstAfterDelay(void)
 }
 
 /**
- * @brief 退出使能区：目标角拉回当前角，计时复位。
+ * @brief 单发途中松开 VrB：在途的那一发照样打完，转到位才回待发（目标跟随反馈）。
+ *
+ * 拦"松开即放弃"——改之前就是这样：目标立刻拉回反馈角，拨盘停在槽位中间、弹推到一半，
+ * 之后每一发都带着这截相位差（探针 E：按 30 ms 就松开，这一发只转了 0.60 发）。
+ * 松开只是不再加新的一发；RoboWalker、DJI 的单发都是设完目标就不管按键。
  */
-static void testReleaseResetsTarget(void)
+static void testReleaseFinishesInFlightShot(void)
 {
-    uint32_t i;
+    float start;
+    float shotEnd;
 
     settleIdle();
+    start = Shooter.trigger_angle;
+    shotEnd = start + APP_SHOOT_RAD_PER_AMMO * APP_SHOOT_TRIGGER_DIR;
 
-    for (i = 0U; i < 100U; i++)
-    {
-        feedAllHealthy(0U);
-        step(KNOB_FIRE);
-    }
-    /* 拨盘一动不动，此时目标角已经明显领先反馈角。 */
-    assert(fabsf(Shooter.trigger_target - Shooter.trigger_angle) > EPS);
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+    step(KNOB_FIRE);
+    advanceTrigger((int32_t)(0.3f * (float)countsPerAmmo() * APP_SHOOT_TRIGGER_DIR), KNOB_FIRE);
 
-    feedAllHealthy(0U);
+    /* 转了 30% 就松开：目标还是这一发的终点，拨盘还在往前推。 */
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
     step(KNOB_OFF);
+    assert(Shooter.trigger_state == SHOOTER_TRIGGER_FINISH);
+    assert(fabsf(Shooter.trigger_target - shotEnd) < EPS);
+    assert((float)Shooter.trigger_I_req * APP_SHOOT_TRIGGER_DIR > 0.0f);
 
+    /* 转完剩下的：到位回待发。 */
+    advanceTrigger(countsOfRad(shotEnd - Shooter.trigger_angle), KNOB_OFF);
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+    step(KNOB_OFF);
     assert(Shooter.trigger_state == SHOOTER_TRIGGER_IDLE);
     assert(fabsf(Shooter.trigger_target - Shooter.trigger_angle) < EPS);
+}
+
+/**
+ * @brief 收尾停在终点前一点（容差以内）回了待发，下一发仍从【上一发的终点】累加。
+ *
+ * 拦"待发后从反馈角起算"：收尾到容差以内就回待发，待发态目标跟随反馈，拨盘停在终点前一点；
+ * 下一发要是从这里起算，每松开一次就丢一截相位，一发发漂出去。连发时目标从上一次目标累加，
+ * 不会漂；松开再按也不该漂。
+ */
+static void testNextShotFromLastTarget(void)
+{
+    float start;
+    float shotEnd;
+
+    settleIdle();
+    start = Shooter.trigger_angle;
+    shotEnd = start + APP_SHOOT_RAD_PER_AMMO * APP_SHOOT_TRIGGER_DIR;
+
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+    step(KNOB_FIRE);
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+    step(KNOB_OFF);
+    assert(Shooter.trigger_state == SHOOTER_TRIGGER_FINISH);
+
+    /* 停在终点前半个容差：收尾算完成，回待发。 */
+    advanceTrigger(countsOfRad(shotEnd - Shooter.trigger_angle -
+                               0.5f * Shooter_Config.trigger_arrive_rad * APP_SHOOT_TRIGGER_DIR),
+                   KNOB_OFF);
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+    step(KNOB_OFF);
+    assert(Shooter.trigger_state == SHOOTER_TRIGGER_IDLE);
+
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+    step(KNOB_FIRE);
+    assert(fabsf(Shooter.trigger_target -
+                 (start + 2.0f * APP_SHOOT_RAD_PER_AMMO * APP_SHOOT_TRIGGER_DIR)) < EPS);
 }
 
 /**
@@ -469,8 +592,10 @@ static void testReenterStartsFromSingle(void)
 {
     uint32_t i;
     float before;
+    float start;
 
     settleIdle();
+    start = Shooter.trigger_angle;
 
     for (i = 0U; i < APP_SHOOT_BURST_DELAY_MS + 200U; i++)
     {
@@ -479,9 +604,15 @@ static void testReenterStartsFromSingle(void)
     }
     assert(Shooter.trigger_state == SHOOTER_TRIGGER_BURST);
 
+    /*
+     * 松开：只留在途的那一发，后面攒的扔掉——拨盘一动没动，在途的就是第一发（终点 start + 1 发）。
+     * 拦"松开把积压也打完"：连发跟不上时松开，还会把一串发补打出去。
+     */
     feedAllHealthy(0U);
     step(KNOB_OFF);
-    assert(Shooter.trigger_state == SHOOTER_TRIGGER_IDLE);
+    assert(Shooter.trigger_state == SHOOTER_TRIGGER_FINISH);
+    assert(fabsf(Shooter.trigger_target - (start + APP_SHOOT_RAD_PER_AMMO * APP_SHOOT_TRIGGER_DIR)) <
+           EPS);
 
     before = Shooter.trigger_target;
     feedAllHealthy(0U);
@@ -527,7 +658,10 @@ static void testTargetAccumulatesFromTargetNotFeedback(void)
 
 #if APP_TRIGGER_MOTOR == APP_TRIGGER_M2006
 /**
- * @brief 堵转码持续到确认时长后退弹：目标角回退 jam_back_rad。
+ * @brief 堵转码持续到确认时长后回拨：从反馈角往回退 jam_back_rad，电流朝退弹方向。
+ *
+ * 反馈电流故意给 0——C610 进了堵转、关了输出就是这样：电流判据失效，只剩堵转码，
+ * 照样要判出来、照样发反向命令（电调听不听要实机测）。
  *
  * 堵转码是 C610 独有的判据（反馈 data[7]），电流饱和那条另测。
  * 翎控的 0xA1 回复里没有错误码，这条只在 M2006 下跑。
@@ -536,7 +670,6 @@ static void testJamByErrorCodeBacksOff(void)
 {
     uint32_t i;
     uint32_t confirmMs;
-    float targetBeforeJam;
 
     settleIdle();
     confirmMs = (uint32_t)(Shooter_Config.jam_confirm_s * 1000.0f);
@@ -553,11 +686,6 @@ static void testJamByErrorCodeBacksOff(void)
     }
     assert(Shooter.jam_state == SHOOTER_JAM_SUSPECT);
 
-    /*
-     * 基准取在【即将确认】的这一拍，而不是卡弹之前——拨弹状态机此时仍在跑，
-     * 拿更早的值当基准会把连发加的发数一起算进来。
-     */
-    targetBeforeJam = Shooter.trigger_target;
     for (i = 0U; i < 5U; i++)
     {
         feedFricHealthy();
@@ -566,12 +694,10 @@ static void testJamByErrorCodeBacksOff(void)
     }
 
     assert(Shooter.jam_state == SHOOTER_JAM_BACKING);
-    /*
-     * 判"沿送弹方向往回退了"，不是判数值变小——APP_SHOOT_TRIGGER_DIR 翻成 -1 时
-     * 退弹会让 trigger_target 变大。乘上 DIR 换成方向无关的说法。
-     */
-    assert(((targetBeforeJam - Shooter.trigger_target) * APP_SHOOT_TRIGGER_DIR) >
-           (Shooter_Config.jam_back_rad * 0.5f));
+    /* 方向都乘了 DIR：判"沿送弹方向在反馈角后面"，DIR 翻成 -1 时同样成立。 */
+    assert(fabsf((Shooter.trigger_target - Shooter.trigger_angle) * APP_SHOOT_TRIGGER_DIR +
+                 Shooter_Config.jam_back_rad) < EPS);
+    assert((float)Shooter.trigger_I_req * APP_SHOOT_TRIGGER_DIR < 0.0f);
 }
 #endif
 
@@ -597,6 +723,199 @@ static void testJamByCurrentSaturationAlone(void)
 
     assert(Shooter.jam_state != SHOOTER_JAM_NORMAL);
     assert(Shooter.jam_state != SHOOTER_JAM_SUSPECT);
+}
+
+/**
+ * @brief 确认卡弹后拨盘【真的反转】：回拨目标正好在反馈角后面 jam_back_rad，请求电流朝退弹方向。
+ *
+ * 拦"从累加目标往回减"——改之前就是这样：卡住时目标领先反馈一整发，退 0.3 发之后
+ * 仍在前面，拨盘照样往前顶（探针实测三次 BACKING 全程 +8 A）。回拨的基准必须是
+ * 反馈角，RoboWalker crt_booster.cpp:76、上交 rm_controllers 的 block() 都是这样。
+ * 方向都乘了 APP_SHOOT_TRIGGER_DIR，DIR 翻成 -1 时同样成立。
+ */
+static void testJamBacksOffFromFeedback(void)
+{
+    uint32_t i;
+    uint32_t confirmMs;
+
+    settleIdle();
+    confirmMs = (uint32_t)(Shooter_Config.jam_confirm_s * 1000.0f);
+
+    /* 单发：目标领先反馈一整发。 */
+    feedAllHealthy(0U);
+    step(KNOB_FIRE);
+
+    for (i = 0U; i < confirmMs + 5U; i++)
+    {
+        feedTriggerJam();
+        step(KNOB_FIRE);
+        if (Shooter.jam_state == SHOOTER_JAM_BACKING)
+        {
+            break;
+        }
+    }
+    assert(Shooter.jam_state == SHOOTER_JAM_BACKING);
+
+    assert(fabsf((Shooter.trigger_target - Shooter.trigger_angle) * APP_SHOOT_TRIGGER_DIR +
+                 Shooter_Config.jam_back_rad) < EPS);
+    assert((float)Shooter.trigger_I_req * APP_SHOOT_TRIGGER_DIR < 0.0f);
+}
+
+/**
+ * @brief 回拨结束后目标回到【被卡的那一发】重打：这一发不丢，它后面的积压扔掉。
+ *
+ * 拦两种错：
+ *   - 回拨完目标停在退后的位置：被卡的那一发丢了，之后每发都错开一截槽位相位
+ *     （RoboWalker 的单发就是这样）；
+ *   - 恢复成卡住前的目标：把攒下的积压一口气补打出去（探针 F：脱困后 1 s 打出 38 发）。
+ *
+ * 期望值手算：连发从待发角 start 起，第一发的终点是 start + 1 发；拨盘转进第一发 30% 处卡住，
+ * 在途的就是这一发。
+ */
+static void testBackingResumesInFlightShot(void)
+{
+    float start;
+    float resumeShift;
+
+    settleIdle();
+    start = Shooter.trigger_angle;
+
+    holdBurstWithoutMoving();
+    assert((Shooter.trigger_target - start) * APP_SHOOT_TRIGGER_DIR > 3.5f * APP_SHOOT_RAD_PER_AMMO);
+
+    advanceTrigger((int32_t)(0.3f * (float)countsPerAmmo() * APP_SHOOT_TRIGGER_DIR), KNOB_FIRE);
+    jamUntil(SHOOTER_JAM_BACKING, 1U, KNOB_FIRE);
+    assert(fabsf(Shooter.trigger_resume_target -
+                 (start + APP_SHOOT_RAD_PER_AMMO * APP_SHOOT_TRIGGER_DIR)) < EPS);
+
+    /*
+     * 拨盘退不动，回拨超时结束，目标回到这一发。同一拍的连发节拍可能刚好再加一发，所以上限给一发余量；
+     * 但不能是退后的位置（差 -1 发），也不能是卡住前攒下的那一串（多 3 发以上）。
+     */
+    jamUntil(SHOOTER_JAM_BACKING, 0U, KNOB_FIRE);
+    resumeShift = (Shooter.trigger_target - Shooter.trigger_resume_target) * APP_SHOOT_TRIGGER_DIR;
+    assert(resumeShift > -EPS);
+    assert(resumeShift < APP_SHOOT_RAD_PER_AMMO + EPS);
+}
+
+/**
+ * @brief 卡住时拨盘往回让了一点（不到到位容差）：重打的仍是刚按下的那一发。
+ *
+ * 拦"只按整发数扣"：拨盘比上一个槽位边界还靠后一丝，那条边界就会被当成"还在途"，
+ * 刚按下、被卡住的那一发被当成积压扔掉。离目标在容差以内就算转到了，与回拨到位、
+ * 重打完成用同一个判据。弹丸顶回来、齿隙都会让拨盘这样往回让一点。
+ */
+static void testResumeKeepsShotWhenTriggerSlipsBack(void)
+{
+    float start;
+    float slip = 0.5f * Shooter_Config.trigger_arrive_rad;
+
+    settleIdle();
+    start = Shooter.trigger_angle;
+
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+    step(KNOB_FIRE);
+    advanceTrigger(-(int32_t)(slip / (2.0f * APP_PI_F) * (float)TRIGGER_COUNTS_PER_OUTPUT_ROUND *
+                              APP_SHOOT_TRIGGER_DIR),
+                   KNOB_FIRE);
+    jamUntil(SHOOTER_JAM_BACKING, 1U, KNOB_FIRE);
+
+    assert(fabsf(Shooter.trigger_resume_target -
+                 (start + APP_SHOOT_RAD_PER_AMMO * APP_SHOOT_TRIGGER_DIR)) < EPS);
+}
+
+/**
+ * @brief 拨盘真退到了回拨目标，回拨立刻结束、回去重打，不等满 jam_back_s。
+ *
+ * 拦"只按时长结束"（RoboWalker 固定 300 ms）：弹已经松开了，拨盘还停在后面往回顶，
+ * 白等一段、多吃一段反向力矩。退不动的情况由超时兜底，见 testBackingResumesInFlightShot。
+ * 判据取 jam_back_s 的一半：超时本身不可能让这条通过。
+ */
+static void testBackingEndsOnArrival(void)
+{
+    uint32_t backingMs;
+
+    settleIdle();
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+    step(KNOB_FIRE);
+    jamUntil(SHOOTER_JAM_BACKING, 1U, KNOB_FIRE);
+
+    backingMs = reverseUntilBackingEnds();
+
+    assert(Shooter.jam_state == SHOOTER_JAM_NORMAL);
+    assert((float)backingMs * TICK_S < 0.5f * Shooter_Config.jam_back_s);
+}
+
+/**
+ * @brief 回拨后重打的那一发打完了，连续卡弹计数清零——这一轮卡弹算解决了。
+ *
+ * 拦"计数只在松开 VrB 时清"：一次长连发里先后卡三次、每次都回拨解决了，
+ * 第三次照样进 GIVEUP 把拨盘封掉。GIVEUP 只该给"连续回拨都没打出去"用。
+ */
+static void testRetryClearedWhenShotCompletes(void)
+{
+    float start;
+
+    settleIdle();
+    start = Shooter.trigger_angle;
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+    step(KNOB_FIRE);
+    jamUntil(SHOOTER_JAM_BACKING, 1U, KNOB_FIRE);
+    reverseUntilBackingEnds();
+    assert(Shooter.jam_state == SHOOTER_JAM_NORMAL);
+    assert(Shooter.jam_retry == 1U);
+
+    /* 拨盘转回去，把被卡的那一发（终点 start + 1 发）打完。 */
+    advanceTrigger(countsOfRad((start + APP_SHOOT_RAD_PER_AMMO * APP_SHOOT_TRIGGER_DIR -
+                                Shooter.trigger_angle)),
+                   KNOB_FIRE);
+    assert(Shooter.jam_retry == 0U);
+}
+
+/**
+ * @brief 疑似卡弹（SUSPECT）期间连发节拍跳过不补：一发都不加，回落之后也不补打。
+ *
+ * 拦两种错：
+ *   - SUSPECT 期间照加：卡弹在确认之前自己松开时，这段时间攒的发会按 outputLimit
+ *     一口气补打出去（探针 F：攒了 21 发，脱困后 1 s 打出 38 发）；
+ *   - 只是不加、节拍却没消耗：回落之后欠下的节拍每拍补一发，照样是一串。
+ */
+static void testSuspectSkipsBurstBeats(void)
+{
+    uint32_t period = 1000U / APP_SHOOT_BURST_HZ;
+    uint32_t window = (uint32_t)(0.8f * Shooter_Config.jam_confirm_s * 1000.0f);
+    float before;
+    uint32_t i;
+
+    assert(window >= 2U * period); /* 窗口里至少落两个节拍，否则这条测不出东西 */
+
+    settleIdle();
+    for (i = 0U; i < APP_SHOOT_BURST_DELAY_MS + period; i++)
+    {
+        feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+        step(KNOB_FIRE);
+    }
+    assert(Shooter.trigger_state == SHOOTER_TRIGGER_BURST);
+
+    before = Shooter.trigger_target;
+    for (i = 0U; i < window; i++)
+    {
+        feedTriggerJam();
+        step(KNOB_FIRE);
+    }
+    assert(Shooter.jam_state == SHOOTER_JAM_SUSPECT);
+    assert(fabsf(Shooter.trigger_target - before) < EPS);
+
+    /* 电流回落：节拍照常往下走，一个节拍之内最多加一发。 */
+    before = Shooter.trigger_target;
+    for (i = 0U; i < period - 1U; i++)
+    {
+        feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+        step(KNOB_FIRE);
+    }
+    assert(Shooter.jam_state == SHOOTER_JAM_NORMAL);
+    assert((Shooter.trigger_target - before) * APP_SHOOT_TRIGGER_DIR <
+           1.5f * APP_SHOOT_RAD_PER_AMMO);
 }
 
 /**
@@ -711,11 +1030,75 @@ static void testGiveUpOnlyClearedByRelease(void)
     }
     assert(Shooter.jam_state == SHOOTER_JAM_GIVEUP);
 
-    /* 松开 VrB 才解除。 */
+    /*
+     * 松开 VrB 才解除，而且被卡的那一发一起放弃（回待发）。
+     * 拦"只复位卡弹机"：松开在拨弹那边是"收尾、把在途那一发打完"，拨盘会立刻顶回那颗卡死的弹。
+     */
     feedAllHealthy(0U);
     step(KNOB_OFF);
     assert(Shooter.jam_state == SHOOTER_JAM_NORMAL);
     assert(Shooter.jam_retry == 0U);
+    assert(Shooter.trigger_state == SHOOTER_TRIGGER_IDLE);
+    assert(fabsf(Shooter.trigger_target - Shooter.trigger_angle) < EPS);
+}
+
+/**
+ * @brief 松开 VrB 之后（收尾中）卡住：照样从反馈角回拨，退完回去重打这一发，仍在收尾。
+ *
+ * 拦两种错：卡弹处理只在按着 VrB 时才跑（收尾那一发卡住没人管，拨盘顶着限幅一直推）；
+ * 以及"已经松手了，回拨完就算了"——这一发被放弃，拨盘停在槽位中间，正是收尾要避免的。
+ */
+static void testJamWhileFinishingBacksOff(void)
+{
+    float shotEnd;
+
+    settleIdle();
+    shotEnd = Shooter.trigger_angle + APP_SHOOT_RAD_PER_AMMO * APP_SHOOT_TRIGGER_DIR;
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+    step(KNOB_FIRE);
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+    step(KNOB_OFF);
+    assert(Shooter.trigger_state == SHOOTER_TRIGGER_FINISH);
+
+    jamUntil(SHOOTER_JAM_BACKING, 1U, KNOB_OFF);
+    assert(fabsf((Shooter.trigger_target - Shooter.trigger_angle) * APP_SHOOT_TRIGGER_DIR +
+                 Shooter_Config.jam_back_rad) < EPS);
+    assert((float)Shooter.trigger_I_req * APP_SHOOT_TRIGGER_DIR < 0.0f);
+
+    /* 退不动，超时结束：回去重打这一发，还在收尾。 */
+    jamUntil(SHOOTER_JAM_BACKING, 0U, KNOB_OFF);
+    assert(Shooter.trigger_state == SHOOTER_TRIGGER_FINISH);
+    assert(fabsf(Shooter.trigger_target - shotEnd) < EPS);
+}
+
+/**
+ * @brief 收尾中一直卡死到 GIVEUP：VrB 本来就松着，下一拍就解除并回待发，不再往前顶。
+ *
+ * 拦"GIVEUP 出口只复位卡弹机"：收尾那边还留着被卡的那一发，GIVEUP 一解除拨盘又顶上去——
+ * 判卡弹、回拨、GIVEUP、解除，没完没了；操作者早松手了，拨盘还在跟那颗弹较劲。
+ */
+static void testGiveUpAfterReleaseGoesIdle(void)
+{
+    uint32_t i;
+
+    settleIdle();
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+    step(KNOB_FIRE);
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+    step(KNOB_OFF);
+    assert(Shooter.trigger_state == SHOOTER_TRIGGER_FINISH);
+
+    jamUntil(SHOOTER_JAM_GIVEUP, 1U, KNOB_OFF);
+
+    /* 电流不再顶着（实机上电调关了输出、或者命令已经是 0）：待发、不再推。 */
+    for (i = 0U; i < 100U; i++)
+    {
+        feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+        step(KNOB_OFF);
+    }
+    assert(Shooter.jam_state == SHOOTER_JAM_NORMAL);
+    assert(Shooter.trigger_state == SHOOTER_TRIGGER_IDLE);
+    assert(fabsf(Shooter.trigger_target - Shooter.trigger_angle) < EPS);
 }
 
 /**
@@ -932,7 +1315,7 @@ static void testShotCompletesWhenTriggerTurns(void)
     assert(Shooter.trigger_I_req != 0);
 
     /*
-     * 松开 VrB 会把目标拉回反馈角，所以这里保持按住、让它转到位。
+     * 保持按住、让它转到位（途中松开的收尾另测，见 testReleaseFinishesInFlightShot）。
      * ⚠ 转的方向要跟着 APP_SHOOT_TRIGGER_DIR，否则把宏翻成 -1 时
      * 这条用例会朝着离目标更远的方向转。
      */
@@ -942,6 +1325,17 @@ static void testShotCompletesWhenTriggerTurns(void)
     /* 目标没变（还没到连发延迟），而反馈已经追上来了。 */
     assert(fabsf(Shooter.trigger_target - target) < EPS);
     assert(fabsf(Shooter.trigger_angle - target) < 0.05f);
+
+    /*
+     * 到位之后再松开：没有在途的了，下一拍就回待发，一发都不多打。
+     * 拦"数在途那一发时没有下限"：领先量为 0 时会数出 -1 发，凭空多出一发。
+     */
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+    step(KNOB_OFF);
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+    step(KNOB_OFF);
+    assert(Shooter.trigger_state == SHOOTER_TRIGGER_IDLE);
+    assert(fabsf(Shooter.trigger_target - Shooter.trigger_angle) < EPS);
 }
 
 /* ---- 停止语义：急停、遥控离线、关摩擦轮都是 PID 刹车，故障才清零 ---- */
@@ -1187,9 +1581,11 @@ static void testTriggerStallKeepsFriction(void)
     {
         assert(Shooter.I[MOTOR_DJI_FRIC_1] > 0); /* 3000 rpm 追 5000 rpm，还在加速 */
     }
+    /* 拨盘这一路照样在执行回拨：命令朝退弹方向，而且真的发出去了。 */
+    assert((float)Shooter.trigger_I_req * APP_SHOOT_TRIGGER_DIR < 0.0f);
     if (triggerGateOpen() != 0U)
     {
-        assert(Shooter.trigger_I != 0);
+        assert(Shooter.trigger_I == Shooter.trigger_I_req);
     }
 }
 
@@ -1321,9 +1717,11 @@ static void testTriggerTorqueLimit(void)
     assert(Shooter.trigger_I_req == (int16_t)(1.0f * TRIGGER_RAW_PER_A * APP_SHOOT_TRIGGER_DIR));
 
     /*
-     * 松开 VrB 后拨盘还在高速正转：待发态的刹车电流同样只到 1 A，而且照发。
-     * （急停时拨盘不刹、直接清零，所以这条用正常待发来测。）
+     * 待发态拨盘还在高速正转：刹车电流同样只到 1 A，而且照发。
+     * （急停时拨盘不刹、直接清零，所以这条用正常待发来测。
+     *  ⚠ 不能用"打一发再松开"进待发：松开之后是收尾，在途那一发要打完，拨盘在往前追、不是刹车。）
      */
+    settleIdle();
     feedFricHealthy();
     feedTrigger(0U, 3600, 0, MOTOR_DJI_ERR_NONE);
     step(KNOB_OFF);
@@ -1432,6 +1830,41 @@ static void testLockedAtPowerUp(void)
 }
 
 /**
+ * @brief 上电后第一发从拨盘【当前角】起算：上电头几拍遥控还没上线（等同急停），
+ *        这期间"上一发终点"一直跟着当前角。
+ *
+ * 拦"放弃（急停/离线）时不更新上一发终点"：上电时它是 0，可 M2006 的上电角取决于转子编码器读数，
+ * 离 0 在容差以内时，第一发就会从一个从没打到过的 0 起算，少转一截。
+ * ⚠ 要排在 testLockedAtPowerUp 之后：这条把拨盘停在 0 附近，而那条 Init 之后没有离线拍。
+ */
+static void testFirstShotAfterBootFromAngle(void)
+{
+    float before;
+    uint16_t raw;
+
+    settleIdle();
+    advanceTrigger(countsOfRad(0.5f * Shooter_Config.trigger_arrive_rad * APP_SHOOT_TRIGGER_DIR -
+                               Shooter.trigger_angle),
+                   KNOB_OFF);
+    /* ⚠ 先记下编码器读数：Init 会把 Shooter 里的反馈快照一起清零，再拿快照喂就成了 0。 */
+    raw = Shooter.trigger_motor.encoderRaw;
+    initShooter();
+
+    memset(&stubRemote, 0, sizeof(stubRemote)); /* 遥控还没上线 */
+    feedAllHealthy(raw);
+    stepRemoteDt(TICK_S);
+    feedAllHealthy(raw);
+    step(KNOB_OFF); /* 上线、VrB 在不使能区：解开上电上膛锁 */
+
+    before = Shooter.trigger_angle;
+    assert(fabsf(before) > EPS); /* 拨盘确实停在 0 附近、又不正好是 0，否则测不出东西 */
+    feedAllHealthy(raw);
+    step(KNOB_FIRE);
+    assert(fabsf(Shooter.trigger_target - (before + APP_SHOOT_RAD_PER_AMMO * APP_SHOOT_TRIGGER_DIR)) <
+           EPS);
+}
+
+/**
  * @brief 只发选中的那台拨盘的帧：另一台的帧在 FDCAN3 上一帧都不能有。
  *
  * FDCAN3 是板间线，负载已经 71%~86%。拦"选了翎控却还在发 C610 的 0x200"，以及反过来。
@@ -1468,7 +1901,8 @@ int main(void)
     testSingleShotOnRisingEdge();
     testHoldBelowDelayStaysOneShot();
     testBurstAfterDelay();
-    testReleaseResetsTarget();
+    testReleaseFinishesInFlightShot();
+    testNextShotFromLastTarget();
     testReenterStartsFromSingle();
     testTargetAccumulatesFromTargetNotFeedback();
     testTriggerFeedbackUnits();
@@ -1479,9 +1913,17 @@ int main(void)
     testJamByErrorCodeBacksOff();
 #endif
     testJamByCurrentSaturationAlone();
+    testJamBacksOffFromFeedback();
+    testBackingResumesInFlightShot();
+    testResumeKeepsShotWhenTriggerSlipsBack();
+    testBackingEndsOnArrival();
+    testRetryClearedWhenShotCompletes();
+    testSuspectSkipsBurstBeats();
     testTriggerBypassedWhileBacking();
     testGiveUpAfterRetries();
     testGiveUpOnlyClearedByRelease();
+    testJamWhileFinishingBacksOff();
+    testGiveUpAfterReleaseGoesIdle();
     testFrictionFollowsRequest();
     testDirectionConstantIsApplied();
     testBurstRateIndependentOfDt();
@@ -1505,13 +1947,14 @@ int main(void)
 
     testRearmAfterStop();
     testLockedAtPowerUp();
+    testFirstShotAfterBootFromAngle();
 
     testOnlyChosenTriggerTransmits();
 
 #if APP_TRIGGER_MOTOR == APP_TRIGGER_M2006
-    printf("test_shooter[M2006]: 33 组用例全过\n");
+    printf("test_shooter[M2006]: 43 组用例全过\n");
 #else
-    printf("test_shooter[LK4005]: 30 组用例全过\n");
+    printf("test_shooter[LK4005]: 40 组用例全过\n");
 #endif
     return 0;
 }

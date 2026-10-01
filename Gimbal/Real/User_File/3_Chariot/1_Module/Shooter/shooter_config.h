@@ -70,18 +70,31 @@ typedef struct
     float trigger_default_I_limit;
 
     /*
+     * 拨盘到位容差，输出轴 rad。离目标在这个距离以内就算转到了，下面几处共用这一个数：
+     *   - 确认卡弹时数"在途那一发"——比上一个槽位边界只靠后不到这么多，那条边界算已经到了；
+     *   - 回拨退没退到位；重打的那一发打完没有；
+     *   - 松开 VrB 后的收尾到没到位；
+     *   - 下一发从不从上一发终点累加（拨盘还在终点这么近以内才算）。
+     */
+    float trigger_arrive_rad;
+
+    /*
      * 防卡弹。判据是【电调堵转码 或 电流饱和】，取或——
      * C610 在反馈 data[7] 直接报堵转，这是 C620 没有的白送诊断；
      * 但手册没写它的响应延迟和灵敏度，所以不拿它当唯一判据。
      *
      * ⚠ 电流饱和按【力矩限幅的比例】判，不是电调满量程：限幅调低之后，
      * 反馈电流再也到不了满量程，写死的阈值会让这条判据失效。
+     *
+     * 确认之后回拨：从【反馈角】往回退 jam_back_rad，到位或 jam_back_s 超时就结束，
+     * 然后回到被卡的那一发重打（上交 rm_controllers 的 block()/normalize()）。
      */
     float jam_current_ratio; /* |反馈电流| ≥ 这个比例 × 力矩限幅，即判电流饱和。 */
     float jam_confirm_s;    /* 判据持续这么久才确认卡弹，s。 */
-    float jam_back_s;       /* 退弹持续时长，s。 */
-    float jam_back_rad;     /* 退弹角度，输出轴 rad。 */
-    uint32_t jam_retry_max; /* 连续退弹这么多次仍未脱困就放弃并封锁输出。 */
+    float jam_back_s;       /* 回拨超时，s：退不动（弹卡死、电调关了输出）时最多退这么久。 */
+    /* 回拨角度，输出轴 rad，从反馈角往回退这么多。⚠ 要明显大于 trigger_arrive_rad，否则一进回拨就算到位。 */
+    float jam_back_rad;
+    uint32_t jam_retry_max; /* 连续回拨这么多次都没把那一发打出去，就放弃并封锁拨盘；打出去了重新计数。 */
 
     float default_dt; /* 任务 tick 差越界时回退的周期，单位 s。 */
 } Shooter_Config_t;

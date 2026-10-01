@@ -174,6 +174,33 @@ static void Shooter_JamSetState(shooter_jam_state_t next)
     Shooter.jam_state_s = 0.0f;
 }
 
+/**
+ * @brief 在途那一发的目标：从当前目标往回扣整发数，扣到刚好还在反馈角前面——扔掉它后面的积压。
+ *
+ * 目标从上一次目标累加，连发跟不上或卡住时会领先反馈好几发；只有最近的那一发是真正在转的。
+ * 先扣掉到位容差再数：拨盘比某条槽位边界只靠后不到容差，那条边界算已经到了，不能当成在途。
+ * 扣的发数下限是 0：已经到位（领先量在容差以内）时会数出 -1，不夹住就凭空多出一发。
+ */
+static float Shooter_Trigger_InFlightTarget(void)
+{
+    float lead = (Shooter.trigger_target - Shooter.trigger_angle) * APP_SHOOT_TRIGGER_DIR;
+    float drop = fmaxf(ceilf((lead - Shooter_Config.trigger_arrive_rad) / APP_SHOOT_RAD_PER_AMMO) - 1.0f,
+                       0.0f);
+
+    return Shooter.trigger_target - drop * APP_SHOOT_RAD_PER_AMMO * APP_SHOOT_TRIGGER_DIR;
+}
+
+/** @brief 回到待发：目标拉回当前角，计时与积分全清。在途那一发就此放弃。 */
+static void Shooter_Trigger_EnterIdle(void)
+{
+    Shooter.trigger_state = SHOOTER_TRIGGER_IDLE;
+    Shooter.trigger_state_s = 0.0f;
+    Shooter.burst_s = 0.0f;
+    Shooter.jam_retry = 0U;
+    Shooter.trigger_target = Shooter.trigger_angle;
+    Shooter.trigger_last_target = Shooter.trigger_angle;
+}
+
 static void Shooter_Jam_Update(void)
 {
     Shooter.jam_state_s += Shooter.dt;
@@ -181,6 +208,13 @@ static void Shooter_Jam_Update(void)
     switch (Shooter.jam_state)
     {
     case SHOOTER_JAM_NORMAL:
+        /* 重打的那一发打完了：这一轮卡弹算解决，连续计数清零。GIVEUP 只给连续回拨都没打出去的。 */
+        if ((Shooter.jam_retry != 0U) &&
+            ((Shooter.trigger_resume_target - Shooter.trigger_angle) * APP_SHOOT_TRIGGER_DIR <=
+             Shooter_Config.trigger_arrive_rad))
+        {
+            Shooter.jam_retry = 0U;
+        }
         if (Shooter_JamDetected() != 0U)
         {
             Shooter_JamSetState(SHOOTER_JAM_SUSPECT);
@@ -195,20 +229,33 @@ static void Shooter_Jam_Update(void)
         }
         else if (Shooter.jam_state_s >= Shooter_Config.jam_confirm_s)
         {
-            /* 一次性动作：目标角往回退一段。退弹期间拨弹逻辑被整个旁路，
-               所以这条指令不会被下一轮覆盖。 */
-            Shooter.trigger_target -=
-                Shooter_Config.jam_back_rad * APP_SHOOT_TRIGGER_DIR;
+            /*
+             * 一次性动作：先记下被卡的那一发（回拨完回到这里重打，它后面攒的积压扔掉），
+             * 再从【反馈角】往回退一段。回拨期间拨弹逻辑被整个旁路，这条指令不会被下一轮覆盖。
+             * ⚠ 不能从目标角往回减：目标从上一次目标累加，卡住时远在反馈前面，
+             * 减完仍在前面，拨盘照样往前顶。基准取反馈角同 RoboWalker crt_booster.cpp:76、
+             * 上交 rm_controllers 的 block()。
+             */
+            Shooter.trigger_resume_target = Shooter_Trigger_InFlightTarget();
+            Shooter.trigger_target = Shooter.trigger_angle -
+                                     Shooter_Config.jam_back_rad * APP_SHOOT_TRIGGER_DIR;
             Shooter.jam_retry++;
             Shooter_JamSetState(SHOOTER_JAM_BACKING);
         }
         break;
 
     case SHOOTER_JAM_BACKING:
-        if (Shooter.jam_state_s >= Shooter_Config.jam_back_s)
+        /* 退到位就走，弹已经松开了；退不动（弹卡死、电调关了输出）由超时兜底。 */
+        if ((fabsf(Shooter.trigger_target - Shooter.trigger_angle) <=
+             Shooter_Config.trigger_arrive_rad) ||
+            (Shooter.jam_state_s >= Shooter_Config.jam_back_s))
         {
-            /* 退够时间还没脱困就升级。参考的两个工程都没有这一层，
-               于是可以永远"退一点、再顶、再退"，把电机烧在里面。 */
+            /* 回到被卡的那一发重打：这一发不丢，卡住期间攒的积压也不补打。 */
+            Shooter.trigger_target = Shooter.trigger_resume_target;
+            /*
+             * 连续 jam_retry_max 次回拨都没把那一发打出去，就放弃。参考的四家（DJI、上交、
+             * RoboWalker、湖南大学）都没有这一层，可以永远"退一点、再顶、再退"，把电机烧在里面。
+             */
             Shooter_JamSetState(
                 (Shooter.jam_retry >= Shooter_Config.jam_retry_max)
                     ? SHOOTER_JAM_GIVEUP
@@ -217,10 +264,14 @@ static void Shooter_Jam_Update(void)
         break;
 
     case SHOOTER_JAM_GIVEUP:
-        /* 唯一出口：操作者松开 VrB。堵转消失本身解不开，否则会反复自动重试。 */
+        /*
+         * 唯一出口：操作者松开 VrB。堵转消失本身解不开，否则会反复自动重试。
+         * 解除时被卡的那一发一起放弃（回待发）：松开在拨弹那边是"收尾、把在途那一发打完"，
+         * 不放弃的话拨盘立刻又顶回那颗卡死的弹，判卡弹、回拨、GIVEUP 没完没了。
+         */
         if (Shooter.trigger_request == 0U)
         {
-            Shooter.jam_retry = 0U;
+            Shooter_Trigger_EnterIdle();
             Shooter_JamSetState(SHOOTER_JAM_NORMAL);
         }
         break;
@@ -240,14 +291,18 @@ static void Shooter_Trigger_AddAmmo(void)
     Shooter.trigger_target += APP_SHOOT_RAD_PER_AMMO * APP_SHOOT_TRIGGER_DIR;
 }
 
-/** @brief 回到待发：目标拉回当前角，计时与积分全清。 */
-static void Shooter_Trigger_EnterIdle(void)
+/**
+ * @brief 松开 VrB：不再加发，在途那一发打完才回待发；它后面攒的积压扔掉。
+ *
+ * ⚠ 不能像原来那样直接回待发：目标立刻拉回反馈角，拨盘停在槽位中间、弹推到一半，
+ * 之后每一发都带着这截相位差。急停和 GIVEUP 松开才是"立刻放弃"，走 EnterIdle。
+ */
+static void Shooter_Trigger_EnterFinish(void)
 {
-    Shooter.trigger_state = SHOOTER_TRIGGER_IDLE;
+    Shooter.trigger_target = Shooter_Trigger_InFlightTarget();
+    Shooter.trigger_state = SHOOTER_TRIGGER_FINISH;
     Shooter.trigger_state_s = 0.0f;
     Shooter.burst_s = 0.0f;
-    Shooter.jam_retry = 0U;
-    Shooter.trigger_target = Shooter.trigger_angle;
 }
 
 static void Shooter_Trigger_Update(void)
@@ -270,6 +325,15 @@ static void Shooter_Trigger_Update(void)
         Algorithm_PID_Init(&Shooter.trigger_speed_pid);
         if (Shooter.trigger_request != 0U)
         {
+            /*
+             * 拨盘还停在上一发终点附近（收尾到容差以内就回了待发）：从终点累加，
+             * 否则每松开一次就丢一截相位。急停放弃过、被手转开了，就从当前角起。
+             */
+            if (fabsf(Shooter.trigger_angle - Shooter.trigger_last_target) <=
+                Shooter_Config.trigger_arrive_rad)
+            {
+                Shooter.trigger_target = Shooter.trigger_last_target;
+            }
             /* 进使能区【当拍】就出这一发，这就是"单发"。 */
             Shooter_Trigger_AddAmmo();
             Shooter.trigger_state = SHOOTER_TRIGGER_HOLD;
@@ -280,7 +344,7 @@ static void Shooter_Trigger_Update(void)
     case SHOOTER_TRIGGER_HOLD:
         if (Shooter.trigger_request == 0U)
         {
-            Shooter_Trigger_EnterIdle();
+            Shooter_Trigger_EnterFinish();
         }
         else if (Shooter.trigger_state_s >=
                  ((float)APP_SHOOT_BURST_DELAY_MS * 0.001f))
@@ -294,7 +358,7 @@ static void Shooter_Trigger_Update(void)
     case SHOOTER_TRIGGER_BURST:
         if (Shooter.trigger_request == 0U)
         {
-            Shooter_Trigger_EnterIdle();
+            Shooter_Trigger_EnterFinish();
             break;
         }
         Shooter.burst_s += Shooter.dt;
@@ -302,7 +366,32 @@ static void Shooter_Trigger_Update(void)
         {
             /* 减去一个周期而不是清零：节拍不会被 dt 的零头一点点拖慢。 */
             Shooter.burst_s -= burstPeriod;
+            /*
+             * 疑似卡弹期间这一拍跳过、不补：卡弹在确认之前自己松开时，
+             * 不会把这段时间攒下的发一口气补打出去。
+             */
+            if (Shooter.jam_state != SHOOTER_JAM_SUSPECT)
+            {
+                Shooter_Trigger_AddAmmo();
+            }
+        }
+        break;
+
+    case SHOOTER_TRIGGER_FINISH:
+        if (Shooter.trigger_request != 0U)
+        {
+            /* 收尾时又进使能区：新的一发，从在途那一发的目标再加一发。 */
             Shooter_Trigger_AddAmmo();
+            Shooter.trigger_state = SHOOTER_TRIGGER_HOLD;
+            Shooter.trigger_state_s = 0.0f;
+        }
+        else if ((Shooter.trigger_target - Shooter.trigger_angle) * APP_SHOOT_TRIGGER_DIR <=
+                 Shooter_Config.trigger_arrive_rad)
+        {
+            float done = Shooter.trigger_target;
+
+            Shooter_Trigger_EnterIdle();
+            Shooter.trigger_last_target = done;
         }
         break;
     }

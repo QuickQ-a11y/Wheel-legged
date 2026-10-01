@@ -138,9 +138,12 @@ New user `.c` files must be registered in `Chassis/CMakeLists.txt` under both `t
 
 ## Host tests
 
-`Tests/*.c` are plain `assert()` programs compiled with the **system gcc**. There is no test
-runner, CMake target, or script checked in — invoke gcc directly. **Two projects now carry
-host tests**: `Chassis/Tests/` and `Gimbal/Real/Tests/`. All `-I` paths below are relative to the project root, so `cd` into it first.
+`Tests/*.c` are plain `assert()` programs compiled with the **system gcc**. There is no CMake
+target. **Two projects now carry host tests**: `Chassis/Tests/` and `Gimbal/Real/Tests/`.
+The gimbal has a checked-in runner for all of them, `Gimbal/Real/Tests/run_host_tests.sh`
+(17 runs; it applies the rules below). The chassis has one only for MPC
+(`Chassis/Tests/run_mpc_host.sh`); its other tests are still invoked with gcc directly.
+All `-I` paths below are relative to the project root, so `cd` into it first.
 
 **Always check gcc's exit code before running the binary.** A stale binary from a previous
 test is otherwise reported as a pass — this has caused a false PASS more than once. Redirecting

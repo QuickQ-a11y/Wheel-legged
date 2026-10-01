@@ -22,24 +22,31 @@ extern "C" {
 
 /*
  * 拨弹状态机。语义由 app_config.h 的 APP_SHOOT_BURST_* 注释块定义：
- * 进使能区立刻一发 -> 保持超过 BURST_DELAY 转连发 -> 退出即复位。
+ * 进使能区立刻一发 -> 保持超过 BURST_DELAY 转连发 -> 退出后不再加发，在途那一发打完回待发。
  *
- * ⚠ "那一发"发生在 IDLE -> HOLD 的【转移】上，没有单独的 SINGLE 状态：
- * 一次进入使能区只会转移一次，所以"一次进入 = 一发"天然成立，
+ * ⚠ "那一发"发生在 IDLE -> HOLD（收尾中再进使能区则是 FINISH -> HOLD）的【转移】上，
+ * 没有单独的 SINGLE 状态：一次进入使能区只会转移一次，所以"一次进入 = 一发"天然成立，
  * 不需要在遥控层做边沿检测，也不需要一个只存在一个周期的状态。
+ *
+ * ⚠ 松开 VrB 走 FINISH，不是直接回 IDLE：IDLE 的目标跟随反馈，直接回去会把在途那一发
+ * 截在槽位中间。只有急停/离线和 GIVEUP 解除才"立刻放弃"、直接回 IDLE。
  */
 typedef enum
 {
     SHOOTER_TRIGGER_IDLE = 0, /* VrB 未进使能区；目标角跟随当前角。 */
     SHOOTER_TRIGGER_HOLD,     /* 已打一发，等着看要不要转连发。 */
     SHOOTER_TRIGGER_BURST,    /* 连发，按 APP_SHOOT_BURST_HZ 持续加发。 */
+    SHOOTER_TRIGGER_FINISH,   /* 已松开，不再加发；在途那一发打完才回 IDLE。 */
 } shooter_trigger_state_t;
 
 /*
  * 防卡弹状态机，与拨弹状态机【正交且优先】：
- * BACKING / GIVEUP 期间拨弹逻辑整个被旁路，退弹指令不会被下一轮覆盖。
+ * BACKING / GIVEUP 期间拨弹逻辑整个被旁路，回拨指令不会被下一轮覆盖。
  *
- * ⚠ 判据只在 NORMAL 判。退弹本身也会顶出大电流，别的状态里再判会自锁。
+ * ⚠ 判据只在 NORMAL 判。回拨本身也会顶出大电流，别的状态里再判会自锁。
+ *
+ * 回拨照上交 rm_controllers 的 block()/normalize()：从【反馈角】往回退，到位或超时就结束，
+ * 然后目标回到被卡的那一发重打（它后面攒的积压扔掉）。
  *
  * ⚠ GIVEUP【故意不置 fault 位】：它只封锁拨盘的请求电流，摩擦轮照转——
  * 脱困后要能立刻接着打。
@@ -48,9 +55,9 @@ typedef enum
 typedef enum
 {
     SHOOTER_JAM_NORMAL = 0, /* 正常。 */
-    SHOOTER_JAM_SUSPECT,    /* 判据成立，还没到确认时长。 */
-    SHOOTER_JAM_BACKING,    /* 正在退弹。 */
-    SHOOTER_JAM_GIVEUP,     /* 连续退弹无效，放弃；只能靠 VrB 退出使能区解除。 */
+    SHOOTER_JAM_SUSPECT,    /* 判据成立，还没到确认时长；连发节拍跳过不补。 */
+    SHOOTER_JAM_BACKING,    /* 从反馈角往回退；到位或超时后回去重打被卡的那一发。 */
+    SHOOTER_JAM_GIVEUP,     /* 连续回拨都没把那一发打出去，放弃；VrB 退出使能区才解除，那一发一起放弃。 */
 } shooter_jam_state_t;
 
 /**
@@ -115,6 +122,8 @@ typedef struct
     shooter_trigger_state_t trigger_state;
     shooter_jam_state_t jam_state;
     float trigger_target;       /* 目标角，输出轴 rad。累加量，不是绝对位置。 */
+    float trigger_resume_target; /* 被卡那一发的目标，输出轴 rad。确认卡弹时记下，回拨完回到这里重打。 */
+    float trigger_last_target;   /* 最近打完那一发的终点，输出轴 rad。拨盘还停在它附近，下一发就从它累加。 */
     float trigger_angle;        /* 反馈角，输出轴 rad。 */
     float trigger_omega;        /* 反馈角速度，输出轴 rad/s。由 speedRpm 换算。 */
     float trigger_target_omega; /* 位置环输出 = 速度环目标，输出轴 rad/s。 */
@@ -123,7 +132,7 @@ typedef struct
     float trigger_state_s; /* 在当前拨弹状态停留的时长，s。 */
     float jam_state_s;     /* 在当前卡弹状态停留的时长，s。 */
     float burst_s;         /* 连发节拍计时，s。 */
-    uint32_t jam_retry;    /* 本轮连续退弹次数，回到 IDLE 时清零。 */
+    uint32_t jam_retry;    /* 连续回拨次数。重打的那一发打完、或回 IDLE 时清零。 */
 
     int16_t I_req[APP_DJI_FRIC_COUNT]; /* 摩擦轮请求电流；故障时仍然计算，供 Watch 观察。 */
     int16_t I[APP_DJI_FRIC_COUNT];     /* 摩擦轮安全门后实际下发的电流。 */

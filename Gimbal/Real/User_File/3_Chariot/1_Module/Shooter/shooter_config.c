@@ -93,6 +93,8 @@ const Shooter_Config_t Shooter_Config = {
      */
     .trigger_default_I_limit = 5.0f,
 #endif
+    /* 到位容差取一发的 5%（8 槽拨叉约 2.25°），【未经实机整定】。 */
+    .trigger_arrive_rad = APP_SHOOT_RAD_PER_AMMO * 0.05f,
     /*
      * 防卡弹阈值，【全部未经实机整定】。
      *

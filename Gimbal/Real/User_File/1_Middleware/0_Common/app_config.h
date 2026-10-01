@@ -279,7 +279,7 @@ static_assert((APP_DJI_FRIC_1_RX_ID != APP_DJI_FRIC_2_RX_ID) &&
 /*
  * 单发/连发的时间参数。语义：进入使能区间立刻发一发；持续保持超过
  * APP_SHOOT_BURST_DELAY_MS 后转连发，按 APP_SHOOT_BURST_HZ 连续发射；
- * 退出使能区间时计时复位。
+ * 退出使能区间时不再加发、计时复位，已经在转的那一发打完才停（它后面攒的扔掉）。
  *
  * 实现见 shooter_control.c 的拨弹状态机；两个数值【未经实机整定】。
  */
