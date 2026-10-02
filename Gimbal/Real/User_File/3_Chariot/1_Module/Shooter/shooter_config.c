@@ -108,5 +108,7 @@ const Shooter_Config_t Shooter_Config = {
     .jam_back_s = 0.3f,
     .jam_back_rad = APP_SHOOT_RAD_PER_AMMO * 0.3f,
     .jam_retry_max = 3U,
+    /* 出厂打开回拨。机械组要长期看原始卡弹，就改成 0U。 */
+    .jam_back_default_flag = 1U,
     .default_dt = APP_CTRL_DT_S,
 };

@@ -326,6 +326,9 @@ static void initShooter(void)
     Shooter_Init();
     assert(Shooter.trigger_I_limit == Shooter_Config.trigger_default_I_limit);
     Shooter.trigger_I_limit = TEST_TRIGGER_I_LIMIT_A;
+    /* 回拨开关同理：先核对 Init 载入了配置默认值，再打开——机械组可能正把默认值改成 0。 */
+    assert(Shooter.jam_back_flag == Shooter_Config.jam_back_default_flag);
+    Shooter.jam_back_flag = 1U;
 }
 
 /** @brief 拨盘不使能区 / 使能区对应的 VrB 归一化值。 */
@@ -759,6 +762,55 @@ static void testJamBacksOffFromFeedback(void)
     assert(fabsf((Shooter.trigger_target - Shooter.trigger_angle) * APP_SHOOT_TRIGGER_DIR +
                  Shooter_Config.jam_back_rad) < EPS);
     assert((float)Shooter.trigger_I_req * APP_SHOOT_TRIGGER_DIR < 0.0f);
+}
+
+/**
+ * @brief 回拨开关关着（机械组看原始卡弹用）：确认卡弹那一拍直接 GIVEUP，停在卡点、不回拨；
+ *        按着 VrB 一直停着，松开回待发。摩擦轮照转。
+ *
+ * 拦"开关不起作用"：关着还在回拨，机械组就看不到弹到底卡在哪。
+ * 也拦"关掉就什么都不管"：判到了还一直往前顶，会把弹顶碎、把电机顶热。
+ */
+static void testJamBackOffDisabledStopsAtJam(void)
+{
+    uint32_t i;
+
+    settleIdle();
+    Shooter.jam_back_flag = 0U;
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+    step(KNOB_FIRE);
+
+    /* 卡死到第一次确认为止。 */
+    for (i = 0U; (i < 5000U) && ((Shooter.jam_state == SHOOTER_JAM_NORMAL) ||
+                                 (Shooter.jam_state == SHOOTER_JAM_SUSPECT));
+         i++)
+    {
+        feedTriggerJam();
+        step(KNOB_FIRE);
+    }
+    assert(Shooter.jam_state == SHOOTER_JAM_GIVEUP);
+    assert(Shooter.trigger_I_req == 0);
+    assert((Shooter.trigger_target - Shooter.trigger_angle) * APP_SHOOT_TRIGGER_DIR > 0.0f);
+    assert(Shooter.fault == SHOOTER_FAULT_NONE);
+    assert(Shooter.I_req[MOTOR_DJI_FRIC_1] != 0);
+
+    /* 按着 VrB：一直停着。 */
+    for (i = 0U; i < 200U; i++)
+    {
+        feedTriggerJam();
+        step(KNOB_FIRE);
+    }
+    assert(Shooter.jam_state == SHOOTER_JAM_GIVEUP);
+    assert(Shooter.trigger_I_req == 0);
+
+    /* 松开：回待发，被卡的那一发放弃。 */
+    feedAllHealthy(Shooter.trigger_motor.encoderRaw);
+    step(KNOB_OFF);
+    assert(Shooter.jam_state == SHOOTER_JAM_NORMAL);
+    assert(Shooter.trigger_state == SHOOTER_TRIGGER_IDLE);
+    assert(fabsf(Shooter.trigger_target - Shooter.trigger_angle) < EPS);
+
+    Shooter.jam_back_flag = 1U;
 }
 
 /**
@@ -1914,6 +1966,7 @@ int main(void)
 #endif
     testJamByCurrentSaturationAlone();
     testJamBacksOffFromFeedback();
+    testJamBackOffDisabledStopsAtJam();
     testBackingResumesInFlightShot();
     testResumeKeepsShotWhenTriggerSlipsBack();
     testBackingEndsOnArrival();
@@ -1952,9 +2005,9 @@ int main(void)
     testOnlyChosenTriggerTransmits();
 
 #if APP_TRIGGER_MOTOR == APP_TRIGGER_M2006
-    printf("test_shooter[M2006]: 43 组用例全过\n");
+    printf("test_shooter[M2006]: 44 组用例全过\n");
 #else
-    printf("test_shooter[LK4005]: 40 组用例全过\n");
+    printf("test_shooter[LK4005]: 41 组用例全过\n");
 #endif
     return 0;
 }

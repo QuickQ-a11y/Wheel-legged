@@ -18,6 +18,7 @@ void Shooter_Init(void)
     Shooter.dt = Shooter_Config.default_dt;
     Shooter.fric_target_rpm = Shooter_Config.fric_default_rpm;
     Shooter.trigger_I_limit = Shooter_Config.trigger_default_I_limit;
+    Shooter.jam_back_flag = Shooter_Config.jam_back_default_flag;
     /* 上电即上锁：不能靠遥控同步那几帧离线碰巧先把它锁上。 */
     Shooter.trigger_lock = 1U;
     for (index = 0U; index < APP_DJI_FRIC_COUNT; index++)
@@ -229,6 +230,12 @@ static void Shooter_Jam_Update(void)
         }
         else if (Shooter.jam_state_s >= Shooter_Config.jam_confirm_s)
         {
+            if (Shooter.jam_back_flag == 0U)
+            {
+                /* 回拨关着（机械组看原始卡弹用）：判到了就停在卡点，不回拨、不重打；松开 VrB 解除。 */
+                Shooter_JamSetState(SHOOTER_JAM_GIVEUP);
+                break;
+            }
             /*
              * 一次性动作：先记下被卡的那一发（回拨完回到这里重打，它后面攒的积压扔掉），
              * 再从【反馈角】往回退一段。回拨期间拨弹逻辑被整个旁路，这条指令不会被下一轮覆盖。

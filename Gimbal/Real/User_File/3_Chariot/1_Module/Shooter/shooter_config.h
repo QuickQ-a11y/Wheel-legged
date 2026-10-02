@@ -95,6 +95,8 @@ typedef struct
     /* 回拨角度，输出轴 rad，从反馈角往回退这么多。⚠ 要明显大于 trigger_arrive_rad，否则一进回拨就算到位。 */
     float jam_back_rad;
     uint32_t jam_retry_max; /* 连续回拨这么多次都没把那一发打出去，就放弃并封锁拨盘；打出去了重新计数。 */
+    /* 卡弹自动回拨开关的上电默认值，写进 Shooter.jam_back_flag（含义见那里），运行中在 Watch 里切。 */
+    uint8_t jam_back_default_flag;
 
     float default_dt; /* 任务 tick 差越界时回退的周期，单位 s。 */
 } Shooter_Config_t;

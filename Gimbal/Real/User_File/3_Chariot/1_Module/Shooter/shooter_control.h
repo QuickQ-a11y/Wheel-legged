@@ -76,6 +76,13 @@ typedef struct
      * 调它的目的：卡弹时拨盘顶不碎弹丸。
      */
     float trigger_I_limit;
+    /*
+     * 卡弹自动回拨开关，Watch 可改，重启回到 Shooter_Config 的默认值。
+     * 1：确认卡弹后从反馈角回拨、重打被卡的那一发；
+     * 0：确认卡弹后直接 GIVEUP，拨盘停在卡点不动——机械组改拨盘、要看弹到底卡在哪时用。
+     * 判据、确认时长、SUSPECT 跳拍不受它影响。
+     */
+    uint8_t jam_back_flag;
 
     /*
      * 本任务自己取的遥控快照（Remote_Task_GetRemote），不借云台任务刷新的全局 Remote：

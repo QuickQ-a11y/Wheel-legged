@@ -242,6 +242,11 @@ VrB 已接进控制：过中位开摩擦轮，进末端 2% 使能区拨弹。语
 
 ⚠ **SUSPECT 期间连发节拍跳过、不补**：卡弹在确认之前自己松开时，不会把这段时间攒的发补打出去。
 
+**回拨开关 `Shooter.jam_back_flag`**（Watch 可改，上电取 `Shooter_Config.jam_back_default_flag`，出厂 1）：
+置 0 后确认卡弹那一拍不回拨、直接 GIVEUP——拨盘电流 0、停在卡点，按着 VrB 一直停着，松开回待发。
+给机械组改拨盘、看弹到底卡在哪时用（SPR 的机械组也要求过关掉回拨，他们是把代码注释掉）。
+判据、确认时长、SUSPECT 跳拍、急停、限幅都不受它影响。要长期关着就把配置里的默认值改成 0。
+
 ⚠ **松开 VrB 走 `FINISH`，不是直接回 `IDLE`**：不再加发，在途那一发打完（到 `trigger_arrive_rad` 以内）
 才回待发，后面攒的积压扔掉。直接回 `IDLE` 会把目标拉回反馈角，单发途中松开时拨盘停在槽位中间
 （探针：按 30 ms 就松开只转了 0.6 发）。**急停/离线和 GIVEUP 解除才"立刻放弃"**，直接回 `IDLE`。
@@ -261,7 +266,7 @@ VrB 已接进控制：过中位开摩擦轮，进末端 2% 使能区拨弹。语
 ⚠ `trigger_arrive_rad`（到位容差）一个数管五处：数在途那一发、回拨到没到位、重打完没完、
 收尾到没到位、下一发从不从上一发终点起。**`jam_back_rad` 要明显大于它**，否则一进回拨就算到位。
 
-调卡弹时看的 Watch：`jam_state`（0 NORMAL / 1 SUSPECT / 2 BACKING / 3 GIVEUP）、`jam_retry`、
+调卡弹时看的 Watch：`jam_state`（0 NORMAL / 1 SUSPECT / 2 BACKING / 3 GIVEUP）、`jam_retry`、`jam_back_flag`、
 `trigger_state`（0 IDLE / 1 HOLD / 2 BURST / 3 FINISH）、`trigger_target`、`trigger_resume_target`、
 `trigger_last_target`、`trigger_angle`、`trigger_omega`、`trigger_I_req`、`trigger_I`、
 `trigger_motor.errorCode`、`trigger_motor.currentRaw`。
