@@ -11,23 +11,23 @@ const Shooter_Config_t Shooter_Config = {
         .trigger_flag = 0U,
     },
     /*
-     * 摩擦轮速度环的起步参数，【未经实机整定】。
+     * 摩擦轮速度环的起步参数，【未经实机整定】。原来按 M2006 + C610 推的，
+     * 换成 M3508 + C620 后只把输出限幅放到 C620 满量程，kp、ki 没有重推。
      *
-     * 量纲推算：M2006 空载转子转速约 17000 rpm（C610 手册性能曲线上的
-     * 输出轴 470 rpm × 36:1）。⚠ 摩擦轮的 P36 减速箱【已经物理拆掉】，
-     * 所以这个转子转速就是轮子能到的转速。满量程电流 10000，
-     * 取 kp 使几百 rpm 的误差就能给出上千的电流，即 kp 在 1 附近；
-     * ki 先给小值靠积分消静差。
+     * 量纲参考：M3508 空载 9400 rpm（裸电机手册，配 C620、24 V）。P19 减速箱已经
+     * 物理拆掉，所以这就是轮子能到的转速。满量程电流 16384（±20 A），
+     * kp = 1 时 1000 rpm 的误差给 1000（约 1.2 A）；ki 先给小值靠积分消静差。
      *
-     * integralLimit 和 outputLimit 都按电流口径：积分单独限到满量程的一半，
-     * 防止起转那段长时间大误差把积分灌满、到达目标后迟迟压不下来。
+     * ⚠ integralLimit 是已知问题，这次没改：公共 PID 限的是【积分状态】（rpm × s），
+     * 不是电流（同下面拨盘那组的说明）。5000 是当年按"C610 满量程一半"的电流口径填的，
+     * 实际 I 项上限只有 ki × 5000 = 100，会有明显的稳态转速差。
      */
     .fric_speed_pid = {
         .kp = 1.0f,
         .ki = 0.02f,
         .kd = 0.0f, /* 必须为 0，理由见 shooter_config.h */
-        .integralLimit = (float)(APP_DJI_CURRENT_MAX / 2),
-        .outputLimit = (float)APP_DJI_CURRENT_MAX,
+        .integralLimit = 5000.0f, /* ⚠ 单位不对，见上 */
+        .outputLimit = (float)APP_DJI_C620_CURRENT_MAX,
     },
     .fric_ready_rpm = 300.0f,
     /*
@@ -84,8 +84,8 @@ const Shooter_Config_t Shooter_Config = {
         .kp = 3000.0f,
         .ki = 100.0f,
         .kd = 0.0f, /* 与摩擦轮同理：没有可信的角加速度来源，退化成 PI。 */
-        .integralLimit = (float)(APP_DJI_CURRENT_MAX / 2) / 100.0f,
-        .outputLimit = (float)APP_DJI_CURRENT_MAX,
+        .integralLimit = (float)(APP_DJI_C610_CURRENT_MAX / 2) / 100.0f,
+        .outputLimit = (float)APP_DJI_C610_CURRENT_MAX,
     },
     /*
      * 拨盘力矩限幅默认 5 A，【未经实机整定】：M2006 在 C610 上最多 10 A，

@@ -200,21 +200,45 @@ static int16_t speedFromCountsPerMs(int32_t counts)
 }
 #endif
 
-/** @brief 三个摩擦轮同一转速、零电流、无错误码。 */
-static void feedFric(int16_t rpm)
+/* 两个摩擦轮的方向符号和反馈 ID，下标即 MOTOR_DJI_FRIC_1/2。 */
+static const float fricDir[APP_DJI_FRIC_COUNT] = {APP_SHOOT_FRIC_1_DIR, APP_SHOOT_FRIC_2_DIR};
+static const uint32_t fricRxId[APP_DJI_FRIC_COUNT] = {APP_DJI_FRIC_1_RX_ID, APP_DJI_FRIC_2_RX_ID};
+
+/** @brief 摩擦轮 index 朝【出弹方向】转 rpm：反馈转速乘它自己的方向符号，零电流、无错误码。 */
+static void feedFricOne(uint32_t index, int16_t rpm)
 {
-    feedDji(APP_DJI_FRIC_1_RX_ID, APP_CAN_BUS_FDCAN2, 0U, rpm, 0, MOTOR_DJI_ERR_NONE);
-    feedDji(APP_DJI_FRIC_2_RX_ID, APP_CAN_BUS_FDCAN2, 0U, rpm, 0, MOTOR_DJI_ERR_NONE);
-    feedDji(APP_DJI_FRIC_3_RX_ID, APP_CAN_BUS_FDCAN2, 0U, rpm, 0, MOTOR_DJI_ERR_NONE);
+    feedDji(fricRxId[index], APP_CAN_BUS_FDCAN2, 0U,
+            (int16_t)(fricDir[index] * (float)rpm), 0, MOTOR_DJI_ERR_NONE);
 }
 
-/** @brief 三个摩擦轮喂健康帧（静止），拨盘单独给。 */
+/** @brief 两个摩擦轮都朝出弹方向转 rpm。 */
+static void feedFric(int16_t rpm)
+{
+    uint32_t i;
+
+    for (i = 0U; i < APP_DJI_FRIC_COUNT; i++)
+    {
+        feedFricOne(i, rpm);
+    }
+}
+
+/**
+ * @brief 摩擦轮 index 的电流折到出弹方向：> 0 是往出弹方向推（加速），< 0 是在刹。
+ *
+ * 两轮转向相反，不折算的话"在刹车"对一台是负电流、对另一台是正电流。
+ */
+static float fricAlong(uint32_t index, int16_t current)
+{
+    return fricDir[index] * (float)current;
+}
+
+/** @brief 两个摩擦轮喂健康帧（静止），拨盘单独给。 */
 static void feedFricHealthy(void)
 {
     feedFric(0);
 }
 
-/** @brief 让四台电机都在线、零速零电流、无错误码。 */
+/** @brief 让发射机构的电机都在线、零速零电流、无错误码。 */
 static void feedAllHealthy(uint16_t triggerEncoder)
 {
     feedFricHealthy();
@@ -1177,6 +1201,46 @@ static void testFrictionFollowsRequest(void)
 }
 
 /**
+ * @brief 两个摩擦轮各朝自己的方向转：目标 = 方向 × fric_target_rpm，就绪判据也乘方向。
+ *
+ * 拦三种写法：
+ *   - 漏乘方向——两台同号，夹弹处一台往外送、一台往回搓；
+ *   - 速度环乘了、就绪判据没乘——反向那台的误差是两倍目标，永远就绪不了；
+ *   - 就绪判据只比绝对值——某台倒着转到目标转速也算就绪。
+ */
+static void testFricFollowsDir(void)
+{
+    uint32_t i;
+    int16_t target;
+
+    settleIdle();
+
+    /* 静止起转：两台都往各自的出弹方向加速。 */
+    feedAllHealthy(0U);
+    step(0.5f);
+    assert(Shooter.fric_request == 1U);
+    for (i = 0U; i < APP_DJI_FRIC_COUNT; i++)
+    {
+        assert(fricAlong(i, Shooter.I_req[i]) > 0.0f);
+    }
+    assert(Shooter.fric_ready_flag == 0U);
+
+    /* 两台都转到 方向 × 目标：就绪。 */
+    target = (int16_t)Shooter.fric_target_rpm;
+    feedFric(target);
+    feedTrigger(0U, 0, 0, MOTOR_DJI_ERR_NONE);
+    step(0.5f);
+    assert(Shooter.fric_ready_flag == 1U);
+
+    /* 摩擦轮 2 倒着转到同样大的转速：不算就绪。 */
+    feedFricOne(MOTOR_DJI_FRIC_1, target);
+    feedFricOne(MOTOR_DJI_FRIC_2, (int16_t)(-target));
+    feedTrigger(0U, 0, 0, MOTOR_DJI_ERR_NONE);
+    step(0.5f);
+    assert(Shooter.fric_ready_flag == 0U);
+}
+
+/**
  * @brief 方向常量真的被用上了：一发的增量符号跟着 APP_SHOOT_TRIGGER_DIR 走。
  */
 static void testDirectionConstantIsApplied(void)
@@ -1417,8 +1481,8 @@ static void spinUp(void)
  */
 static void testFricOffBrakesWithPid(void)
 {
-    int16_t atHigh;
-    int16_t atLow;
+    float atHigh;
+    float atLow;
     uint32_t i;
 
     settleIdle();
@@ -1427,18 +1491,19 @@ static void testFricOffBrakesWithPid(void)
     feedTrigger(0U, 0, 0, MOTOR_DJI_ERR_NONE);
     step(KNOB_OFF);
     assert(Shooter.fric_request == 0U);
-    atHigh = Shooter.I_req[MOTOR_DJI_FRIC_1];
-    assert(atHigh < 0); /* 与正转速反向 */
+    atHigh = fricAlong(MOTOR_DJI_FRIC_1, Shooter.I_req[MOTOR_DJI_FRIC_1]);
+    assert(atHigh < 0.0f); /* 与转向相反 */
 
     feedFric(1500);
     feedTrigger(0U, 0, 0, MOTOR_DJI_ERR_NONE);
     step(KNOB_OFF);
-    atLow = Shooter.I_req[MOTOR_DJI_FRIC_1];
+    atLow = fricAlong(MOTOR_DJI_FRIC_1, Shooter.I_req[MOTOR_DJI_FRIC_1]);
     /* 转速减半，刹车电流也减半：是比例刹车，不是固定值。 */
-    assert(fabsf(((float)atLow / (float)atHigh) - 0.5f) < 0.05f);
+    assert(fabsf((atLow / atHigh) - 0.5f) < 0.05f);
+    /* 两台刹得一样狠，各自与自己的转向相反。 */
     for (i = 0U; i < APP_DJI_FRIC_COUNT; i++)
     {
-        assert(Shooter.I_req[i] == atLow);
+        assert(fricAlong(i, Shooter.I_req[i]) == atLow);
     }
 
     /* 长时间顶着转速刹，再让它停稳：一点都不许再推。 */
@@ -1464,7 +1529,7 @@ static void testFricOffBrakesWithPid(void)
         step(KNOB_OFF);
         assert(Shooter.safe_flag == 0U);
         assert(Shooter.I[MOTOR_DJI_FRIC_1] == Shooter.I_req[MOTOR_DJI_FRIC_1]);
-        assert(Shooter.I[MOTOR_DJI_FRIC_1] < 0);
+        assert(fricAlong(MOTOR_DJI_FRIC_1, Shooter.I[MOTOR_DJI_FRIC_1]) < 0.0f);
     }
 }
 
@@ -1479,7 +1544,7 @@ static void assertStopped(void)
     assert(Shooter.trigger_state == SHOOTER_TRIGGER_IDLE);
     for (i = 0U; i < APP_DJI_FRIC_COUNT; i++)
     {
-        assert(Shooter.I_req[i] < 0); /* 摩擦轮正转，刹车电流为负 */
+        assert(fricAlong(i, Shooter.I_req[i]) < 0.0f); /* 两台都在刹：电流与各自转向相反 */
     }
     /* 门不能关：摩擦轮要靠它把刹车电流发出去，关了就只能滑停。 */
     assert(Shooter.safe_flag == 0U);
@@ -1570,10 +1635,10 @@ static void testEstopCancelsBackOff(void)
 }
 
 /**
- * @brief 急停时一台摩擦轮离线：离线那台清零，其余两台照样刹车。
+ * @brief 急停时一台摩擦轮离线：离线那台清零，另一台照样刹车。
  *
  * 离线电机的转速是旧值，拿它算"刹车"就等于一个固定电流，会把它往反方向拖，
- * 所以它自己的命令必须清零；但它不牵连别的电机——另外两台的反馈是新的，照刹。
+ * 所以它自己的命令必须清零；但它不牵连别的电机——另一台的反馈是新的，照刹。
  */
 static void testOfflineMotorNotBraked(void)
 {
@@ -1588,17 +1653,16 @@ static void testOfflineMotorNotBraked(void)
     for (i = 0U; i < APP_DJI_TIMEOUT_TICKS + 5U; i++)
     {
         remoteEstop(KNOB_FIRE);
-        feedDji(APP_DJI_FRIC_1_RX_ID, APP_CAN_BUS_FDCAN2, 0U, 3000, 0, MOTOR_DJI_ERR_NONE);
-        feedDji(APP_DJI_FRIC_3_RX_ID, APP_CAN_BUS_FDCAN2, 0U, 3000, 0, MOTOR_DJI_ERR_NONE);
+        feedFricOne(MOTOR_DJI_FRIC_1, 3000);
         feedTrigger(0U, 3600, 0, MOTOR_DJI_ERR_NONE); /* 摩擦轮 2 不喂 */
         stepRemoteDt(TICK_S);
     }
 
     assert((Shooter.fric_fault[MOTOR_DJI_FRIC_2] & SHOOTER_FAULT_MOTOR) != 0U);
-    assert(Shooter.I_req[MOTOR_DJI_FRIC_2] < 0); /* 请求照算，供 Watch 观察 */
+    /* 请求照算，供 Watch 观察：拿的是旧转速，所以还在"刹"。 */
+    assert(fricAlong(MOTOR_DJI_FRIC_2, Shooter.I_req[MOTOR_DJI_FRIC_2]) < 0.0f);
     assert(Shooter.I[MOTOR_DJI_FRIC_2] == 0);
-    assert(Shooter.I[MOTOR_DJI_FRIC_1] < 0);
-    assert(Shooter.I[MOTOR_DJI_FRIC_3] < 0);
+    assert(fricAlong(MOTOR_DJI_FRIC_1, Shooter.I[MOTOR_DJI_FRIC_1]) < 0.0f);
     /* 急停时拨盘不刹，最终电流为 0。 */
     assert(Shooter.trigger_I == 0);
 }
@@ -1631,7 +1695,7 @@ static void testTriggerStallKeepsFriction(void)
     assert(Shooter.safe_flag == 0U);
     if (fricGateOpen() != 0U)
     {
-        assert(Shooter.I[MOTOR_DJI_FRIC_1] > 0); /* 3000 rpm 追 5000 rpm，还在加速 */
+        assert(fricAlong(MOTOR_DJI_FRIC_1, Shooter.I[MOTOR_DJI_FRIC_1]) > 0.0f); /* 3000 rpm 追 5000 rpm，还在加速 */
     }
     /* 拨盘这一路照样在执行回拨：命令朝退弹方向，而且真的发出去了。 */
     assert((float)Shooter.trigger_I_req * APP_SHOOT_TRIGGER_DIR < 0.0f);
@@ -1660,7 +1724,7 @@ static void testTriggerEscFaultStopsOnlyTrigger(void)
 
     assert((Shooter.trigger_fault & SHOOTER_FAULT_ESC) != 0U);
     assert(Shooter.trigger_I == 0);
-    assert(Shooter.I[MOTOR_DJI_FRIC_1] > 0);
+    assert(fricAlong(MOTOR_DJI_FRIC_1, Shooter.I[MOTOR_DJI_FRIC_1]) > 0.0f);
 }
 #endif
 
@@ -1683,10 +1747,10 @@ static void testTriggerOfflineStopsOnlyTrigger(void)
 
     assert((Shooter.trigger_fault & SHOOTER_FAULT_MOTOR) != 0U);
     assert(Shooter.trigger_I == 0);
-    assert(Shooter.I[MOTOR_DJI_FRIC_1] > 0); /* 3000 rpm 追 5000 rpm */
+    assert(fricAlong(MOTOR_DJI_FRIC_1, Shooter.I[MOTOR_DJI_FRIC_1]) > 0.0f); /* 3000 rpm 追 5000 rpm */
 }
 
-/** @brief 一台摩擦轮离线（运行中、没有急停）：只停它自己，另两台和拨盘照常。 */
+/** @brief 一台摩擦轮离线（运行中、没有急停）：只停它自己，另一台和拨盘照常。 */
 static void testFricOfflineStopsOnlyItself(void)
 {
     uint32_t i;
@@ -1699,16 +1763,14 @@ static void testFricOfflineStopsOnlyItself(void)
     spinUp();
     for (i = 0U; i < APP_DJI_TIMEOUT_TICKS + 5U; i++)
     {
-        feedDji(APP_DJI_FRIC_1_RX_ID, APP_CAN_BUS_FDCAN2, 0U, 3000, 0, MOTOR_DJI_ERR_NONE);
-        feedDji(APP_DJI_FRIC_2_RX_ID, APP_CAN_BUS_FDCAN2, 0U, 3000, 0, MOTOR_DJI_ERR_NONE);
-        feedTrigger(0U, 0, 0, MOTOR_DJI_ERR_NONE); /* 摩擦轮 3 不喂 */
+        feedFricOne(MOTOR_DJI_FRIC_1, 3000);
+        feedTrigger(0U, 0, 0, MOTOR_DJI_ERR_NONE); /* 摩擦轮 2 不喂 */
         step(KNOB_FIRE);
     }
 
-    assert((Shooter.fric_fault[MOTOR_DJI_FRIC_3] & SHOOTER_FAULT_MOTOR) != 0U);
-    assert(Shooter.I[MOTOR_DJI_FRIC_3] == 0);
-    assert(Shooter.I[MOTOR_DJI_FRIC_1] > 0);
-    assert(Shooter.I[MOTOR_DJI_FRIC_2] > 0);
+    assert((Shooter.fric_fault[MOTOR_DJI_FRIC_2] & SHOOTER_FAULT_MOTOR) != 0U);
+    assert(Shooter.I[MOTOR_DJI_FRIC_2] == 0);
+    assert(fricAlong(MOTOR_DJI_FRIC_1, Shooter.I[MOTOR_DJI_FRIC_1]) > 0.0f);
     if (triggerGateOpen() != 0U)
     {
         assert(Shooter.trigger_I != 0); /* 拨盘还在打那一发 */
@@ -1978,6 +2040,7 @@ int main(void)
     testJamWhileFinishingBacksOff();
     testGiveUpAfterReleaseGoesIdle();
     testFrictionFollowsRequest();
+    testFricFollowsDir();
     testDirectionConstantIsApplied();
     testBurstRateIndependentOfDt();
 
@@ -2005,9 +2068,9 @@ int main(void)
     testOnlyChosenTriggerTransmits();
 
 #if APP_TRIGGER_MOTOR == APP_TRIGGER_M2006
-    printf("test_shooter[M2006]: 44 组用例全过\n");
+    printf("test_shooter[M2006]: 45 组用例全过\n");
 #else
-    printf("test_shooter[LK4005]: 41 组用例全过\n");
+    printf("test_shooter[LK4005]: 42 组用例全过\n");
 #endif
     return 0;
 }

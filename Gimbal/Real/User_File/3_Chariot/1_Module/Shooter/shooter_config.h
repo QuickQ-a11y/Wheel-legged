@@ -19,7 +19,7 @@ extern "C" {
  */
 typedef struct
 {
-    uint8_t fric_flag;    /* FDCAN2（三个摩擦轮）电流输出与发帧使能。 */
+    uint8_t fric_flag;    /* FDCAN2（两个摩擦轮）电流输出与发帧使能。 */
     uint8_t trigger_flag; /* FDCAN3（拨盘）电流输出与发帧使能。 */
 } Shooter_Output_Config_t;
 
@@ -27,9 +27,9 @@ typedef struct
 {
     Shooter_Output_Config_t output;
     /*
-     * 摩擦轮速度环，三路共用一组参数。目标与反馈都用转子转速 rpm；
-     * ⚠ 摩擦轮的减速箱【已经物理拆掉】，所以转子转速就是轮子转速。
-     * 输出是 C610 的控制电流原始值（±APP_DJI_CURRENT_MAX 对应 ±10 A）。
+     * 摩擦轮速度环，两路共用一组参数。目标与反馈都用转子转速 rpm，带各自的方向符号
+     * （APP_SHOOT_FRIC_1/2_DIR）；⚠ 摩擦轮的减速箱【已经物理拆掉】，所以转子转速就是轮子转速。
+     * 输出是 C620 的控制电流原始值（±APP_DJI_C620_CURRENT_MAX 对应 ±20 A）。
      *
      * ⚠ kd 必须为 0。仓库里唯一的 PID 更新函数是
      * Algorithm_PID_UpdateByFeedbackRate()，它取 derivative = -feedbackRate，

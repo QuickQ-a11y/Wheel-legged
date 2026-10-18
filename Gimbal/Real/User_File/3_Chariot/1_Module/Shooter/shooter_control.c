@@ -10,6 +10,12 @@
 
 Shooter_t Shooter;
 
+/* 摩擦轮下标 -> 转向。两轮面对面夹弹、转向相反，符号见 app_config.h 的 APP_SHOOT_FRIC_1/2_DIR。 */
+static const float fricDir[APP_DJI_FRIC_COUNT] = {
+    APP_SHOOT_FRIC_1_DIR,
+    APP_SHOOT_FRIC_2_DIR,
+};
+
 void Shooter_Init(void)
 {
     uint32_t index;
@@ -50,7 +56,8 @@ void Shooter_Feedback_Update(void)
      * 未装的电机恒离线，无条件计入会让 fault 永远非零、发射机构永远不出力。
      * 摩擦轮在 FDCAN2、拨盘在 FDCAN3，两条总线各看各的门。
      *
-     * C610 在反馈里直接报堵转、三相未接、位置传感器丢失，接进故障。
+     * 摩擦轮的 C620 不报错误码（反馈 data[7] 是空字节），只判在线；
+     * 拨盘的 C610 报堵转、三相未接、位置传感器丢失，见下面拨盘那段。
      */
     for (index = 0U; index < APP_DJI_FRIC_COUNT; index++)
     {
@@ -63,10 +70,6 @@ void Shooter_Feedback_Update(void)
         if (Motor_DJI_IsOnline((motor_dji_index_t)index, nowTick) == 0U)
         {
             Shooter.fric_fault[index] |= SHOOTER_FAULT_MOTOR;
-        }
-        if (Shooter.fric_motor[index].errorCode != MOTOR_DJI_ERR_NONE)
-        {
-            Shooter.fric_fault[index] |= SHOOTER_FAULT_ESC;
         }
         Shooter.fault |= Shooter.fric_fault[index];
     }
@@ -491,12 +494,15 @@ void Shooter_Control(void)
      * 随转速衰减到 0，停稳后不再推。不用固定电流：固定值在轮子停住之后还会继续推，
      * 把它反向拖起来。VrB 回下半程、急停、遥控离线都走这一条。
      * 参考 RoboWalker crt_booster.cpp:187 与湖南大学 shoot_task.c:158，关摩擦轮都是目标置 0。
+     *
+     * 每台的目标 = 自己的方向 × fricTarget：两轮转向相反，就绪判据也得拿带方向的目标比。
      */
     fricTarget = (Shooter.fric_request != 0U) ? Shooter.fric_target_rpm : 0.0f;
     for (index = 0U; index < APP_DJI_FRIC_COUNT; index++)
     {
         float output = 0.0f;
         float speedRpm = (float)Shooter.fric_motor[index].speedRpm;
+        float targetRpm = fricDir[index] * fricTarget;
 
         if (Shooter.fric_request == 0U)
         {
@@ -510,7 +516,7 @@ void Shooter_Control(void)
          */
         Algorithm_PID_UpdateByFeedbackRate(&Shooter_Config.fric_speed_pid,
                                            &Shooter.fric_pid[index],
-                                           fricTarget,
+                                           targetRpm,
                                            speedRpm,
                                            0.0f,
                                            Shooter.dt,
@@ -518,7 +524,7 @@ void Shooter_Control(void)
         Shooter.I_req[index] = (int16_t)output;
 
         if ((Shooter.fric_request != 0U) &&
-            (fabsf(fricTarget - speedRpm) <= Shooter_Config.fric_ready_rpm))
+            (fabsf(targetRpm - speedRpm) <= Shooter_Config.fric_ready_rpm))
         {
             readyCount++;
         }

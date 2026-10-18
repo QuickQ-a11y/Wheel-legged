@@ -10,9 +10,10 @@ extern "C" {
 #include <stdint.h>
 
 /*
- * 发射机构四台 M2006 + C610。数组下标按电调 ID 递增，与 0x200 帧的槽位顺序一致。
+ * 发射机构三台 DJI 电机：两个摩擦轮 M3508 + C620、拨盘 M2006 + C610。
+ * 数组下标按电调 ID 递增，与 0x200 帧的槽位顺序一致。
  *
- * ⚠ 前三台在 FDCAN2、拨盘在 FDCAN3，是【两条总线】，各自一个 0x200 帧。
+ * ⚠ 两个摩擦轮在 FDCAN2、拨盘在 FDCAN3，是【两条总线】，各自一个 0x200 帧。
  * 总线归属由 Motor_DJI_BusOf() 唯一决定，别在别处再判一次。
  *
  * ⚠ 拨盘选成翎控（app_config.h 的 APP_TRIGGER_MOTOR）时，MOTOR_DJI_TRIGGER 这一路闲置：
@@ -23,14 +24,12 @@ typedef enum
 {
     MOTOR_DJI_FRIC_1 = 0,  /* 摩擦轮 1，电调 ID 1，FDCAN2。 */
     MOTOR_DJI_FRIC_2,      /* 摩擦轮 2，电调 ID 2，FDCAN2。 */
-    MOTOR_DJI_FRIC_3,      /* 摩擦轮 3，电调 ID 3，FDCAN2。 */
     MOTOR_DJI_TRIGGER,     /* 拨弹盘，电调 ID 4，FDCAN3。 */
 } motor_dji_index_t;
 
 /*
- * C610 反馈的电机错误码，取自反馈帧 data[7]（手册 §CAN 通信协议）。
- * ⚠ C620 的 data[7] 是空、data[6] 才是温度；C610 正好相反，data[6] 空。
- * 底盘的轮电机走 C620，那是另一份独立的 device_motor_dji.c。
+ * C610 反馈的电机错误码，取自反馈帧 data[7]（手册 §CAN 通信协议）。只有拨盘报。
+ * ⚠ C620（摩擦轮）的 data[7] 是空、data[6] 才是温度，不报错误码，摩擦轮的 errorCode 恒为 0。
  */
 #define MOTOR_DJI_ERR_NONE 0U
 #define MOTOR_DJI_ERR_OVERVOLTAGE 2U  /* 电调供电电压过高，仅开机自检一次。 */
@@ -48,12 +47,13 @@ typedef struct
     float angle;                 /* 【输出轴】累计角，rad。已除减速比，上电清零。 */
     /*
      * 转子转速，rpm。
-     * ⚠ 换算到输出轴要除【该台电机自己的】减速比：摩擦轮的 P36 减速箱已经
+     * ⚠ 换算到输出轴要除【该台电机自己的】减速比：摩擦轮的 P19 减速箱已经
      * 物理拆掉（1:1，speedRpm 就是轮速），拨盘的还在（36:1）。见 djiGearRatio[]。
      */
     int16_t speedRpm;
-    int16_t currentRaw;          /* 实际转矩电流原始值，口径同 APP_DJI_CURRENT_MAX。 */
+    int16_t currentRaw;          /* 实际转矩电流原始值，口径同该台电调的控制量程（C620 / C610）。 */
     uint8_t errorCode;           /* 电机错误码，见上面的 MOTOR_DJI_ERR_*。 */
+    uint8_t temperature;         /* 电机温度，℃。只有 C620（摩擦轮）报，拨盘恒为 0。 */
     uint32_t feedbackCount;      /* 有效反馈帧累计数量。 */
     uint32_t lastUpdateTick;     /* 最近一次反馈 HAL tick。 */
     uint8_t isOnline;            /* 收到有效反馈后置 1。 */
@@ -67,7 +67,7 @@ typedef struct
 app_can_bus_t Motor_DJI_BusOf(motor_dji_index_t index);
 
 /**
- * @brief 解析一帧 C610 反馈并刷新对应电机状态，匹配成功返回 1。
+ * @brief 解析一帧 C620/C610 反馈并刷新对应电机状态，匹配成功返回 1。
  *
  * ⚠ 必须同时比对总线和 ID。0x201~0x203 在底盘的 FDCAN1 上是轮电调的反馈 ID，
  * 只比 ID 的话换线或将来合并总线时会读到别人的电机。
@@ -87,10 +87,10 @@ void Motor_DJI_GetState(motor_dji_index_t index, motor_dji_state_t *state);
 uint8_t Motor_DJI_IsOnline(motor_dji_index_t index, uint32_t nowTick);
 
 /**
- * @brief 写入单台电机的控制电流，单位与 APP_DJI_CURRENT_MAX 同口径。
+ * @brief 写入单台电机的控制电流，电调原始值：摩擦轮 C620 口径、拨盘 C610 口径。
  *
- * 超量程按 ±APP_DJI_CURRENT_MAX 限幅——这是发送编码本身需要的，
- * C610 对越界值的行为未定义。
+ * 超量程按【该台电调】的量程限幅（APP_DJI_C620_CURRENT_MAX / APP_DJI_C610_CURRENT_MAX）
+ * ——这是发送编码本身需要的，C610 对越界值的行为未定义。
  */
 void Motor_DJI_SetCommand(motor_dji_index_t index, int16_t currentRaw);
 

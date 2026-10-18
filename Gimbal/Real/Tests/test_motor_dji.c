@@ -97,30 +97,27 @@ static void testBusMapping(void)
 {
     assert(Motor_DJI_BusOf(MOTOR_DJI_FRIC_1) == APP_CAN_BUS_FDCAN2);
     assert(Motor_DJI_BusOf(MOTOR_DJI_FRIC_2) == APP_CAN_BUS_FDCAN2);
-    assert(Motor_DJI_BusOf(MOTOR_DJI_FRIC_3) == APP_CAN_BUS_FDCAN2);
     /* 拨盘装在底盘上，只能走两板之间的 FDCAN3。 */
     assert(Motor_DJI_BusOf(MOTOR_DJI_TRIGGER) == APP_CAN_BUS_FDCAN3);
 }
 
-/** @brief 0x200 帧槽位：ID 1~4 落在 0/2/4/6，互不重叠且不越界。 */
+/** @brief 0x200 帧槽位：摩擦轮 ID 1/2 落在 0/2、拨盘 ID 4 落在 6，互不重叠且不越界。 */
 static void testTxSlots(void)
 {
     const uint32_t ids[] = {
-        APP_DJI_FRIC_1_RX_ID, APP_DJI_FRIC_2_RX_ID,
-        APP_DJI_FRIC_3_RX_ID, APP_DJI_TRIGGER_RX_ID,
+        APP_DJI_FRIC_1_RX_ID, APP_DJI_FRIC_2_RX_ID, APP_DJI_TRIGGER_RX_ID,
     };
     uint32_t i;
     uint32_t j;
 
     assert(APP_DJI_TX_SLOT(APP_DJI_FRIC_1_RX_ID) == 0U);
     assert(APP_DJI_TX_SLOT(APP_DJI_FRIC_2_RX_ID) == 2U);
-    assert(APP_DJI_TX_SLOT(APP_DJI_FRIC_3_RX_ID) == 4U);
     assert(APP_DJI_TX_SLOT(APP_DJI_TRIGGER_RX_ID) == 6U);
 
-    for (i = 0U; i < 4U; i++)
+    for (i = 0U; i < 3U; i++)
     {
         assert(APP_DJI_TX_SLOT(ids[i]) + 1U < APP_DJI_TX_LEN);
-        for (j = i + 1U; j < 4U; j++)
+        for (j = i + 1U; j < 3U; j++)
         {
             assert(APP_DJI_TX_SLOT(ids[i]) != APP_DJI_TX_SLOT(ids[j]));
         }
@@ -128,10 +125,10 @@ static void testTxSlots(void)
 }
 
 /**
- * @brief C610 反馈解析。
+ * @brief 拨盘（C610）反馈解析。
  *
- * ⚠⚠ 错误码在 data[7]，data[6] 是空字节——C620 正好相反（data[6] 温度、
- * data[7] 空）。照抄 C620 的解法会让堵转、三相未接这些诊断永远读成 0，
+ * ⚠⚠ C610 的错误码在 data[7]，data[6] 是空字节——C620（摩擦轮）正好相反（data[6] 温度、
+ * data[7] 空）。拨盘照抄 C620 的解法会让堵转、三相未接这些诊断永远读成 0，
  * 而拨盘卡弹恰恰就是靠 MOTOR_DJI_ERR_STALL 发现的。这条断言就是为了拦它。
  */
 static void testFeedbackParse(void)
@@ -141,25 +138,49 @@ static void testFeedbackParse(void)
 
     stubTick = 1000U;
     buildFeedback(data, 4096U, -1234, 567, MOTOR_DJI_ERR_STALL);
-    assert(Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN2,
-                                    APP_DJI_FRIC_2_RX_ID, data) == 1U);
+    assert(Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN3,
+                                    APP_DJI_TRIGGER_RX_ID, data) == 1U);
 
-    Motor_DJI_GetState(MOTOR_DJI_FRIC_2, &state);
+    Motor_DJI_GetState(MOTOR_DJI_TRIGGER, &state);
     assert(state.encoderRaw == 4096U);
     assert(state.speedRpm == -1234);
     assert(state.currentRaw == 567);
     assert(state.errorCode == MOTOR_DJI_ERR_STALL);
     assert(state.isOnline == 1U);
-    assert(state.feedbackCount == 1U);
     assert(state.lastUpdateTick == 1000U);
 
-    /* 上一帧编码器值要跟着滚动，供将来做回绕处理。 */
-    buildFeedback(data, 8000U, 0, 0, MOTOR_DJI_ERR_NONE);
-    assert(Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN2,
-                                    APP_DJI_FRIC_2_RX_ID, data) == 1U);
-    Motor_DJI_GetState(MOTOR_DJI_FRIC_2, &state);
+    /* 上一帧编码器值要跟着滚动，供回绕处理。 */
+    buildFeedback(data, 4200U, 0, 0, MOTOR_DJI_ERR_NONE);
+    assert(Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN3,
+                                    APP_DJI_TRIGGER_RX_ID, data) == 1U);
+    Motor_DJI_GetState(MOTOR_DJI_TRIGGER, &state);
     assert(state.lastEncoderRaw == 4096U);
-    assert(state.encoderRaw == 8000U);
+    assert(state.encoderRaw == 4200U);
+    assert(state.errorCode == MOTOR_DJI_ERR_NONE);
+}
+
+/**
+ * @brief 摩擦轮（M3508 + C620）反馈解析：data[6] 是电机温度，data[7] 是空字节、不是错误码。
+ *
+ * 拦"摩擦轮也按 C610 解"：温度读不到；而 data[7] 万一不是 0，会被当成错误码、
+ * 把好好的摩擦轮判成电调故障停掉。C620 手册：DATA[6] Motor temperature、DATA[7] Null。
+ */
+static void testFricFeedbackIsC620(void)
+{
+    uint8_t data[APP_DJI_RX_LEN];
+    motor_dji_state_t state;
+
+    stubTick = 1100U;
+    buildFeedback(data, 1234U, 5000, -321, 6U); /* data[7] 故意不是 0 */
+    data[6] = 41U;                              /* 41 ℃ */
+    assert(Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN2,
+                                    APP_DJI_FRIC_1_RX_ID, data) == 1U);
+
+    Motor_DJI_GetState(MOTOR_DJI_FRIC_1, &state);
+    assert(state.encoderRaw == 1234U);
+    assert(state.speedRpm == 5000);
+    assert(state.currentRaw == -321);
+    assert(state.temperature == 41U);
     assert(state.errorCode == MOTOR_DJI_ERR_NONE);
 }
 
@@ -196,7 +217,7 @@ static void testFeedbackBusFiltering(void)
  *
  * ⚠ 这是本文件最重要的一条。摩擦轮和拨盘在【不同总线】上共用同一个帧 ID 0x200，
  * 把拨盘的电流写进摩擦轮那帧（或反过来）会直接控错电机，而两帧长得一样、
- * 肉眼看不出来。给四个互不相同的电流值，逐槽位核对。
+ * 肉眼看不出来。给三个互不相同的电流值，逐槽位核对；没有电机的槽位 4~5 必须是零。
  */
 static void testTwoBusFramesIndependent(void)
 {
@@ -204,7 +225,6 @@ static void testTwoBusFramesIndependent(void)
     Motor_DJI_ClearCommands();
     Motor_DJI_SetCommand(MOTOR_DJI_FRIC_1, 1111);
     Motor_DJI_SetCommand(MOTOR_DJI_FRIC_2, 2222);
-    Motor_DJI_SetCommand(MOTOR_DJI_FRIC_3, 3333);
     Motor_DJI_SetCommand(MOTOR_DJI_TRIGGER, -4444);
 
     clearCaptured();
@@ -212,17 +232,16 @@ static void testTwoBusFramesIndependent(void)
     assert(capturedFric.sent == 1U);
     assert(capturedTrigger.sent == 1U);
 
-    /* FDCAN2 帧：三个摩擦轮在各自槽位，拨盘槽位必须是零。 */
+    /* FDCAN2 帧：两个摩擦轮在各自槽位，拨盘槽位必须是零。 */
     assert(slotValue(capturedFric.data, APP_DJI_FRIC_1_RX_ID) == 1111);
     assert(slotValue(capturedFric.data, APP_DJI_FRIC_2_RX_ID) == 2222);
-    assert(slotValue(capturedFric.data, APP_DJI_FRIC_3_RX_ID) == 3333);
+    assert(slotValue(capturedFric.data, 0x203U) == 0); /* ID 3 已经没有电机 */
     assert(slotValue(capturedFric.data, APP_DJI_TRIGGER_RX_ID) == 0);
 
-    /* FDCAN3 帧：只有拨盘槽位非零，三个摩擦轮槽位必须是零。 */
+    /* FDCAN3 帧：只有拨盘槽位非零，摩擦轮槽位必须是零。 */
     assert(slotValue(capturedTrigger.data, APP_DJI_TRIGGER_RX_ID) == -4444);
     assert(slotValue(capturedTrigger.data, APP_DJI_FRIC_1_RX_ID) == 0);
     assert(slotValue(capturedTrigger.data, APP_DJI_FRIC_2_RX_ID) == 0);
-    assert(slotValue(capturedTrigger.data, APP_DJI_FRIC_3_RX_ID) == 0);
 }
 
 /**
@@ -276,28 +295,32 @@ static void testSafeGate(void)
 }
 
 /**
- * @brief 电流按 ±APP_DJI_CURRENT_MAX 限幅。
+ * @brief 电流按【各自电调】的量程限幅：摩擦轮 C620 ±16384（±20 A），拨盘 C610 ±10000（±10 A）。
  *
- * ⚠ C610 是 ±10000 对应 ±10 A，C620（底盘轮电机）是 ±16384 对应 ±20 A。
- * 不限幅的话越界值在 C610 上行为未定义。
+ * 期望值是两份手册里的字面量，不拿代码里的常量算。拦两种错：摩擦轮也按 C610 夹到 10000
+ * （C620 上只剩约 12 A，速度环永远到不了满量程）；拨盘也按 C620 放到 16384
+ * （越界值在 C610 上行为未定义）。
  */
 static void testCurrentLimit(void)
 {
     Motor_DJI_SetSafe(0U);
     Motor_DJI_ClearCommands();
     Motor_DJI_SetCommand(MOTOR_DJI_FRIC_1, 32767);
-    Motor_DJI_SetCommand(MOTOR_DJI_FRIC_2, -32768);
-    Motor_DJI_SetCommand(MOTOR_DJI_FRIC_3, APP_DJI_CURRENT_MAX);
+    Motor_DJI_SetCommand(MOTOR_DJI_FRIC_2, 12000); /* C620 量程内，不能被夹 */
+    Motor_DJI_SetCommand(MOTOR_DJI_TRIGGER, -32768);
 
     clearCaptured();
     Motor_DJI_UpdateTxFrames(1U, 1U);
-    assert(slotValue(capturedFric.data, APP_DJI_FRIC_1_RX_ID) ==
-           (int16_t)APP_DJI_CURRENT_MAX);
-    assert(slotValue(capturedFric.data, APP_DJI_FRIC_2_RX_ID) ==
-           (int16_t)(-APP_DJI_CURRENT_MAX));
-    /* 正好等于量程不该被改动。 */
-    assert(slotValue(capturedFric.data, APP_DJI_FRIC_3_RX_ID) ==
-           (int16_t)APP_DJI_CURRENT_MAX);
+    assert(slotValue(capturedFric.data, APP_DJI_FRIC_1_RX_ID) == 16384);
+    assert(slotValue(capturedFric.data, APP_DJI_FRIC_2_RX_ID) == 12000);
+    assert(slotValue(capturedTrigger.data, APP_DJI_TRIGGER_RX_ID) == -10000);
+
+    Motor_DJI_SetCommand(MOTOR_DJI_FRIC_2, -32768);
+    Motor_DJI_SetCommand(MOTOR_DJI_TRIGGER, 10000); /* 正好等于量程不该被改动 */
+    clearCaptured();
+    Motor_DJI_UpdateTxFrames(1U, 1U);
+    assert(slotValue(capturedFric.data, APP_DJI_FRIC_2_RX_ID) == -16384);
+    assert(slotValue(capturedTrigger.data, APP_DJI_TRIGGER_RX_ID) == 10000);
 }
 
 /** @brief 在线判定与超时。 */
@@ -308,20 +331,20 @@ static void testOnlineTimeout(void)
     buildFeedback(data, 1U, 1, 1, MOTOR_DJI_ERR_NONE);
     stubTick = 5000U;
     assert(Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN2,
-                                    APP_DJI_FRIC_3_RX_ID, data) == 1U);
+                                    APP_DJI_FRIC_2_RX_ID, data) == 1U);
 
-    assert(Motor_DJI_IsOnline(MOTOR_DJI_FRIC_3, 5000U) == 1U);
-    assert(Motor_DJI_IsOnline(MOTOR_DJI_FRIC_3,
+    assert(Motor_DJI_IsOnline(MOTOR_DJI_FRIC_2, 5000U) == 1U);
+    assert(Motor_DJI_IsOnline(MOTOR_DJI_FRIC_2,
                               5000U + APP_DJI_TIMEOUT_TICKS) == 1U);
-    assert(Motor_DJI_IsOnline(MOTOR_DJI_FRIC_3,
+    assert(Motor_DJI_IsOnline(MOTOR_DJI_FRIC_2,
                               5000U + APP_DJI_TIMEOUT_TICKS + 1U) == 0U);
 
     /* tick 回绕：时间戳在溢出前、now 在溢出后，无符号相减仍然正确。 */
     stubTick = 0xFFFFFFF0U;
     assert(Motor_DJI_UpdateFeedback(APP_CAN_BUS_FDCAN2,
-                                    APP_DJI_FRIC_3_RX_ID, data) == 1U);
-    assert(Motor_DJI_IsOnline(MOTOR_DJI_FRIC_3, 0xFFFFFFF0U + 10U) == 1U);
-    assert(Motor_DJI_IsOnline(MOTOR_DJI_FRIC_3,
+                                    APP_DJI_FRIC_2_RX_ID, data) == 1U);
+    assert(Motor_DJI_IsOnline(MOTOR_DJI_FRIC_2, 0xFFFFFFF0U + 10U) == 1U);
+    assert(Motor_DJI_IsOnline(MOTOR_DJI_FRIC_2,
                               0xFFFFFFF0U + APP_DJI_TIMEOUT_TICKS + 1U) == 0U);
 }
 
@@ -464,12 +487,13 @@ int main(void)
     testBusMapping();
     testTxSlots();
     testFeedbackParse();
+    testFricFeedbackIsC620();
     testFeedbackBusFiltering();
     testTwoBusFramesIndependent();
     testBusEnableGating();
     testSafeGate();
     testCurrentLimit();
     testOnlineTimeout();
-    printf("test_motor_dji: 12 组用例全过\n");
+    printf("test_motor_dji: 13 组用例全过\n");
     return 0;
 }

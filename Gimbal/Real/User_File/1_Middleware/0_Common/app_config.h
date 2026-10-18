@@ -14,8 +14,8 @@ extern "C" {
 #define APP_CAN_RX_QUEUE_LEN 32U
 
 #define APP_DM_COUNT 2U
-#define APP_DJI_FRIC_COUNT 3U
-#define APP_DJI_COUNT 4U
+#define APP_DJI_FRIC_COUNT 2U
+#define APP_DJI_COUNT 3U
 #define APP_IMU_AXIS_COUNT 3U
 
 #define APP_DM_FRAME_LEN 8U
@@ -23,28 +23,33 @@ extern "C" {
 #define APP_DJI_TX_LEN 8U
 
 /*
- * 发射机构四台 M2006 + C610，【分在两条总线上】，各自有一个 0x200 控制帧：
+ * 发射机构三台 DJI 电机，【分在两条总线上】，各自有一个 0x200 控制帧：
  *
- *   FDCAN2  三个摩擦轮，电调 ID 1/2/3  —— 云台本地
- *   FDCAN3  拨盘，电调 ID 4           —— 拨盘物理装在底盘上，只能走两板之间那条线
+ *   FDCAN2  两个摩擦轮 M3508 + C620，电调 ID 1/2  —— 云台本地
+ *   FDCAN3  拨盘 M2006 + C610，电调 ID 4         —— 拨盘物理装在底盘上，只能走两板之间那条线
  *
  * 电调 ID 用电调上的 SET 按键标定，反馈 ID = 0x200 + 电调 ID。
  *
  * ⚠ 拨盘那一帧只用到 [6..7]，[0..5] 寻址的 ID 1~3 在 FDCAN3 上不存在，填零无副作用。
- * 反过来摩擦轮那一帧的 [6..7] 也是零。
+ * 反过来摩擦轮那一帧只用到 [0..3]，[4..7] 也是零。
  */
 #define APP_DJI_TX_ID 0x200U
 #define APP_DJI_FRIC_1_RX_ID 0x201U  /* 摩擦轮 1，电调 ID 1，FDCAN2。 */
 #define APP_DJI_FRIC_2_RX_ID 0x202U  /* 摩擦轮 2，电调 ID 2，FDCAN2。 */
-#define APP_DJI_FRIC_3_RX_ID 0x203U  /* 摩擦轮 3，电调 ID 3，FDCAN2。 */
 #define APP_DJI_TRIGGER_RX_ID 0x204U /* 拨弹盘，电调 ID 4，FDCAN3。 */
 
 /*
- * C610 控制电流量程：±10000 对应转矩电流 ±10 A（手册 §CAN 通信协议）。
- * ⚠ C620（M3508）是 ±16384 对应 ±20 A，两者不能混用——底盘的轮电机走 C620，
- * 那边是另一份独立的 device_motor_dji.c，别把这个值抄过去。
+ * 控制电流量程，两种电调【不一样】，不能混用（各自手册 §CAN 通信协议）：
+ *
+ *   C620（摩擦轮）  ±16384 对应转矩电流 ±20 A
+ *   C610（拨盘）    ±10000 对应转矩电流 ±10 A
+ *
+ * 故意不留不带电调名的那个常量，用的地方都得写明是哪种电调：摩擦轮按 C610 夹到 10000，
+ * 在 C620 上只剩约 12 A；拨盘按 C620 放到 16384，越界值在 C610 上行为未定义。
+ * 电调与电机下标的对应关系只在 device_motor_dji.c 的 djiEsc[] 里写一次。
  */
-#define APP_DJI_CURRENT_MAX 10000
+#define APP_DJI_C620_CURRENT_MAX 16384
+#define APP_DJI_C610_CURRENT_MAX 10000
 
 /*
  * 转子一圈的编码器计数。反馈里的 encoderRaw 和 speedRpm 都是【转子】口径，
@@ -53,13 +58,13 @@ extern "C" {
 #define APP_DJI_ENCODER_PER_ROUND 8192
 
 /*
- * ⚠⚠ 四台电机的减速比【不一样】，别再当成一个全局常量：
+ * ⚠⚠ 三台电机的减速比【不一样】，别再当成一个全局常量：
  *
- *   三个摩擦轮  —— P36 减速箱【已经物理拆掉】，直驱，1:1。
- *                  所以它们的 speedRpm 就是轮子转速，【不要再除 36】。
- *   拨盘        —— P36 减速箱【还在】，36:1。
+ *   两个摩擦轮 M3508  —— P19 减速箱（3591/187）【已经物理拆掉】，直驱，1:1。
+ *                        所以它们的 speedRpm 就是轮子转速，【不要再除 19】。
+ *   拨盘 M2006        —— P36 减速箱【还在】，36:1。
  *
- * 拨盘算错这个数，"一发"就差 36 倍；摩擦轮算错则是速度环的量纲整体偏 36 倍。
+ * 拨盘算错这个数，"一发"就差 36 倍；摩擦轮算错则是速度环的量纲整体偏约 19 倍。
  * 减速比与电机下标的对应关系只在 device_motor_dji.c 的 djiGearRatio[] 里写一次。
  */
 #define APP_DJI_FRIC_GEAR_RATIO 1.0f
@@ -77,18 +82,15 @@ extern "C" {
 
 static_assert((APP_DJI_TX_SLOT(APP_DJI_FRIC_1_RX_ID) + 1U < APP_DJI_TX_LEN) &&
                   (APP_DJI_TX_SLOT(APP_DJI_FRIC_2_RX_ID) + 1U < APP_DJI_TX_LEN) &&
-                  (APP_DJI_TX_SLOT(APP_DJI_FRIC_3_RX_ID) + 1U < APP_DJI_TX_LEN) &&
                   (APP_DJI_TX_SLOT(APP_DJI_TRIGGER_RX_ID) + 1U < APP_DJI_TX_LEN),
               "shooter ESC id out of 0x200 frame range");
 /*
- * 只要求三个摩擦轮互不相同：它们共用 FDCAN2 的同一帧，撞 ID 会互相覆盖字节。
+ * 只要求两个摩擦轮互不相同：它们共用 FDCAN2 的同一帧，撞 ID 会互相覆盖字节。
  * 拨盘在另一条总线上，ID 与摩擦轮重复在协议上是合法的（现取 4 只是为了看总线
  * trace 时不歧义），所以【故意】不把它纳入这条判据。
  * 槽位由 ID 线性推出，ID 互不相同即等价于槽位互不相同。
  */
-static_assert((APP_DJI_FRIC_1_RX_ID != APP_DJI_FRIC_2_RX_ID) &&
-                  (APP_DJI_FRIC_2_RX_ID != APP_DJI_FRIC_3_RX_ID) &&
-                  (APP_DJI_FRIC_1_RX_ID != APP_DJI_FRIC_3_RX_ID),
+static_assert(APP_DJI_FRIC_1_RX_ID != APP_DJI_FRIC_2_RX_ID,
               "friction ESC ids must differ");
 
 /*
@@ -162,7 +164,7 @@ static_assert((APP_DJI_FRIC_1_RX_ID != APP_DJI_FRIC_2_RX_ID) &&
 #if APP_TRIGGER_MOTOR == APP_TRIGGER_LK4005
 #define APP_TRIGGER_RAW_PER_A APP_LK_IQ_PER_A
 #else
-#define APP_TRIGGER_RAW_PER_A ((float)APP_DJI_CURRENT_MAX / 10.0f) /* C610：±10000 = ±10 A */
+#define APP_TRIGGER_RAW_PER_A ((float)APP_DJI_C610_CURRENT_MAX / 10.0f) /* C610：±10000 = ±10 A */
 #endif
 
 /*
@@ -313,6 +315,20 @@ static_assert((APP_DJI_FRIC_1_RX_ID != APP_DJI_FRIC_2_RX_ID) &&
 #ifndef APP_SHOOT_TRIGGER_DIR
 #define APP_SHOOT_TRIGGER_DIR (+1.0f)
 #endif
+
+/*
+ * 两个摩擦轮的转向：+1 表示"正转速（正电流）= 这台朝出弹方向转"，-1 表示反过来。
+ * 每台的目标转速 = 方向 × Shooter.fric_target_rpm，fric_target_rpm 本身恒为正。
+ *
+ * ⚠⚠ 【待实机核对】，现在是默认值。两轮面对面夹弹，出弹时两轮转向相反；两台电机同侧、
+ * 轴朝同一边装时，命令就是一正一负。哪台取正取决于安装和接线，没上机看过。
+ * 核对方法：不装弹，Watch 把 Shooter.fric_target_rpm 先调低（如 1000），看两轮在夹弹处
+ * 是不是都朝出弹方向转——哪台反了就只改哪台的符号。
+ *
+ * 不留 #ifndef：一正一负本身就让 test_shooter 把两种符号都测到，漏乘的话总有一台错。
+ */
+#define APP_SHOOT_FRIC_1_DIR (+1.0f)
+#define APP_SHOOT_FRIC_2_DIR (-1.0f)
 
 /*
  * 控制器第一阶段只计算中间状态和安全输出。

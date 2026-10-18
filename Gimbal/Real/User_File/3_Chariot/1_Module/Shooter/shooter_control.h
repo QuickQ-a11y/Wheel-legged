@@ -18,7 +18,7 @@ extern "C" {
 /* 故障位，按台记（fric_fault[] / trigger_fault）。置位只清【那一台】的最终输出，不阻断请求量的计算。 */
 #define SHOOTER_FAULT_NONE 0x00U
 #define SHOOTER_FAULT_MOTOR 0x01U /* 电机离线（只对已使能总线上的电机计入）。 */
-#define SHOOTER_FAULT_ESC 0x02U   /* 电机上报非零错误码（三相未接…；拨盘堵转交给卡弹状态机）。 */
+#define SHOOTER_FAULT_ESC 0x02U   /* 拨盘电调上报非零错误码（三相未接…；堵转交给卡弹状态机）。摩擦轮的 C620 不报。 */
 
 /*
  * 拨弹状态机。语义由 app_config.h 的 APP_SHOOT_BURST_* 注释块定义：
@@ -69,7 +69,7 @@ typedef enum
  */
 typedef struct
 {
-    float fric_target_rpm; /* 摩擦轮目标转速，rpm。减速箱已拆，即轮速。Watch 可改。 */
+    float fric_target_rpm; /* 摩擦轮出弹方向上的目标轮速，rpm，恒为正；每台再乘自己的方向。Watch 可改。 */
     /*
      * 拨盘力矩限幅，按电流给，A。Watch 可改，重启回到 Shooter_Config 的默认值。
      * 速度环输出之后硬限幅（刹车也受它约束），卡弹的"电流饱和"阈值按比例跟着它走。
@@ -119,7 +119,7 @@ typedef struct
     motor_dji_state_t trigger_motor;
 #endif
     algorithm_pid_state_t fric_pid[APP_DJI_FRIC_COUNT];
-    uint8_t fric_ready_flag; /* 三个摩擦轮都进了 fric_ready_rpm 带内。 */
+    uint8_t fric_ready_flag; /* 两个摩擦轮都进了 fric_ready_rpm 带内（各按自己的方向比）。 */
 
     /*
      * 拨盘。⚠ 这一组全是【输出轴】口径（减速箱还在，36:1），
